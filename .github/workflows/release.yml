@@ -154,10 +154,25 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     # Requires a fine-grained PAT (`HOMEBREW_TAP_TOKEN`) with write to
-    # the AperionAI/homebrew-tap repository.
-    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+    # the AperionAI/homebrew-tap repository. Job runs every release; the
+    # bump step is skipped automatically if the secret is unset (secrets
+    # cannot be referenced from job-level `if:` expressions).
     steps:
-      - uses: dawidd6/action-homebrew-bump-formula@v3
+      - name: Detect Homebrew tap token
+        id: check
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then
+            echo "has_token=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HOMEBREW_TAP_TOKEN secret not set — skipping tap bump."
+          fi
+
+      - name: Bump Homebrew formula
+        if: steps.check.outputs.has_token == 'true'
+        uses: dawidd6/action-homebrew-bump-formula@v3
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           tap:   AperionAI/homebrew-tap
