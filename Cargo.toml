@@ -1,0 +1,55 @@
+[package]
+name = "aperion-shield"
+version = "0.1.0"
+edition = "2021"
+description = "Aperion Shield — a local MCP guardrail for AI coding agents. Standalone, free, open source."
+license = "Apache-2.0"
+authors = ["Aperion <support@aperion.ai>"]
+readme = "README.md"
+keywords = ["mcp", "ai", "guardrails", "security", "agent"]
+categories = ["command-line-utilities", "development-tools"]
+repository = "https://github.com/AperionAI/shield"
+
+# Standalone crate — intentionally NOT a member of the enterprise smartflow
+# workspace. The free standalone product ships independently with its own
+# release cadence, lean dependency tree, and minimal feature surface.
+# The Shield rule engine here is a self-contained vendored copy of the
+# logic in ../../src/shield/; both sides parse the same YAML schema so
+# rules authored for one work in the other.
+[workspace]
+
+[[bin]]
+name = "aperion-shield"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime — we only need single-thread + stdio support.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "sync", "time"] }
+# JSON-RPC framing for MCP wire protocol.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+# Rule engine primitives.
+regex = "1"
+once_cell = "1"
+# CLI parsing.
+clap = { version = "4", features = ["derive"] }
+# Logging to stderr (stdout is reserved for MCP JSON-RPC frames).
+log = "0.4"
+env_logger = "0.11"
+# Error handling.
+anyhow = "1"
+thiserror = "1"
+# UUIDs for ticket ids.
+uuid = { version = "1", features = ["v4"] }
+# RFC 3339 timestamps.
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 1

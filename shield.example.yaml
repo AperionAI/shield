@@ -1,0 +1,59 @@
+# aperion-shield user ruleset example.
+#
+# Drop this file at one of the following paths to have it picked up
+# automatically (in priority order):
+#
+#   1. Path passed via `--rules <path>` on the command line
+#   2. $APERION_SHIELD_RULES env var
+#   3. ./.aperion-shield/shield.yaml (project-local)
+#   4. ~/.aperion-shield/shield.yaml (per-user)
+#
+# Otherwise the bundled defaults (covers DROP DATABASE, rm -rf /,
+# git push --force, etc.) are used.
+#
+# Schema: https://github.com/AperionAI/shield/blob/main/SCHEMA.md
+# Severity tiers:
+#   Critical → hard block (JSON-RPC error to the IDE)
+#   High     → human approval required (60s timeout, default-deny)
+#   Medium   → allow + warn header
+#   Low      → allow + audit log line only
+
+shieldset:
+  version: 1
+  rules:
+    - id: company.no_writes_to_prod_tables
+      severity: Critical
+      where: tool_call
+      match:
+        tool: [execute_sql, postgres.query, postgres.execute, mysql.query]
+        any_param_matches:
+          - '(?i)\b(UPDATE|DELETE\s+FROM)\s+prod_'
+      reason: "Direct writes to prod_* tables are forbidden — open a migration PR."
+
+    - id: company.no_drop_anything
+      severity: Critical
+      where: tool_call
+      match:
+        tool: [execute_sql, postgres.query, mysql.query, snowflake.query]
+        sql_matches:
+          - '(?i)\bDROP\s+(DATABASE|TABLE|SCHEMA|INDEX|VIEW)\b'
+      reason: "DROP statements must go through DBA approval, not the agent."
+
+    - id: company.no_force_push_anywhere
+      severity: High
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, git]
+        any_param_matches:
+          - '(?i)\bgit\s+push\s+(.*\s)?--force(-with-lease)?'
+          - '(?i)\bgit\s+push\s+-f\b'
+      reason: "Force pushes need explicit approval — even to non-protected branches."
+
+    - id: company.no_secrets_in_logs
+      severity: Medium
+      where: llm_response
+      match:
+        text_matches:
+          - '(?i)(AWS|aws)_(SECRET|secret)_(ACCESS|access)_(KEY|key)'
+          - '(?i)\b(api[_-]?key|password)\s*=\s*["''][^"'']{8,}'
+      reason: "Assistant appears to be quoting a real secret — review before applying."

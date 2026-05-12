@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Runtime
+/.aperion-shield/
+
+# Local secrets (none expected, but just in case)
+.env
+.env.local
