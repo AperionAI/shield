@@ -1,0 +1,175 @@
+# Smartflow Shield default ruleset.
+#
+# Loaded at startup from SHIELD_RULESET_PATH (default
+# /etc/smartflow/shieldset.yaml). When that file is missing the proxy falls
+# back to a copy of THIS file, embedded into the binary at compile time —
+# so we always ship a non-empty default.
+#
+# Rule schema (per src/shield/rules.rs):
+#
+#   - id:        unique rule id (used in audit log + IDE error payload)
+#     severity:  Critical | High | Medium | Low
+#                  Critical -> Block        (hard 403 / tool error)
+#                  High     -> Approval     (queue, IDE polls for approval)
+#                  Medium   -> AllowWithWarn (x-shield-warn header + audit)
+#                  Low      -> Allow        (audit only)
+#     where:     tool_call | llm_response
+#     match:     # OR-of-conditions; first hit fires the rule
+#       tool: ["execute_sql", ...]            # optional whitelist
+#       any_param_matches: ['regex', ...]      # any string in params (recursive)
+#       sql_matches:       ['regex', ...]      # extracted SQL strings only
+#       text_matches:      ['regex', ...]      # llm_response body (assistant content)
+#     anomaly:   # alternative to `match`
+#       kind: destructive_verb_burst
+#       window_seconds: 300
+#       threshold: 5
+#     reason:    Human-readable justification (returned to IDE / banner)
+
+shieldset:
+  version: 1
+
+  rules:
+    # ─────────────────────────────────────────────────────────────────
+    # SQL destructive ops
+    # ─────────────────────────────────────────────────────────────────
+    - id: sql.drop_database
+      severity: Critical
+      where: tool_call
+      match:
+        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query", "snowflake.query", "bigquery.query"]
+        sql_matches: ['(?i)\bDROP\s+DATABASE\b']
+      reason: "DROP DATABASE is never auto-allowed."
+
+    - id: sql.drop_table_or_schema
+      severity: High
+      where: tool_call
+      match:
+        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query", "snowflake.query", "bigquery.query"]
+        sql_matches: ['(?i)\bDROP\s+(TABLE|SCHEMA)\s+\w+', '(?i)\bTRUNCATE\s+TABLE\b']
+      reason: "DROP TABLE / TRUNCATE TABLE require human approval."
+
+    - id: sql.unscoped_delete
+      severity: High
+      where: tool_call
+      match:
+        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query", "snowflake.query", "bigquery.query"]
+        # DELETE FROM <t>;  with no WHERE clause anywhere in the statement.
+        # Uses an application-layer predicate (Rust's `regex` crate has no
+        # lookbehind, so a pure-regex form would miss multi-line statements
+        # and ones split across semicolons). The predicate splits on `;`
+        # and checks each fragment independently.
+        sql_predicates: [unscoped_delete]
+      reason: "Unbounded DELETE FROM needs approval — add a WHERE clause."
+
+    - id: sql.unscoped_update
+      severity: High
+      where: tool_call
+      match:
+        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query", "snowflake.query", "bigquery.query"]
+        # UPDATE <t> SET ... ;  with no WHERE clause anywhere in the statement.
+        # Same predicate strategy as sql.unscoped_delete — catches single-
+        # and multi-statement inputs, schema-qualified tables (public.foo),
+        # and case-insensitive verb spellings.
+        sql_predicates: [unscoped_update]
+      reason: "Unbounded UPDATE affects every row — add a WHERE clause."
+
+    - id: sql.grant_or_revoke_all
+      severity: Medium
+      where: tool_call
+      match:
+        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query"]
+        sql_matches: ['(?i)\b(GRANT|REVOKE)\s+ALL\b']
+      reason: "Wildcard privilege change — recorded for review."
+
+    # ─────────────────────────────────────────────────────────────────
+    # Git destructive ops
+    # ─────────────────────────────────────────────────────────────────
+    - id: git.force_push_protected
+      severity: Critical
+      where: tool_call
+      match:
+        tool: ["run_terminal", "bash", "shell", "execute_command", "exec", "git", "github.run_command"]
+        any_param_matches:
+          - '\bgit\s+push\s+.*(--force|--force-with-lease|-f)\s+(origin\s+)?(main|master|prod|release/.*)\b'
+      reason: "Force-push to a protected branch is forbidden."
+
+    - id: git.history_rewrite
+      severity: High
+      where: tool_call
+      match:
+        tool: ["run_terminal", "bash", "shell", "execute_command", "exec", "git", "github.run_command"]
+        any_param_matches:
+          - '\bgit\s+(filter-branch|filter-repo|reflog\s+expire|gc\s+--prune=now|update-ref\s+-d|reset\s+--hard\s+HEAD~)'
+      reason: "Rewriting shared git history needs human approval."
+
+    - id: git.branch_force_delete
+      severity: Medium
+      where: tool_call
+      match:
+        tool: ["run_terminal", "bash", "shell", "execute_command", "exec", "git", "github.run_command"]
+        any_param_matches: ['\bgit\s+branch\s+-D\s+\S+']
+      reason: "Force-delete of a local branch — verify before continuing."
+
+    # ─────────────────────────────────────────────────────────────────
+    # Filesystem destructive ops
+    # ─────────────────────────────────────────────────────────────────
+    - id: fs.recursive_delete_root
+      severity: Critical
+      where: tool_call
+      match:
+        tool: ["run_terminal", "bash", "shell", "execute_command", "exec"]
+        any_param_matches: ['rm\s+-rf?\s+(/|/\*|\$HOME|~)(\s|$|;|&|\|)']
+      reason: "rm -rf on filesystem root is forbidden."
+
+    - id: fs.delete_production_path
+      severity: High
+      where: tool_call
+      match:
+        tool: ["filesystem.delete_file", "filesystem.delete_directory", "fs.delete", "fs.remove", "run_terminal", "bash", "shell"]
+        any_param_matches:
+          - '(/etc/|/var/|/usr/|/boot/|/opt/Smartflow_docker/|/opt/smartflow-source/|/data/|/srv/|/production/|/prod/|/release/)'
+      reason: "Deletion under a production-looking path needs approval."
+
+    - id: fs.dd_to_block_device
+      severity: Critical
+      where: tool_call
+      match:
+        tool: ["run_terminal", "bash", "shell", "execute_command", "exec"]
+        any_param_matches: ['\bdd\s+if=.*\s+of=/dev/(sd|nvme|disk|hd)']
+      reason: "dd to a raw block device wipes the disk — forbidden."
+
+    # ─────────────────────────────────────────────────────────────────
+    # LLM response patterns (the assistant *plans* something destructive)
+    # ─────────────────────────────────────────────────────────────────
+    - id: llm.suggests_drop_database
+      severity: High
+      where: llm_response
+      match:
+        text_matches: ['(?i)\b(DROP\s+DATABASE|TRUNCATE\s+TABLE\s+\w+\s*;)']
+      reason: "Assistant plan contains destructive SQL — confirm before executing."
+
+    - id: llm.suggests_force_push
+      severity: Medium
+      where: llm_response
+      match:
+        text_matches: ['(?i)git\s+push\s+.*(--force|--force-with-lease|-f)\b.*\b(main|master|prod)\b']
+      reason: "Assistant plan suggests force-push to a protected branch."
+
+    - id: llm.suggests_rm_rf
+      severity: Medium
+      where: llm_response
+      match:
+        text_matches: ['(?i)\brm\s+-rf?\s+(/|/\*|\$HOME|~)']
+      reason: "Assistant plan suggests rm -rf at filesystem root."
+
+    # ─────────────────────────────────────────────────────────────────
+    # Anomaly: high volume of destructive verbs in one session
+    # ─────────────────────────────────────────────────────────────────
+    - id: anomaly.destructive_burst
+      severity: High
+      where: tool_call
+      anomaly:
+        kind: destructive_verb_burst
+        window_seconds: 300
+        threshold: 5
+      reason: "Destructive operation burst detected — pausing for review."

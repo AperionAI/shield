@@ -18,10 +18,10 @@ RUN mkdir src && echo "fn main(){}" > src/main.rs && \
     cargo build --release && \
     rm -rf src
 
-# Bring in the real source. The standalone crate also needs the
-# bundled config from the parent repo at build time.
-COPY src ./src
-COPY ../../config/shieldset.yaml /src/../../config/shieldset.yaml
+# Bring in the real source and the vendored shieldset that
+# `include_str!` in src/engine.rs embeds at compile time.
+COPY src    ./src
+COPY config ./config
 
 RUN cargo build --release && \
     strip target/release/aperion-shield

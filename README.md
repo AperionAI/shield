@@ -172,7 +172,7 @@ If 60 seconds pass with no decision, the call is denied.
 ## Custom rules
 
 The full schema lives in
-[`config/shieldset.yaml`](../../config/shieldset.yaml). A minimal custom
+[`config/shieldset.yaml`](config/shieldset.yaml). A minimal custom
 rule:
 
 ```yaml

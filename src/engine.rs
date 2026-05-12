@@ -236,7 +236,7 @@ impl Engine {
     /// Bundled defaults — the same YAML used by the enterprise build,
     /// embedded at compile time so the binary always has *some* ruleset.
     pub fn builtin_default() -> Self {
-        let yaml = include_str!("../../../config/shieldset.yaml");
+        let yaml = include_str!("../config/shieldset.yaml");
         Self::from_yaml(yaml).expect("bundled shieldset.yaml must parse")
     }
 
