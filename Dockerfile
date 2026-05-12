@@ -8,14 +8,20 @@
 # audited in seconds and has no shell / package manager attack surface.
 
 # ─── Build stage ───────────────────────────────────────────────────────
-FROM rust:1.81-slim-bookworm AS build
+# Pin to a Rust release that supports edition 2024 (≥ 1.85). Several of
+# our transitive deps require it; rust:1.81 fails the dependency-cache
+# layer with "edition2024 is unstable".
+FROM rust:1.95-slim-bookworm AS build
 
 WORKDIR /src
 
-# Cache the dependency layer first
-COPY Cargo.toml ./
+# Cache the dependency layer first. Both Cargo.toml AND Cargo.lock are
+# copied so the stub-build resolves the exact same versions the real
+# build will use; otherwise the cache is silently invalidated on every
+# real build and we re-download the universe twice.
+COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main(){}" > src/main.rs && \
-    cargo build --release && \
+    cargo build --release --locked && \
     rm -rf src
 
 # Bring in the real source and the vendored shieldset that
@@ -23,7 +29,7 @@ RUN mkdir src && echo "fn main(){}" > src/main.rs && \
 COPY src    ./src
 COPY config ./config
 
-RUN cargo build --release && \
+RUN cargo build --release --locked && \
     strip target/release/aperion-shield
 
 # ─── Runtime stage ─────────────────────────────────────────────────────

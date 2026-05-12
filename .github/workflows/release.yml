@@ -76,7 +76,17 @@ jobs:
           else
             tar -czf "${ARCHIVE}" *
           fi
-          shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          # Portable sha256: shasum on macOS/Linux, sha256sum on most
+          # Linux distros, certutil on Windows (no shasum on the
+          # windows-latest runner).
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          elif command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          else
+            HASH=$(certutil -hashfile "${ARCHIVE}" SHA256 | sed -n '2p' | tr -d ' \r\n')
+            echo "${HASH}  ${ARCHIVE}" > "${ARCHIVE}.sha256"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
