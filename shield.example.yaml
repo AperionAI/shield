@@ -13,10 +13,10 @@
 #
 # Schema: https://github.com/AperionAI/shield/blob/main/SCHEMA.md
 # Severity tiers:
-#   Critical → hard block (JSON-RPC error to the IDE)
-#   High     → human approval required (60s timeout, default-deny)
-#   Medium   → allow + warn header
-#   Low      → allow + audit log line only
+#   Critical -> hard block (JSON-RPC error to the IDE)
+#   High     -> human approval required (60s timeout, default-deny)
+#   Medium   -> allow + warn header
+#   Low      -> allow + audit log line only
 
 shieldset:
   version: 1
@@ -28,7 +28,7 @@ shieldset:
         tool: [execute_sql, postgres.query, postgres.execute, mysql.query]
         any_param_matches:
           - '(?i)\b(UPDATE|DELETE\s+FROM)\s+prod_'
-      reason: "Direct writes to prod_* tables are forbidden — open a migration PR."
+      reason: "Direct writes to prod_* tables are forbidden -- open a migration PR."
 
     - id: company.no_drop_anything
       severity: Critical
@@ -47,7 +47,7 @@ shieldset:
         any_param_matches:
           - '(?i)\bgit\s+push\s+(.*\s)?--force(-with-lease)?'
           - '(?i)\bgit\s+push\s+-f\b'
-      reason: "Force pushes need explicit approval — even to non-protected branches."
+      reason: "Force pushes need explicit approval -- even to non-protected branches."
 
     - id: company.no_secrets_in_logs
       severity: Medium
@@ -56,4 +56,4 @@ shieldset:
         text_matches:
           - '(?i)(AWS|aws)_(SECRET|secret)_(ACCESS|access)_(KEY|key)'
           - '(?i)\b(api[_-]?key|password)\s*=\s*["''][^"'']{8,}'
-      reason: "Assistant appears to be quoting a real secret — review before applying."
+      reason: "Assistant appears to be quoting a real secret -- review before applying."

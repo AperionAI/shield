@@ -4,11 +4,11 @@
 #
 # Built and published to ghcr.io/aperionai/shield:<version> by
 # .github/workflows/shield-release.yml. The image is intentionally
-# minimal — just the static binary on top of distroless so it can be
+# minimal -- just the static binary on top of distroless so it can be
 # audited in seconds and has no shell / package manager attack surface.
 
 # ─── Build stage ───────────────────────────────────────────────────────
-# Pin to a Rust release that supports edition 2024 (≥ 1.85). Several of
+# Pin to a Rust release that supports edition 2024 (>= 1.85). Several of
 # our transitive deps require it; rust:1.81 fails the dependency-cache
 # layer with "edition2024 is unstable".
 FROM rust:1.95-slim-bookworm AS build
@@ -21,7 +21,7 @@ WORKDIR /src
 # real build and we re-download the universe twice.
 #
 # v0.2.0+ has both a [lib] (src/lib.rs) AND a [bin] (src/main.rs)
-# target, so the stub must satisfy both — `cargo build` fails fast if
+# target, so the stub must satisfy both -- `cargo build` fails fast if
 # any target named in Cargo.toml is missing its entry point.
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && \

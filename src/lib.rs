@@ -1,4 +1,4 @@
-//! Aperion Shield — library surface.
+//! Aperion Shield -- library surface.
 //!
 //! This crate exposes the rule engine and its adaptive layers so that:
 //!
@@ -12,11 +12,11 @@
 //!
 //! The public API is intentionally small. The main types you'll touch:
 //!
-//!   * [`Engine`] — load a `shieldset.yaml` and evaluate calls.
-//!   * [`Adjustments`] — adaptive inputs (prod workspace, memory, burst).
-//!   * [`Evaluation`] — what fired, what scored, what tier we landed on.
-//!   * [`decide`] — turn an [`Evaluation`] into a concrete [`Decision`].
-//!   * [`WorkspaceContext`], [`DecisionMemory`], [`BurstDetector`] —
+//!   * [`Engine`] -- load a `shieldset.yaml` and evaluate calls.
+//!   * [`Adjustments`] -- adaptive inputs (prod workspace, memory, burst).
+//!   * [`Evaluation`] -- what fired, what scored, what tier we landed on.
+//!   * [`decide`] -- turn an [`Evaluation`] into a concrete [`Decision`].
+//!   * [`WorkspaceContext`], [`DecisionMemory`], [`BurstDetector`] --
 //!     the three adaptive helpers, each independently constructable.
 
 pub mod burst;

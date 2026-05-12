@@ -2,7 +2,7 @@
 name = "aperion-shield"
 version = "0.2.0"
 edition = "2021"
-description = "Aperion Shield — a local MCP guardrail for AI coding agents. Standalone, free, open source."
+description = "Aperion Shield -- a local MCP guardrail for AI coding agents. Standalone, free, open source."
 license = "Apache-2.0"
 authors = ["Aperion <support@aperion.ai>"]
 readme = "README.md"
@@ -10,7 +10,7 @@ keywords = ["mcp", "ai", "guardrails", "security", "agent"]
 categories = ["command-line-utilities", "development-tools"]
 repository = "https://github.com/AperionAI/shield"
 
-# Standalone crate — intentionally NOT a member of the enterprise smartflow
+# Standalone crate -- intentionally NOT a member of the enterprise smartflow
 # workspace. The free standalone product ships independently with its own
 # release cadence, lean dependency tree, and minimal feature surface.
 # The Shield rule engine here is a self-contained vendored copy of the
@@ -30,7 +30,7 @@ name = "aperion-shield"
 path = "src/main.rs"
 
 [dependencies]
-# Async runtime — we only need single-thread + stdio support.
+# Async runtime -- we only need single-thread + stdio support.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "sync", "time"] }
 # JSON-RPC framing for MCP wire protocol.
 serde = { version = "1", features = ["derive"] }

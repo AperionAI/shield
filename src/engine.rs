@@ -1,11 +1,11 @@
-//! Aperion Shield — self-contained rule engine for the standalone product.
+//! Aperion Shield -- self-contained rule engine for the standalone product.
 //!
-//! Schema overview (YAML, v2 — v1 documents still load unchanged):
+//! Schema overview (YAML, v2 -- v1 documents still load unchanged):
 //!
 //! ```yaml
 //! shieldset:
 //!   version: 2
-//!   policy:                # all optional — v1 documents have no `policy:`
+//!   policy:                # all optional -- v1 documents have no `policy:`
 //!     workspace_probe:
 //!       enabled: true
 //!       prod_signals: [".env.production", "prod/", "Procfile"]
@@ -39,7 +39,7 @@
 //!       reason: "..."
 //! ```
 //!
-//! Severity → outcome mapping for the standalone:
+//! Severity -> outcome mapping for the standalone:
 //!
 //! | Severity | Decision                  |
 //! |----------|---------------------------|
@@ -62,7 +62,7 @@
 //!      is in progress.
 //!
 //! Memory may *demote* by one tier when the user has approved this exact
-//! fingerprint ≥ N times with no recent denials.
+//! fingerprint >= N times with no recent denials.
 //!
 //! All adjustments compose monotonically: the worst (highest-rank)
 //! severity wins.
@@ -175,7 +175,7 @@ pub struct Adjustments {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// YAML schema (v1 + v2 — both deserialise via the same Root)
+// YAML schema (v1 + v2 -- both deserialise via the same Root)
 // ─────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -545,7 +545,7 @@ impl Engine {
         Ok(Engine { rules, policy })
     }
 
-    /// Bundled defaults — the same YAML used by the enterprise build,
+    /// Bundled defaults -- the same YAML used by the enterprise build,
     /// embedded at compile time so the binary always has *some* ruleset.
     pub fn builtin_default() -> Self {
         let yaml = include_str!("../config/shieldset.yaml");
@@ -777,14 +777,14 @@ fn matches_sql_predicate(p: SqlPredicate, sql: &str) -> bool {
 
 /// Fingerprint a (rule_id, params) tuple. We hash rule_id + a stable
 /// JSON serialisation of the parameters; the first 16 hex chars are
-/// enough — 64 bits of randomness, collision risk negligible for a
+/// enough -- 64 bits of randomness, collision risk negligible for a
 /// per-user local file with O(thousands) of entries.
 pub fn fingerprint(rule_id: &str, params: &serde_json::Value) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(rule_id.as_bytes());
     h.update(b"\x00");
-    // Canonical JSON — serde_json::to_string sorts maps by insertion
+    // Canonical JSON -- serde_json::to_string sorts maps by insertion
     // order, not lexicographically, but for our agent-supplied
     // params the input is stable per call site, and we only need
     // intra-process stability (not cross-tool reproducibility).
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn bundled_default_loads_with_many_rules() {
         let e = engine();
-        assert!(e.rules.len() >= 30, "expected ≥ 30 default rules, got {}", e.rules.len());
+        assert!(e.rules.len() >= 30, "expected >= 30 default rules, got {}", e.rules.len());
     }
 
     #[test]
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn workspace_prod_bumps_severity() {
         let e = engine();
-        // GRANT ALL is Medium by default. In a prod workspace it should bump to High → Approval.
+        // GRANT ALL is Medium by default. In a prod workspace it should bump to High -> Approval.
         let p = json!({"arguments": {"query": "GRANT ALL ON foo TO bar"}});
         let mut adj = Adjustments::default();
         adj.workspace_is_prod = true;
@@ -879,7 +879,7 @@ mod tests {
         let mut adj = Adjustments::default();
         adj.fingerprint_repeatedly_approved = true;
         let ev = e.evaluate("execute_sql", &p, adj);
-        // Was Medium → demoted to Low → Allow.
+        // Was Medium -> demoted to Low -> Allow.
         assert!(matches!(decide(&ev), Decision::Allow));
     }
 
@@ -905,7 +905,7 @@ mod tests {
             "query": "GRANT ALL ON foo TO bar"
         }});
         let ev = e.evaluate("run_terminal", &p, Adjustments::default());
-        // Two Medium rules at 2 points each = 4 → composite Medium (still),
+        // Two Medium rules at 2 points each = 4 -> composite Medium (still),
         // but proves the matches stack.
         assert!(ev.matches.len() >= 1);
         assert!(ev.composite_points >= ev.matches[0].points);

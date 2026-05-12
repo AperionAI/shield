@@ -1,10 +1,10 @@
-//! Workspace context probe — runs once at startup and reports whether
+//! Workspace context probe -- runs once at startup and reports whether
 //! the current working directory looks like a production-managed repo.
 //! When it does, the engine bumps every matched rule's severity by one
 //! tier. The signals are deliberately conservative: only files that
 //! strongly imply "this codebase manages production".
 //!
-//! Cheap by design — does not recurse, does not stat outside the cwd
+//! Cheap by design -- does not recurse, does not stat outside the cwd
 //! root, returns in a millisecond. Designed to run on every Shield
 //! launch with zero perceptible cost.
 
@@ -26,7 +26,7 @@ impl WorkspaceContext {
         Self::probe_at(policy, &root)
     }
 
-    /// Probe an arbitrary root directory. Exists primarily for tests —
+    /// Probe an arbitrary root directory. Exists primarily for tests --
     /// the production code path goes through `probe()`, which is the
     /// single-arg convenience wrapper.
     pub fn probe_at(policy: &Policy, root: &Path) -> Self {
@@ -50,7 +50,7 @@ fn signal_present(root: &Path, signal: &str) -> bool {
         let p = root.join(dir);
         return p.is_dir();
     }
-    // Bare filename — checked at cwd and one level under common
+    // Bare filename -- checked at cwd and one level under common
     // configuration dirs (config/, deploy/, ops/). One level is enough
     // to catch nested production manifests without unbounded recursion.
     if root.join(signal).exists() {

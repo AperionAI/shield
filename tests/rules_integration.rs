@@ -230,7 +230,7 @@ fn fs_sensitive_path_ssh_approval() {
         json!({"arguments": {"command": "cat ~/.ssh/id_rsa"}}),
     );
     // This matches BOTH sensitive_path (HIGH) and secret.read_ssh_or_aws_key (HIGH).
-    // Either is acceptable as the primary — confirm we got an approval.
+    // Either is acceptable as the primary -- confirm we got an approval.
     match d {
         Decision::Approval { rule_id, .. } => assert!(
             rule_id == "fs.sensitive_path_write_or_delete"
@@ -256,7 +256,7 @@ fn fs_find_delete_sweep_approval() {
         "run_terminal",
         json!({"arguments": {"command": "find /var -name '*.bak' -delete"}}),
     );
-    // Matches both find_delete and sensitive_path — accept either approval.
+    // Matches both find_delete and sensitive_path -- accept either approval.
     assert!(matches!(d, Decision::Approval { .. }));
 }
 

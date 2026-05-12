@@ -33,7 +33,7 @@ jobs:
             linker:  aarch64-linux-gnu-gcc
           # Both macOS targets run on macos-14 (Apple Silicon). The x86_64
           # binary is produced via cross-compilation (`rustup target add
-          # x86_64-apple-darwin`) — the macos-13 runner has been
+          # x86_64-apple-darwin`) -- the macos-13 runner has been
           # deprecated by GitHub and the queue is effectively dead.
           - target: x86_64-apple-darwin
             os:     macos-14
@@ -181,7 +181,7 @@ jobs:
             echo "has_token=true"  >> "$GITHUB_OUTPUT"
           else
             echo "has_token=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::HOMEBREW_TAP_TOKEN secret not set — skipping tap bump."
+            echo "::notice::HOMEBREW_TAP_TOKEN secret not set -- skipping tap bump."
           fi
 
       - name: Bump Homebrew formula

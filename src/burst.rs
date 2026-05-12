@@ -26,7 +26,7 @@ impl BurstDetector {
     }
 
     /// Record a destructive event observed at `Instant::now()` and
-    /// return whether we are currently inside a burst (count ≥ threshold
+    /// return whether we are currently inside a burst (count >= threshold
     /// within the trailing window).
     pub fn observe(&self) -> bool {
         if !self.cfg.enabled { return false; }
@@ -95,7 +95,7 @@ mod tests {
         let b = BurstDetector::new(cfg(2, 0)); // zero-second window: every observe trims everything before it
         b.observe();
         std::thread::sleep(Duration::from_millis(5));
-        // Second observe trims the prior one; we have 1 event, threshold 2 → no burst.
+        // Second observe trims the prior one; we have 1 event, threshold 2 -> no burst.
         assert!(!b.observe());
     }
 

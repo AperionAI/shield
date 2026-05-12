@@ -1,18 +1,18 @@
-//! Local decision memory — append-only JSONL of past approve/deny
+//! Local decision memory -- append-only JSONL of past approve/deny
 //! decisions per (rule_id, argv-fingerprint). All processing is
 //! purely local; nothing is ever sent off the box.
 //!
 //! Two adaptive behaviours derive from this log:
 //!
 //!   * Demote-after-N-approvals: if the user has approved this exact
-//!     fingerprint ≥ `demote_after_approvals` times with no recent
+//!     fingerprint >= `demote_after_approvals` times with no recent
 //!     denial, severity drops one tier.
 //!
 //!   * Escalate-on-recent-deny: if any denial exists within
 //!     `escalate_on_deny_days`, severity bumps one tier.
 //!
 //! The log file lives at `<cwd>/.aperion-shield/decisions.jsonl` by
-//! default — co-located with the inbox so users only manage one
+//! default -- co-located with the inbox so users only manage one
 //! Shield-state directory per project. A user-global fallback under
 //! `~/.aperion-shield/` is checked when the project directory is not
 //! writable (e.g. read-only mounts in CI).
@@ -59,7 +59,7 @@ pub struct DecisionMemory {
 
 impl DecisionMemory {
     /// Open (or initialise) the on-disk log. Returns even if the file
-    /// doesn't exist yet — first writes will create it.
+    /// doesn't exist yet -- first writes will create it.
     pub fn open(cfg: DecisionMemoryCfg) -> Self {
         let path = resolve_path();
         Self { path, cfg }
@@ -74,7 +74,7 @@ impl DecisionMemory {
     pub fn path(&self) -> &PathBuf { &self.path }
 
     /// Append a new decision to the log. Errors are logged but never
-    /// raised — decision memory is best-effort, must not break the
+    /// raised -- decision memory is best-effort, must not break the
     /// proxy if disk is full / RO.
     pub fn record(&self, rule_id: &str, fingerprint: &str, outcome: Outcome, tool: &str) {
         if !self.cfg.enabled { return; }
@@ -94,7 +94,7 @@ impl DecisionMemory {
                     let _ = writeln!(f, "{}", line);
                 }
             }
-            Err(_) => {} // can't serialise our own struct → impossible
+            Err(_) => {} // can't serialise our own struct -> impossible
         }
     }
 
@@ -164,7 +164,7 @@ impl DecisionMemory {
 fn resolve_path() -> PathBuf {
     // Prefer cwd/.aperion-shield/decisions.jsonl (per-project memory)
     // but fall back to ~/.aperion-shield/decisions.jsonl when cwd is
-    // read-only — we test by attempting to create the directory.
+    // read-only -- we test by attempting to create the directory.
     let local = PathBuf::from(".aperion-shield");
     if std::fs::create_dir_all(&local).is_ok() {
         return local.join("decisions.jsonl");
@@ -227,7 +227,7 @@ mod tests {
         // Should NOT be considered "repeatedly approved" because there's
         // only one approval after the deny.
         assert!(!v.repeated_approve);
-        // AND the deny is recent → escalation should fire.
+        // AND the deny is recent -> escalation should fire.
         assert!(v.recent_deny);
     }
 

@@ -1,4 +1,4 @@
-//! aperion-shield — local MCP guardrail for AI coding agents.
+//! aperion-shield -- local MCP guardrail for AI coding agents.
 //!
 //! Architecture
 //! ------------
@@ -6,21 +6,21 @@
 //! ```text
 //! Cursor / Claude Code
 //!         │  JSON-RPC over stdio
-//!         ▼
-//!   aperion-shield      ◄── shield.yaml ruleset
+//!         v
+//!   aperion-shield      <── shield.yaml ruleset
 //!         │  intercepts tools/call
 //!         │  ┌─ Engine ──────────────────────────────────────┐
-//!         │  │  rules → matches → composite + adjustments    │
-//!         │  │  raw_severity ∨ composite_severity            │
+//!         │  │  rules -> matches -> composite + adjustments    │
+//!         │  │  raw_severity || composite_severity            │
 //!         │  │   + workspace_is_prod        ─ bump           │
 //!         │  │   + fingerprint_recent_deny  ─ bump           │
 //!         │  │   + burst_in_progress        ─ bump           │
 //!         │  │   - fingerprint_repeated_ok  ─ demote         │
-//!         │  │  → final severity                              │
-//!         │  │  → Allow | Warn | Approval | Block            │
+//!         │  │  -> final severity                              │
+//!         │  │  -> Allow | Warn | Approval | Block            │
 //!         │  └────────────────────────────────────────────────┘
-//!         ▼
-//!   real upstream MCP server (postgres / github / shell …)
+//!         v
+//!   real upstream MCP server (postgres / github / shell ...)
 //! ```
 //!
 //! Free vs paid
@@ -28,7 +28,7 @@
 //!
 //! This binary is the FREE tier. It does not phone home, does not have a
 //! shared approval queue, and does not produce a tamper-evident audit
-//! chain — those are enterprise-only and live in the Smartflow gateway.
+//! chain -- those are enterprise-only and live in the Smartflow gateway.
 //! Local audit log is JSON Lines to stderr.
 
 use anyhow::{anyhow, Context};
@@ -49,7 +49,7 @@ use aperion_shield::{
     WorkspaceContext,
 };
 
-/// Aperion Shield — local MCP guardrail.
+/// Aperion Shield -- local MCP guardrail.
 ///
 /// Wraps an upstream MCP server (specified after `--`) and inspects every
 /// `tools/call` for destructive patterns before letting it through.
@@ -90,7 +90,7 @@ struct Cli {
     no_burst: bool,
 
     /// Opt-in to anonymised public telemetry (the "block ticker"). This
-    /// feature is **not yet enabled** — it is under legal / DPO review.
+    /// feature is **not yet enabled** -- it is under legal / DPO review.
     /// Specifying it today prints the review notice and exits.
     #[arg(long, value_name = "MODE", value_parser = ["public", "off"])]
     telemetry: Option<String>,
@@ -154,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_burst { burst_cfg.enabled = false; }
     let burst = BurstDetector::new(burst_cfg);
 
-    // ── Startup banner — make the adaptive surface visible ────────
+    // ── Startup banner -- make the adaptive surface visible ────────
     let mode_label = if cli.shadow { "SHADOW (warn only)" } else { "ENFORCE" };
     warn!(
         "[shield] === aperion-shield v{} starting === mode={} rules={} upstream='{} {}'",
@@ -173,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
     );
     if workspace.is_prod {
         warn!(
-            "[shield] workspace looks like PRODUCTION (matched: {}) — severity bumped one tier on every match",
+            "[shield] workspace looks like PRODUCTION (matched: {}) -- severity bumped one tier on every match",
             workspace.matched_signals.join(", ")
         );
     } else {
@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
 
-    // Pump 1: client → child, with rule evaluation.
+    // Pump 1: client -> child, with rule evaluation.
     let stdout_clone = stdout.clone();
     let shield_clone = shield.clone();
     let to_child_handle = tokio::spawn(async move {
@@ -209,7 +209,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let frame = line.trim_end();
             if frame.is_empty() { continue; }
-            debug!("[shield] client → {}", frame);
+            debug!("[shield] client -> {}", frame);
 
             let parsed: Option<Value> = serde_json::from_str(frame).ok();
             if let Some(req) = parsed.as_ref() {
@@ -231,8 +231,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = child_in.shutdown().await;
     });
 
-    // Pump 2: child → client (no inspection on this path in the
-    // standalone — the LLM-response seam is enterprise-only).
+    // Pump 2: child -> client (no inspection on this path in the
+    // standalone -- the LLM-response seam is enterprise-only).
     let stdout_clone2 = stdout.clone();
     let from_child_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(child_out);
@@ -244,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => {}
                 Err(e) => { error!("[shield] child read error: {}", e); break; }
             }
-            debug!("[shield] child → {}", line.trim_end());
+            debug!("[shield] child -> {}", line.trim_end());
             let mut out = stdout_clone2.lock().await;
             if out.write_all(line.as_bytes()).await.is_err() { break; }
             let _ = out.flush().await;
@@ -305,7 +305,7 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let canonical_params = json!({ "name": tool_name, "arguments": arguments });
 
-    // First-pass evaluation (no memory yet — we don't have a primary rule).
+    // First-pass evaluation (no memory yet -- we don't have a primary rule).
     let initial_adj = Adjustments {
         workspace_is_prod: shield.workspace.is_prod,
         burst_in_progress: shield.burst.in_burst(),
@@ -341,7 +341,7 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
         let _ = shield.burst.observe();
     }
 
-    // Audit log line — JSON to stderr.
+    // Audit log line -- JSON to stderr.
     let audit = json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "kind": "shield_eval",
@@ -446,12 +446,12 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
             );
             match wait_for_approval(&ticket).await {
                 Ok(true) => {
-                    info!("[shield] APPROVED ticket={} — allowing call", ticket);
+                    info!("[shield] APPROVED ticket={} -- allowing call", ticket);
                     shield.memory.record(&rule_id, &fp, Outcome::Approve, tool_name);
                     None
                 }
                 Ok(false) => {
-                    info!("[shield] DENIED ticket={} — blocking call", ticket);
+                    info!("[shield] DENIED ticket={} -- blocking call", ticket);
                     shield.memory.record(&rule_id, &fp, Outcome::Deny, tool_name);
                     Some(jsonrpc_error(
                         id,
@@ -470,7 +470,7 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
                     ))
                 }
                 Err(_) => {
-                    warn!("[shield] TIMEOUT ticket={} — defaulting to deny", ticket);
+                    warn!("[shield] TIMEOUT ticket={} -- defaulting to deny", ticket);
                     Some(jsonrpc_error(
                         id,
                         -32097,
