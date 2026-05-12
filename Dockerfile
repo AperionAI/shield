@@ -19,8 +19,14 @@ WORKDIR /src
 # copied so the stub-build resolves the exact same versions the real
 # build will use; otherwise the cache is silently invalidated on every
 # real build and we re-download the universe twice.
+#
+# v0.2.0+ has both a [lib] (src/lib.rs) AND a [bin] (src/main.rs)
+# target, so the stub must satisfy both — `cargo build` fails fast if
+# any target named in Cargo.toml is missing its entry point.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main(){}" > src/main.rs && \
+RUN mkdir src && \
+    echo "fn main(){}"      > src/main.rs && \
+    echo "// stub for cache" > src/lib.rs && \
     cargo build --release --locked && \
     rm -rf src
 
@@ -29,7 +35,10 @@ RUN mkdir src && echo "fn main(){}" > src/main.rs && \
 COPY src    ./src
 COPY config ./config
 
-RUN cargo build --release --locked && \
+# Touch the source files so cargo treats them as newer than the cached
+# stub (otherwise the stub objects can be re-used and we'd ship them).
+RUN find src -name '*.rs' -exec touch {} + && \
+    cargo build --release --locked && \
     strip target/release/aperion-shield
 
 # ─── Runtime stage ─────────────────────────────────────────────────────
