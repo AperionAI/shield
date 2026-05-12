@@ -1,148 +1,566 @@
-# Smartflow Shield default ruleset.
+# Aperion Shield default ruleset (schema v2).
 #
-# Loaded at startup from SHIELD_RULESET_PATH (default
-# /etc/smartflow/shieldset.yaml). When that file is missing the proxy falls
-# back to a copy of THIS file, embedded into the binary at compile time —
-# so we always ship a non-empty default.
+# Loaded at startup. If you launch `aperion-shield` without `--rules`,
+# this file (embedded into the binary at compile time) is used.
 #
-# Rule schema (per src/shield/rules.rs):
+# v2 additions over v1 — all backward compatible. A v1 ruleset still
+# loads unchanged:
 #
-#   - id:        unique rule id (used in audit log + IDE error payload)
-#     severity:  Critical | High | Medium | Low
-#                  Critical -> Block        (hard 403 / tool error)
-#                  High     -> Approval     (queue, IDE polls for approval)
-#                  Medium   -> AllowWithWarn (x-shield-warn header + audit)
-#                  Low      -> Allow        (audit only)
-#     where:     tool_call | llm_response
-#     match:     # OR-of-conditions; first hit fires the rule
-#       tool: ["execute_sql", ...]            # optional whitelist
-#       any_param_matches: ['regex', ...]      # any string in params (recursive)
-#       sql_matches:       ['regex', ...]      # extracted SQL strings only
-#       text_matches:      ['regex', ...]      # llm_response body (assistant content)
-#     anomaly:   # alternative to `match`
-#       kind: destructive_verb_burst
-#       window_seconds: 300
-#       threshold: 5
-#     reason:    Human-readable justification (returned to IDE / banner)
+#   policy:                       # NEW — adaptive behaviour controls
+#     workspace_probe:            # bump severity in prod-looking repos
+#       enabled, prod_signals, severity_bump
+#     decision_memory:            # learn from past approve/deny choices
+#       enabled, demote_after_approvals, escalate_on_deny_days
+#     burst_detector:             # escalate during a wave of destructives
+#       enabled, window_seconds, threshold
+#     composite_scoring:          # stack weak signals into a strong one
+#       enabled, thresholds: { medium, high, critical }
+#
+#   rules[*].points:              # NEW — composite-score contribution
+#   rules[*].safer_alternative:   # NEW — taught to the user on block
+#   rules[*].match.command_predicates: [curl_pipe_sh, env_to_network, …]
+#   rules[*].match.sensitive_paths:    ['/etc/**', '~/.ssh/**', …]
+#
+# Severity → outcome:
+#   Critical → Block        (hard JSON-RPC error)
+#   High     → Approval     (wait on .aperion-shield/inbox)
+#   Medium   → Allow + warn (audited)
+#   Low      → Allow        (audited only)
+#
+# Rule-of-thumb for `points`: 1 for Low, 2 for Medium, 3 for High,
+# 4 for Critical. Authors who skip `points` get this defaulted from the
+# severity rank — so composite scoring "just works" out of the box.
 
 shieldset:
-  version: 1
+  version: 2
+
+  policy:
+    workspace_probe:
+      enabled: true
+      prod_signals:
+        - ".env.production"
+        - ".env.prod"
+        - "prod/"
+        - "production/"
+        - "Procfile"
+        - ".terraform/terraform.tfstate"
+        - "kubeconfig"
+        - ".kube/config"
+        - "production.yml"
+        - "production.yaml"
+        - "k8s/prod/"
+        - "deploy/prod/"
+      severity_bump: 1
+    decision_memory:
+      enabled: true
+      demote_after_approvals: 3
+      escalate_on_deny_days: 7
+    burst_detector:
+      enabled: true
+      window_seconds: 300
+      threshold: 5
+    composite_scoring:
+      enabled: true
+      thresholds:
+        medium:   2
+        high:     5
+        critical: 9
 
   rules:
-    # ─────────────────────────────────────────────────────────────────
-    # SQL destructive ops
-    # ─────────────────────────────────────────────────────────────────
+    # ═════════════════════════════════════════════════════════════════
+    # SQL — direct database damage
+    # ═════════════════════════════════════════════════════════════════
     - id: sql.drop_database
       severity: Critical
+      points: 6
       where: tool_call
       match:
-        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query", "snowflake.query", "bigquery.query"]
+        tool: [execute_sql, postgres.query, postgres.execute, mysql.query, snowflake.query, bigquery.query]
         sql_matches: ['(?i)\bDROP\s+DATABASE\b']
       reason: "DROP DATABASE is never auto-allowed."
+      safer_alternative: "If you really need to remove a database, do it through your provider's console with a tested backup. Shield will not let an agent execute this."
 
     - id: sql.drop_table_or_schema
       severity: High
+      points: 4
       where: tool_call
       match:
-        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query", "snowflake.query", "bigquery.query"]
-        sql_matches: ['(?i)\bDROP\s+(TABLE|SCHEMA)\s+\w+', '(?i)\bTRUNCATE\s+TABLE\b']
+        tool: [execute_sql, postgres.query, postgres.execute, mysql.query, snowflake.query, bigquery.query]
+        sql_matches:
+          - '(?i)\bDROP\s+(TABLE|SCHEMA|MATERIALIZED\s+VIEW)\s+\w+'
+          - '(?i)\bTRUNCATE\s+TABLE\b'
       reason: "DROP TABLE / TRUNCATE TABLE require human approval."
+      safer_alternative: "Rename to *_to_drop_YYYYMMDD first, leave for 7 days, then drop. Shield will approve the rename."
+
+    - id: sql.alter_table_drop_column
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [execute_sql, postgres.query, postgres.execute, mysql.query, snowflake.query, bigquery.query]
+        sql_matches: ['(?i)\bALTER\s+TABLE\s+\S+\s+DROP\s+COLUMN\b']
+      reason: "ALTER TABLE DROP COLUMN is irreversible and can break downstream readers."
+      safer_alternative: "Mark the column NOT NULL DEFAULT NULL and stop writing to it; drop in a later migration."
 
     - id: sql.unscoped_delete
       severity: High
+      points: 4
       where: tool_call
       match:
-        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query", "snowflake.query", "bigquery.query"]
-        # DELETE FROM <t>;  with no WHERE clause anywhere in the statement.
-        # Uses an application-layer predicate (Rust's `regex` crate has no
-        # lookbehind, so a pure-regex form would miss multi-line statements
-        # and ones split across semicolons). The predicate splits on `;`
-        # and checks each fragment independently.
+        tool: [execute_sql, postgres.query, postgres.execute, mysql.query, snowflake.query, bigquery.query]
         sql_predicates: [unscoped_delete]
       reason: "Unbounded DELETE FROM needs approval — add a WHERE clause."
+      safer_alternative: "Add a WHERE clause that scopes to specific rows, e.g. `DELETE FROM users WHERE id IN (…)` or `WHERE created_at < NOW() - INTERVAL '30 days'`."
 
     - id: sql.unscoped_update
       severity: High
+      points: 4
       where: tool_call
       match:
-        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query", "snowflake.query", "bigquery.query"]
-        # UPDATE <t> SET ... ;  with no WHERE clause anywhere in the statement.
-        # Same predicate strategy as sql.unscoped_delete — catches single-
-        # and multi-statement inputs, schema-qualified tables (public.foo),
-        # and case-insensitive verb spellings.
+        tool: [execute_sql, postgres.query, postgres.execute, mysql.query, snowflake.query, bigquery.query]
         sql_predicates: [unscoped_update]
       reason: "Unbounded UPDATE affects every row — add a WHERE clause."
+      safer_alternative: "Add a WHERE clause, e.g. `UPDATE users SET status='X' WHERE id = 7`. If you really mean every row, run it in a transaction with a row-count assertion."
 
     - id: sql.grant_or_revoke_all
       severity: Medium
+      points: 2
       where: tool_call
       match:
-        tool: ["execute_sql", "postgres.query", "postgres.execute", "mysql.query"]
+        tool: [execute_sql, postgres.query, postgres.execute, mysql.query]
         sql_matches: ['(?i)\b(GRANT|REVOKE)\s+ALL\b']
       reason: "Wildcard privilege change — recorded for review."
+      safer_alternative: "Grant only the specific privileges needed (SELECT, INSERT, UPDATE), not ALL."
 
-    # ─────────────────────────────────────────────────────────────────
-    # Git destructive ops
-    # ─────────────────────────────────────────────────────────────────
-    - id: git.force_push_protected
-      severity: Critical
+    - id: sql.revoke_from_public
+      severity: High
+      points: 3
       where: tool_call
       match:
-        tool: ["run_terminal", "bash", "shell", "execute_command", "exec", "git", "github.run_command"]
+        tool: [execute_sql, postgres.query, postgres.execute, mysql.query]
+        sql_matches: ['(?i)\bREVOKE\b.*\bFROM\s+PUBLIC\b']
+      reason: "REVOKE … FROM PUBLIC can lock out every role at once."
+      safer_alternative: "Revoke from specific roles instead of PUBLIC; verify role membership first."
+
+    - id: sql.copy_from_program
+      severity: Critical
+      points: 6
+      where: tool_call
+      match:
+        tool: [execute_sql, postgres.query, postgres.execute]
+        sql_matches: ['(?i)\bCOPY\b.*\bFROM\s+PROGRAM\b']
+      reason: "COPY … FROM PROGRAM gives the database server shell access — used in Postgres RCE chains."
+      safer_alternative: "Use COPY FROM STDIN with the data inlined; never let the server spawn a shell."
+
+    - id: sql.load_data_infile
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [execute_sql, mysql.query]
+        sql_matches: ['(?i)\bLOAD\s+DATA\s+(LOCAL\s+)?INFILE\b']
+      reason: "LOAD DATA INFILE reads server-side files — historically used to exfiltrate /etc/passwd."
+      safer_alternative: "Use LOAD DATA LOCAL INFILE with explicit per-row column lists, or import via your application code."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Git — history damage and force-push
+    # ═════════════════════════════════════════════════════════════════
+    - id: git.force_push_protected
+      severity: Critical
+      points: 6
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, git, github.run_command]
         any_param_matches:
-          - '\bgit\s+push\s+.*(--force|--force-with-lease|-f)\s+(origin\s+)?(main|master|prod|release/.*)\b'
+          - '\bgit\s+push\s+.*(--force\b|--force-with-lease\b|\s-f\b)\s+(origin\s+)?(main|master|prod|release/.*)\b'
       reason: "Force-push to a protected branch is forbidden."
+      safer_alternative: "Open a PR with the corrected history; ask a human to fast-forward main."
 
     - id: git.history_rewrite
       severity: High
+      points: 3
       where: tool_call
       match:
-        tool: ["run_terminal", "bash", "shell", "execute_command", "exec", "git", "github.run_command"]
+        tool: [run_terminal, bash, shell, execute_command, exec, git, github.run_command]
         any_param_matches:
           - '\bgit\s+(filter-branch|filter-repo|reflog\s+expire|gc\s+--prune=now|update-ref\s+-d|reset\s+--hard\s+HEAD~)'
       reason: "Rewriting shared git history needs human approval."
+      safer_alternative: "If you need to remove a commit, `git revert` it; rewrites strand collaborators."
+
+    - id: git.push_mirror_or_all_force
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, git]
+        any_param_matches:
+          - '\bgit\s+push\s+(--mirror|--all)\b.*(--force|--force-with-lease|\s-f)'
+      reason: "Force-pushing every ref at once is destructive."
+      safer_alternative: "Push branches individually with `--force-with-lease <branch>`."
 
     - id: git.branch_force_delete
       severity: Medium
+      points: 2
       where: tool_call
       match:
-        tool: ["run_terminal", "bash", "shell", "execute_command", "exec", "git", "github.run_command"]
+        tool: [run_terminal, bash, shell, execute_command, exec, git]
         any_param_matches: ['\bgit\s+branch\s+-D\s+\S+']
       reason: "Force-delete of a local branch — verify before continuing."
+      safer_alternative: "Use `git branch -d` (lower-case d); it refuses to delete unmerged branches."
 
-    # ─────────────────────────────────────────────────────────────────
-    # Filesystem destructive ops
-    # ─────────────────────────────────────────────────────────────────
+    - id: git.checkout_dot_discards
+      severity: Medium
+      points: 1
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, git]
+        # `.` is a non-word character on both sides, so we can't anchor on
+        # `\b` after it — Rust's regex `\b` requires a word/non-word
+        # transition. Use lookahead-free `(\s|$)` instead.
+        any_param_matches:
+          - '\bgit\s+checkout\s+\.(\s|$)'
+          - '\bgit\s+restore\s+(--worktree|--source=HEAD)\s+\.(\s|$)'
+          - '\bgit\s+clean\s+-(f|x)+d?(\s|$)'
+      reason: "Discards every uncommitted change in the working tree."
+      safer_alternative: "Stash first: `git stash push -u -m 'pre-discard'`. Drop the stash later if you don't need it."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Filesystem — recursive wipes and sensitive paths
+    # ═════════════════════════════════════════════════════════════════
     - id: fs.recursive_delete_root
       severity: Critical
+      points: 8
       where: tool_call
       match:
-        tool: ["run_terminal", "bash", "shell", "execute_command", "exec"]
-        any_param_matches: ['rm\s+-rf?\s+(/|/\*|\$HOME|~)(\s|$|;|&|\|)']
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches: ['\brm\s+-[rfRF]+\s*[rfRF]*\s+(/|/\*|\$HOME|~)(\s|$|;|&|\|)']
       reason: "rm -rf on filesystem root is forbidden."
+      safer_alternative: "Scope to a specific subdirectory, e.g. `rm -rf ./build/`. Shield will allow ./-rooted deletes."
 
-    - id: fs.delete_production_path
+    - id: fs.sensitive_path_write_or_delete
       severity: High
+      points: 4
       where: tool_call
       match:
-        tool: ["filesystem.delete_file", "filesystem.delete_directory", "fs.delete", "fs.remove", "run_terminal", "bash", "shell"]
-        any_param_matches:
-          - '(/etc/|/var/|/usr/|/boot/|/opt/Smartflow_docker/|/opt/smartflow-source/|/data/|/srv/|/production/|/prod/|/release/)'
-      reason: "Deletion under a production-looking path needs approval."
+        tool: [run_terminal, bash, shell, execute_command, exec, filesystem.delete_file, filesystem.delete_directory, fs.delete, fs.remove, fs.write]
+        sensitive_paths:
+          - "/etc/**"
+          - "/boot/**"
+          - "/usr/**"
+          - "/var/lib/**"
+          - "/data/**"
+          - "/srv/**"
+          - "~/.ssh/**"
+          - "~/.aws/**"
+          - "~/.gnupg/**"
+          - "~/.kube/**"
+      reason: "Operation touches a sensitive system or credential path."
+      safer_alternative: "Scope the change to your project directory. If you really need to touch system paths, run the command manually with `sudo` outside the agent."
 
     - id: fs.dd_to_block_device
       severity: Critical
+      points: 8
       where: tool_call
       match:
-        tool: ["run_terminal", "bash", "shell", "execute_command", "exec"]
-        any_param_matches: ['\bdd\s+if=.*\s+of=/dev/(sd|nvme|disk|hd)']
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches: ['\bdd\s+if=.*\s+of=/dev/(sd|nvme|disk|hd|xvd|vd)']
       reason: "dd to a raw block device wipes the disk — forbidden."
+      safer_alternative: "If you need a disk image, `dd if=/dev/zero of=./blank.img bs=1M count=N` writes to a file, not a device."
 
-    # ─────────────────────────────────────────────────────────────────
-    # LLM response patterns (the assistant *plans* something destructive)
-    # ─────────────────────────────────────────────────────────────────
+    - id: fs.find_delete_sweep
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bfind\s+\S+.*-delete\b'
+          - '\bfind\s+\S+.*-exec\s+rm\b'
+      reason: "Recursive find … -delete can sweep an entire subtree silently."
+      safer_alternative: "Run `find ... -print` first, eyeball the list, then re-run with `-delete`."
+
+    - id: fs.world_writable_chmod
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        command_predicates: [world_writable_chmod]
+      reason: "World-writable permissions on this path are dangerous."
+      safer_alternative: "Use 0640 / 0750 instead. World-write (`o+w`, `777`) is almost never what you want."
+
+    - id: fs.chown_root_recursive
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bchown\s+-R\s+root[:.]'
+          - '\bchown\s+-R\s+0[:.]'
+      reason: "Recursive `chown root` can lock the user out of their own files."
+      safer_alternative: "Run chown non-recursively on the specific file that needs it."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Secrets exfiltration — read + send compound predicate
+    # ═════════════════════════════════════════════════════════════════
+    - id: secret.env_to_network
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        command_predicates: [env_to_network]
+      reason: "Command reads a secret source and pipes it to a network sink in the same line — exfiltration pattern."
+      safer_alternative: "If you genuinely need to share a secret with an outside service, copy the specific value manually and rotate it afterwards. Never let an agent do this."
+
+    - id: secret.read_ssh_or_aws_key
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, filesystem.read_file, fs.read]
+        any_param_matches:
+          - '~?/\.ssh/id_(rsa|ed25519|dsa|ecdsa)(\.pub)?\b'
+          - '~?/\.aws/credentials\b'
+          - '~?/\.gnupg/private-keys-v1\.d'
+      reason: "Reading private credentials directly — confirm this is intentional."
+      safer_alternative: "Reference the credential by environment variable or use the relevant CLI (aws sts, ssh-agent) instead of `cat`-ing the file."
+
+    - id: secret.cloud_kv_dump
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bkubectl\s+get\s+secrets?\b'
+          - '\baws\s+secretsmanager\s+get-secret-value\b'
+          - '\bgcloud\s+secrets\s+versions\s+access\b'
+          - '\baz\s+keyvault\s+secret\s+show\b'
+      reason: "Bulk read of a cloud secrets store — verify before continuing."
+      safer_alternative: "Read a specific secret by name, not all of them. Audit logs treat bulk reads as suspicious."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Supply chain / RCE — fetch and execute
+    # ═════════════════════════════════════════════════════════════════
+    - id: supply.curl_pipe_sh
+      severity: Critical
+      points: 6
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        command_predicates: [curl_pipe_sh, network_fetch_to_interpreter]
+      reason: "Fetch-and-execute over the network with no inspection step (curl | sh family)."
+      safer_alternative: "Download to a file first, inspect (or check a published sha256), then execute. e.g. `curl -fSLo install.sh URL && shasum -a 256 install.sh && bash install.sh`."
+
+    - id: supply.untrusted_pkg_registry
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        # Catches npm / pnpm / yarn / pip / gem / cargo install when the
+        # registry override URL doesn't resolve to a trusted host.
+        # Implemented in code (Rust's regex crate has no negative
+        # lookahead) — see predicates.rs::untrusted_pkg_registry.
+        command_predicates: [untrusted_pkg_registry]
+      reason: "Installing from a non-default package registry — supply-chain / dependency-confusion risk."
+      safer_alternative: "If the package really lives elsewhere, vendor it into your repo or mirror via a private registry under your control."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Reverse shells / network back-channels
+    # ═════════════════════════════════════════════════════════════════
+    - id: shell.reverse_shell
+      severity: Critical
+      points: 9
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        command_predicates: [reverse_shell]
+      reason: "Reverse-shell pattern detected. Shield never auto-allows back-channel network connections."
+      safer_alternative: "If you need a remote shell, use a deliberate tool (ssh, tmate share, mosh). Never wire one in via base64'd one-liners."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Sudo / privilege escalation
+    # ═════════════════════════════════════════════════════════════════
+    - id: privilege.sudo_destructive
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(^|\s|;|&|\|)sudo\s+(rm\s+-[rfRF]|dd\s+if=|mkfs|fdisk|parted|format)'
+      reason: "Sudo-prefixed destructive command — requires explicit human approval."
+      safer_alternative: "Run the privileged step manually outside the agent's session."
+
+    - id: privilege.setuid_grant
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bchmod\s+([+]?u\+s|0?[24][0-7][0-7][0-7])\b'
+          - '\bsetcap\s+\S+'
+      reason: "Granting setuid / capabilities — privilege escalation risk."
+      safer_alternative: "Avoid setuid binaries entirely. Use sudo with a narrow sudoers entry if you need elevated privileges."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Cloud — multi-provider destructive
+    # ═════════════════════════════════════════════════════════════════
+    - id: cloud.aws_s3_recursive_delete
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli]
+        any_param_matches:
+          - '\baws\s+s3\s+rm\b.*--recursive\b'
+          - '\baws\s+s3\s+rb\b.*--force\b'
+      reason: "Bulk S3 delete — irreversible if versioning is off."
+      safer_alternative: "Enable versioning, then use lifecycle rules to expire — never `--recursive --force`."
+
+    - id: cloud.aws_rds_skip_snapshot
+      severity: Critical
+      points: 6
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli]
+        any_param_matches:
+          - '\baws\s+rds\s+delete-db-(instance|cluster)\b.*--skip-final-snapshot\b'
+      reason: "RDS delete with no final snapshot — data is gone forever."
+      safer_alternative: "Omit `--skip-final-snapshot`. The 60 seconds of snapshot time can save your job."
+
+    - id: cloud.terraform_destroy_auto_approve
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, terraform.run]
+        any_param_matches:
+          - '\bterraform\s+destroy\b.*-auto-approve\b'
+          - '\btf\s+destroy\b.*-auto-approve\b'
+      reason: "`terraform destroy -auto-approve` skips the human confirmation step."
+      safer_alternative: "Run `terraform plan -destroy` first; review; apply the destroy interactively."
+
+    - id: cloud.gcloud_sql_delete
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, gcloud.run]
+        any_param_matches:
+          - '\bgcloud\s+sql\s+instances\s+delete\b'
+      reason: "Deleting a Cloud SQL instance — irreversible."
+      safer_alternative: "Export a backup with `gcloud sql export sql` first."
+
+    - id: cloud.az_group_delete
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, az.run]
+        any_param_matches:
+          - '\baz\s+group\s+delete\b.*--yes\b'
+      reason: "Deleting an entire Azure resource group, skipping the confirmation."
+      safer_alternative: "List resources first (`az resource list -g X`); confirm interactively; never use `--yes` for delete."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Kubernetes — cluster damage
+    # ═════════════════════════════════════════════════════════════════
+    - id: k8s.delete_namespace
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, kubectl.run]
+        any_param_matches:
+          - '\bkubectl\s+delete\s+(namespace|ns)\s+\S+'
+          - '\bkubectl\s+delete\s+-f\s+.*--all-namespaces\b'
+      reason: "Namespace delete propagates to every resource inside it."
+      safer_alternative: "Delete specific resource kinds first; namespace last, once you've verified the inventory."
+
+    - id: k8s.delete_all
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, kubectl.run]
+        any_param_matches:
+          - '\bkubectl\s+delete\s+\S+\s+--all\b'
+      reason: "kubectl delete --all is rarely what you actually want."
+      safer_alternative: "Use a label selector: `kubectl delete pod -l app=foo`."
+
+    - id: k8s.drain_node
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, kubectl.run]
+        any_param_matches:
+          - '\bkubectl\s+drain\s+\S+'
+      reason: "Draining a Kubernetes node — workloads on this node will be evicted."
+      safer_alternative: "Cordon first (`kubectl cordon`), watch pods reschedule, then drain with `--ignore-daemonsets --delete-emptydir-data` once you've confirmed nothing critical pins to the node."
+
+    - id: k8s.helm_uninstall
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, helm.run]
+        any_param_matches: ['\bhelm\s+(uninstall|delete)\s+\S+']
+      reason: "Helm uninstall removes every workload from the release."
+      safer_alternative: "Run `helm get manifest <release>` first to confirm what will go."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Docker — local fleet damage
+    # ═════════════════════════════════════════════════════════════════
+    - id: docker.system_prune_aggressive
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, docker.run]
+        any_param_matches:
+          - '\bdocker\s+system\s+prune\b.*(-a|--all).*(--volumes|-f|--force)'
+          - '\bdocker\s+volume\s+prune\b.*--force'
+      reason: "`docker system prune -af --volumes` deletes every cached layer AND volume."
+      safer_alternative: "Prune images and containers separately, and never `--volumes` without naming what you're keeping."
+
+    - id: docker.rm_force_volumes
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, docker.run]
+        any_param_matches:
+          - '\bdocker\s+rm\s+-[fv]+\s+\S+'
+          - '\bdocker\s+volume\s+rm\s+\S+'
+      reason: "Force-remove of a docker container with its volumes — data inside the volume is gone."
+      safer_alternative: "Stop the container first; rm without `-v`; remove volumes by name only when you're sure."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Anomaly — burst
+    # ═════════════════════════════════════════════════════════════════
+    - id: anomaly.destructive_burst
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        # No selectors — fired by the burst detector externally. Kept
+        # in the ruleset so audit logs see it as a real rule.
+        tool: []
+      reason: "Destructive operation burst detected — pausing for review."
+      safer_alternative: "Stop what you're doing, look at the recent shield audit log, and resume one operation at a time."
+
+    # ═════════════════════════════════════════════════════════════════
+    # LLM-response — destructive plans before they're executed
+    # ═════════════════════════════════════════════════════════════════
     - id: llm.suggests_drop_database
       severity: High
+      points: 3
       where: llm_response
       match:
         text_matches: ['(?i)\b(DROP\s+DATABASE|TRUNCATE\s+TABLE\s+\w+\s*;)']
@@ -150,6 +568,7 @@ shieldset:
 
     - id: llm.suggests_force_push
       severity: Medium
+      points: 2
       where: llm_response
       match:
         text_matches: ['(?i)git\s+push\s+.*(--force|--force-with-lease|-f)\b.*\b(main|master|prod)\b']
@@ -157,19 +576,28 @@ shieldset:
 
     - id: llm.suggests_rm_rf
       severity: Medium
+      points: 2
       where: llm_response
       match:
         text_matches: ['(?i)\brm\s+-rf?\s+(/|/\*|\$HOME|~)']
       reason: "Assistant plan suggests rm -rf at filesystem root."
 
-    # ─────────────────────────────────────────────────────────────────
-    # Anomaly: high volume of destructive verbs in one session
-    # ─────────────────────────────────────────────────────────────────
-    - id: anomaly.destructive_burst
+    - id: llm.suggests_curl_pipe_sh
+      severity: Medium
+      points: 2
+      where: llm_response
+      match:
+        text_matches:
+          - '(?i)curl\s+\S+\s*\|\s*(sudo\s+)?(sh|bash|zsh)\b'
+          - '(?i)wget\s+\S+\s*-?\S*\s*\|\s*(sudo\s+)?(sh|bash|zsh)\b'
+      reason: "Assistant plan suggests `curl | sh`-style install — inspect the script before running."
+
+    - id: llm.suggests_secret_exfil
       severity: High
-      where: tool_call
-      anomaly:
-        kind: destructive_verb_burst
-        window_seconds: 300
-        threshold: 5
-      reason: "Destructive operation burst detected — pausing for review."
+      points: 3
+      where: llm_response
+      match:
+        text_matches:
+          - '(?i)cat\s+.*\.env.*\|\s*curl'
+          - '(?i)curl\s+.*--data-binary\s+@~?/\.(aws|ssh)/'
+      reason: "Assistant plan reads a secret file and pipes it to a network endpoint — exfiltration pattern."

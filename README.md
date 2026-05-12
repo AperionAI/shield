@@ -3,10 +3,19 @@
 `aperion-shield` is a tiny, local MCP server that sits between your AI
 coding agent (Cursor, Claude Code, …) and the **real** MCP servers your
 agent talks to (postgres, github, shell, filesystem, …). On every
-`tools/call` it evaluates a set of safety rules — `DROP DATABASE`,
-unscoped `UPDATE`, `git push --force` to a protected branch, `rm -rf /`,
-and so on — and either blocks the call, prompts you for approval, or
-lets it through with a warning banner.
+`tools/call` it evaluates **45+ adaptive safety rules** across eight
+destructive surfaces — SQL, git, filesystem, secrets exfiltration,
+supply-chain RCE, reverse shells, sudo / privilege escalation, cloud
+(AWS/GCP/Azure), Kubernetes, and Docker — and either blocks the call,
+prompts you for approval, or lets it through with a warning banner.
+
+**v0.2 adds adaptive scoring** — Shield doesn't just match regexes. It
+sums points across every rule that fires, bumps severity in
+prod-looking workspaces, remembers which decisions you've already
+approved or denied, and detects destructive bursts in real time. The
+result: fewer false-positive prompts on benign repeats, harder gates
+on the operations that matter, and a teach-as-you-go safer-alternative
+hint on every block.
 
 It is **free**, **open source** (Apache 2.0), and **standalone**. No
 cloud account required. The binary is the same size as `git` and runs
@@ -107,18 +116,38 @@ servers under a single Shield).
 
 ## What does Shield catch out-of-the-box?
 
-The bundled ruleset (the same YAML that ships with the enterprise
-Smartflow build) covers:
+The bundled ruleset covers eight destructive surfaces with 45+ rules:
 
-| Category   | Examples                                                                              |
-|------------|---------------------------------------------------------------------------------------|
-| SQL        | `DROP DATABASE`, `DROP TABLE`, `TRUNCATE`, unscoped `UPDATE` / `DELETE`, `GRANT ALL`  |
-| Git        | `git push --force` to `main` / `master`, `git filter-repo`, `git reset --hard HEAD~`  |
-| Filesystem | `rm -rf /`, `rm -rf $HOME`, `dd if=… of=/dev/sda`, delete under `/etc`, `/var`, etc.  |
-| LLM plans  | Assistant-text mentions of the same destructive patterns above (second-pair-of-eyes) |
-| Anomaly    | Burst of destructive verbs by the same actor inside a 5-minute window                |
+| Category          | Examples                                                                                       |
+|-------------------|------------------------------------------------------------------------------------------------|
+| SQL               | `DROP DATABASE`, `DROP TABLE`, `TRUNCATE`, unscoped `UPDATE`/`DELETE`, `COPY FROM PROGRAM`, `LOAD DATA INFILE`, `GRANT ALL`, `REVOKE FROM PUBLIC` |
+| Git               | `git push --force` to protected branches, `filter-branch` / `filter-repo`, `reset --hard HEAD~`, `branch -D`, `clean -fxd`, `checkout .`         |
+| Filesystem        | `rm -rf /`, `dd` to `/dev/sd*`, deletes/writes under `/etc`, `/var/lib`, `~/.ssh`, `~/.aws`; world-writable `chmod 777`; recursive `chown root`  |
+| Secrets exfil     | compound *(read `.env` / `~/.aws/credentials` / `~/.ssh/id_*`) + (curl / wget / nc post)* in the same command — near-certain exfiltration         |
+| Supply chain      | `curl ... \| sh`, `bash <(curl ...)`, `npm/pip/yarn/gem install --registry <untrusted-host>` (allowlist of npmjs / pypi / yarnpkg / rubygems)     |
+| Reverse shells    | `bash -i >& /dev/tcp/...`, `nc -e /bin/sh`, mkfifo back-channels, python/perl/ruby one-liners, openssl s_client, socat, PowerShell `TCPClient`   |
+| Privilege         | `sudo`-prefixed destructive verbs, setuid grants (`chmod u+s`, `setcap`)                                                                          |
+| Cloud / k8s / Docker | `aws s3 rm --recursive`, `aws rds delete-db-instance --skip-final-snapshot`, `terraform destroy -auto-approve`, `gcloud sql instances delete`, `az group delete --yes`, `kubectl delete namespace`, `kubectl delete --all`, `helm uninstall`, `docker system prune -a --volumes -f` |
+| LLM plans         | Assistant-text mentions of the same destructive patterns above (second-pair-of-eyes)                                                              |
+| Anomaly           | Burst of destructive verbs by the same actor inside a 5-minute window                                                                             |
 
-13 rules out of the box. You can layer on your own via `--rules my.yaml`.
+### Adaptive scoring (new in v0.2)
+
+Shield combines five signals when deciding whether to allow, warn,
+prompt, or block a call:
+
+| Signal                      | Effect                                                          |
+|-----------------------------|------------------------------------------------------------------|
+| **Raw severity**            | The highest single rule's tier (Low / Medium / High / Critical) |
+| **Composite points**        | Sum of points across every rule that fired — turns multiple Mediums into a High |
+| **Workspace context**       | One-tier bump in prod-looking repos (`.env.production`, `kubeconfig`, `prod/`, etc.) |
+| **Decision memory**         | Three approvals of the same fingerprint demotes one tier; a denial in the last 7 days escalates one tier |
+| **Burst detector**          | While 5+ destructive matches in a 5-minute window are in flight, every match bumps one tier |
+
+Memory lives at `.aperion-shield/decisions.jsonl` in your project root.
+It never leaves your machine; the standalone is offline-only.
+
+You can layer your own rules on top via `--rules my.yaml`.
 
 ---
 

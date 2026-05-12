@@ -1,6 +1,6 @@
 [package]
 name = "aperion-shield"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Aperion Shield — a local MCP guardrail for AI coding agents. Standalone, free, open source."
 license = "Apache-2.0"
@@ -17,6 +17,13 @@ repository = "https://github.com/AperionAI/shield"
 # logic in ../../src/shield/; both sides parse the same YAML schema so
 # rules authored for one work in the other.
 [workspace]
+
+# Hybrid lib+bin layout. The library exposes the rule engine and its
+# adaptive layers for embedders (and integration tests). The binary is
+# the MCP guardrail wrapper end-users actually run.
+[lib]
+name = "aperion_shield"
+path = "src/lib.rs"
 
 [[bin]]
 name = "aperion-shield"
@@ -44,6 +51,11 @@ thiserror = "1"
 uuid = { version = "1", features = ["v4"] }
 # RFC 3339 timestamps.
 chrono = { version = "0.4", features = ["serde"] }
+# SHA-256 for decision-memory fingerprints (rule_id + normalised argv).
+sha2 = "0.10"
+# Cross-platform home-directory resolution for ~/.aperion-shield/ and
+# for normalising paths in the sensitive-path matcher.
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"
