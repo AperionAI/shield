@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aperion Shield — Developer One-Pager — APERION</title>
+<meta name="description" content="Aperion Shield developer one-pager: install, integrate with Cursor / Claude Code in 60 seconds, what it catches, how to test against your own command history. Free, open-source, Apache 2.0.">
+<meta name="keywords" content="Aperion Shield, MCP guardrails, AI coding agents, Cursor, Claude Code, developer guide, install, integration, supply chain, reverse shell, sensitive paths">
+<meta name="author" content="APERION">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://docs.aperion.ai/aperion-shield-developer-onepager.html">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://docs.aperion.ai/aperion-shield-developer-onepager.html">
+<meta property="og:title" content="Aperion Shield — Developer One-Pager">
+<meta property="og:description" content="Install, integrate with Cursor or Claude Code, validate against your own command history. v0.3.0 — 98.42% allow, 1.5% approval, 0.08% block on real-world traffic.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 0 0 40px; }
+.container { max-width: 920px; margin: 0 auto; padding: 24px 20px 40px; }
+
+/* ── TOP NAV (same as rest of docs site) ───────────────────────── */
+.g-topnav { position: sticky; top: 0; z-index: 200; background: rgba(15,23,42,0.96); backdrop-filter: blur(14px); border-bottom: 1px solid #334155; padding: 0 28px; height: 54px; display: flex; align-items: center; gap: 20px; }
+.g-brand { display: flex; align-items: center; gap: 8px; flex-shrink: 0; text-decoration: none; }
+.g-logo { height: 20px; filter: brightness(0) invert(1); opacity: 0.9; }
+.g-brand-sub { font-size: 0.78em; color: #475569; }
+.g-links { display: flex; align-items: center; gap: 2px; flex: 1; }
+.g-links a { padding: 5px 11px; border-radius: 6px; font-size: 0.85em; color: #64748b; text-decoration: none; transition: all .15s; }
+.g-links a:hover { color: #e2e8f0; background: #1e293b; }
+.g-links a.active { color: #6ee7b7; }
+.g-badge { background: rgba(6,95,70,0.6); color: #6ee7b7; font-size: 0.7em; font-weight: 700; padding: 3px 9px; border-radius: 12px; border: 1px solid rgba(16,185,129,0.4); flex-shrink: 0; }
+
+/* ── HEADER ─────────────────────────────────────────────────────── */
+.header { background: linear-gradient(135deg, #064e3b 0%, #047857 45%, #0c2a3a 100%); border-radius: 14px; padding: 38px 40px; margin-bottom: 32px; box-shadow: 0 4px 32px rgba(0,0,0,0.5); text-align: center; position: relative; overflow: hidden; }
+.header::before { content: ''; position: absolute; top: -40px; right: -40px; width: 280px; height: 280px; background: radial-gradient(circle, rgba(16,185,129,0.18) 0%, transparent 70%); }
+.header::after  { content: ''; position: absolute; bottom: -60px; left: -60px; width: 260px; height: 260px; background: radial-gradient(circle, rgba(20,184,166,0.12) 0%, transparent 70%); }
+.version-chip { display: inline-block; background: rgba(16,185,129,0.22); color: #6ee7b7; font-size: 0.78em; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; padding: 4px 14px; border-radius: 20px; border: 1px solid rgba(16,185,129,0.45); margin-bottom: 16px; position: relative; z-index: 1; }
+.header h1 { color: #fff; font-size: 2.2em; font-weight: 800; letter-spacing: -0.5px; line-height: 1.15; margin-bottom: 10px; position: relative; z-index: 1; }
+.header .tagline { color: #d1fae5; font-size: 0.98em; line-height: 1.6; max-width: 720px; margin: 0 auto 18px; position: relative; z-index: 1; }
+.badge-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; position: relative; z-index: 1; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 20px; font-size: 0.75em; font-weight: 700; }
+.badge-emerald { background: rgba(6,95,70,0.6); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.4); }
+.badge-teal    { background: rgba(13,148,136,0.45); color: #5eead4; border: 1px solid rgba(13,148,136,0.4); }
+.badge-blue    { background: rgba(29,78,216,0.4); color: #93c5fd; border: 1px solid #3b82f6; }
+.badge-violet  { background: rgba(76,29,149,0.4); color: #c4b5fd; border: 1px solid rgba(139,92,246,0.4); }
+
+/* ── HEADLINE NUMBERS (corpus test) ─────────────────────────────── */
+.kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 32px; }
+.kpi { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid #334155; border-radius: 10px; padding: 16px 14px; text-align: center; }
+.kpi .v { font-size: 1.6em; font-weight: 800; line-height: 1.1; }
+.kpi .l { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.9px; color: #94a3b8; margin-top: 4px; font-weight: 700; }
+.kpi.allow    .v { color: #6ee7b7; }
+.kpi.warn     .v { color: #fde68a; }
+.kpi.approval .v { color: #f9a8d4; }
+.kpi.block    .v { color: #fca5a5; }
+@media (max-width: 700px) { .kpi-row { grid-template-columns: repeat(2, 1fr); } }
+
+/* ── SECTION HEADINGS ───────────────────────────────────────────── */
+.area-heading { font-size: 0.7em; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #64748b; margin: 36px 0 14px; display: flex; align-items: center; gap: 10px; }
+.area-heading::after { content: ''; flex: 1; height: 1px; background: #1e293b; }
+
+/* ── INSTALL THREE-UP ───────────────────────────────────────────── */
+.install-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+.install-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid #334155; border-radius: 10px; padding: 16px 16px; }
+.install-card.brew   { border-color: #b45309; }
+.install-card.docker { border-color: #1d4ed8; }
+.install-card.cargo  { border-color: #be123c; }
+.install-card .head  { font-size: 0.85em; font-weight: 700; color: #f1f5f9; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.install-card.brew   .head { color: #fcd34d; }
+.install-card.docker .head { color: #93c5fd; }
+.install-card.cargo  .head { color: #fda4af; }
+.install-card pre    { font-family: 'Courier New', monospace; font-size: 0.78em; color: #cbd5e1; background: #0a1322; border: 1px solid #1e293b; border-radius: 6px; padding: 8px 10px; overflow-x: auto; white-space: pre; line-height: 1.55; }
+@media (max-width: 700px) { .install-grid { grid-template-columns: 1fr; } }
+
+/* ── FEATURE CARDS ──────────────────────────────────────────────── */
+.feature { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid #334155; border-radius: 12px; padding: 20px 24px; margin-bottom: 12px; }
+.feature.new     { border-color: #10b981; }
+.feature.infra   { border-color: #0369a1; }
+.feature.security{ border-color: #be185d; }
+.feature-header  { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 10px; }
+.feature-num     { font-size: 0.74em; font-weight: 800; min-width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
+.feature-num.emerald { background: linear-gradient(135deg, #022c22, #047857); color: #6ee7b7; }
+.feature-num.teal    { background: linear-gradient(135deg, #042f2e, #0d9488); color: #5eead4; }
+.feature-num.blue    { background: linear-gradient(135deg, #0c2a3a, #0369a1); color: #7dd3fc; }
+.feature-num.pink    { background: linear-gradient(135deg, #500724, #be185d); color: #f9a8d4; }
+.feature-title-wrap { flex: 1; }
+.feature-title   { font-size: 1.04em; font-weight: 700; color: #f1f5f9; margin-bottom: 2px; }
+.feature-body    { color: #94a3b8; font-size: 0.88em; line-height: 1.65; }
+.feature-body code { color: #6ee7b7; font-size: 0.92em; background: rgba(16,185,129,0.08); padding: 1px 5px; border-radius: 4px; font-family: 'Courier New', monospace; }
+.feature-body strong { color: #cbd5e1; }
+.feature-body ul { margin: 6px 0 6px 22px; }
+.feature-body li { margin-bottom: 3px; }
+.area-tag { display: inline-block; font-size: 0.66em; font-weight: 700; padding: 2px 8px; border-radius: 8px; margin-left: auto; flex-shrink: 0; align-self: flex-start; margin-top: 4px; }
+.tag-new      { background: rgba(6,95,70,0.6); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.3); }
+.tag-infra    { background: rgba(12,42,58,0.8); color: #7dd3fc; border: 1px solid rgba(3,105,161,0.3); }
+.tag-security { background: rgba(80,7,36,0.7); color: #f9a8d4; border: 1px solid rgba(190,24,93,0.3); }
+
+/* ── CODE BLOCK (Cursor mcp.json etc.) ──────────────────────────── */
+.code-block { background: #0a1322; border: 1px solid #1e293b; border-radius: 8px; padding: 14px 16px; font-family: 'Courier New', monospace; font-size: 0.82em; color: #cbd5e1; overflow-x: auto; line-height: 1.6; margin: 10px 0 18px; }
+.code-block .cm  { color: #64748b; }
+.code-block .k   { color: #6ee7b7; }
+.code-block .s   { color: #fcd34d; }
+.code-block .n   { color: #f9a8d4; }
+
+/* ── TWO-COL GRID ───────────────────────────────────────────────── */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 12px; }
+@media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+/* ── CLI CHEAT-SHEET TABLE ──────────────────────────────────────── */
+.table-wrap { overflow-x: auto; margin-bottom: 24px; }
+table.cheat { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+table.cheat thead th { background: #1e293b; color: #64748b; text-transform: uppercase; font-size: 0.7em; letter-spacing: 0.6px; padding: 8px 12px; text-align: left; border-bottom: 2px solid #334155; }
+table.cheat tbody tr { border-bottom: 1px solid #1e293b; }
+table.cheat tbody td { padding: 7px 12px; color: #cbd5e1; vertical-align: top; }
+table.cheat code { color: #6ee7b7; background: rgba(16,185,129,0.08); padding: 1px 5px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 0.92em; white-space: nowrap; }
+table.cheat td.muted { color: #94a3b8; }
+
+/* ── ARCHITECTURE ASCII ─────────────────────────────────────────── */
+.arch { background: #0a1322; border: 1px solid #1e293b; border-radius: 8px; padding: 14px 18px; font-family: 'Courier New', monospace; font-size: 0.78em; color: #cbd5e1; line-height: 1.55; white-space: pre; overflow-x: auto; margin: 8px 0 24px; }
+.arch .acc { color: #6ee7b7; }
+.arch .sub { color: #64748b; }
+
+/* ── FREE vs ENTERPRISE COMPARISON ──────────────────────────────── */
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }
+.compare > div { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid #334155; border-radius: 10px; padding: 16px 20px; }
+.compare .free { border-color: #10b981; }
+.compare .paid { border-color: #0369a1; }
+.compare h4    { font-size: 0.78em; font-weight: 800; letter-spacing: 0.8px; text-transform: uppercase; margin-bottom: 8px; }
+.compare .free h4 { color: #6ee7b7; }
+.compare .paid h4 { color: #7dd3fc; }
+.compare ul    { margin: 0; padding: 0 0 0 18px; font-size: 0.86em; color: #cbd5e1; line-height: 1.7; }
+.compare li::marker { color: #475569; }
+@media (max-width: 700px) { .compare { grid-template-columns: 1fr; } }
+
+/* ── FOOTER ─────────────────────────────────────────────────────── */
+.footer { text-align: center; padding: 28px 0 12px; color: #475569; font-size: 0.78em; }
+.footer a { color: #6ee7b7; text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
+
+/* ── PRINT / PDF ────────────────────────────────────────────────── */
+@media print {
+  @page { size: Letter; margin: 0.5in; }
+  body { background: #fff; color: #1e293b; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .container { max-width: none; padding: 0; }
+  .g-topnav { display: none; }
+  .header { background: #064e3b !important; padding: 28px 28px; margin-bottom: 20px; box-shadow: none; }
+  .header h1, .header .tagline, .version-chip { color: #fff !important; }
+  .header .tagline { color: #d1fae5 !important; }
+  .header::before, .header::after { display: none; }
+  .area-heading { color: #475569; margin: 22px 0 10px; }
+  .area-heading::after { background: #cbd5e1; }
+  .feature, .install-card, .kpi, .arch, .code-block, .compare > div { background: #fff !important; border: 1px solid #cbd5e1 !important; color: #1e293b !important; box-shadow: none; page-break-inside: avoid; }
+  .feature-title, .install-card .head, .compare h4 { color: #0f172a !important; }
+  .feature-body, .feature-body strong, .compare ul { color: #334155 !important; }
+  .feature-body code, table.cheat code, .code-block, .arch { color: #047857 !important; background: #f1f5f9 !important; }
+  .arch { color: #1e293b !important; }
+  .arch .acc { color: #047857 !important; }
+  .arch .sub { color: #64748b !important; }
+  .kpi.allow    .v { color: #047857 !important; }
+  .kpi.approval .v { color: #be185d !important; }
+  .kpi.block    .v { color: #b91c1c !important; }
+  .kpi.warn     .v { color: #b45309 !important; }
+  .kpi .l       { color: #475569 !important; }
+  table.cheat thead th, table.cheat tbody td { color: #1e293b !important; background: #fff !important; border-color: #cbd5e1 !important; }
+  table.cheat thead th { background: #f1f5f9 !important; }
+  .badge { border: 1px solid #cbd5e1; }
+  .badge-emerald { background: #d1fae5 !important; color: #065f46 !important; }
+  .badge-teal    { background: #ccfbf1 !important; color: #115e59 !important; }
+  .badge-blue    { background: #dbeafe !important; color: #1e3a8a !important; }
+  .badge-violet  { background: #ede9fe !important; color: #5b21b6 !important; }
+  .footer { color: #64748b; }
+  .footer a { color: #047857; }
+  /* Keep cards together when paginating */
+  .feature, .compare, .install-grid, .kpi-row, .arch { page-break-inside: avoid; }
+  h1, h2, .area-heading { page-break-after: avoid; }
+}
+</style>
+</head>
+<body>
+
+<nav class="g-topnav">
+  <a href="index.html" class="g-brand">
+    <img src="langsmart-logo.svg" alt="APERION" class="g-logo">
+    <span class="g-brand-sub">/ Aperion Docs</span>
+  </a>
+  <div class="g-links">
+    <a href="index.html">Home</a>
+    <a href="smartflow-platform-overview.html">Smartflow Docs</a>
+    <a href="aperion-shield.html" class="active">Aperion Shield</a>
+    <a href="index.html#support">Support</a>
+  </div>
+  <span class="g-badge">v0.3.0 — Developer One-Pager</span>
+</nav>
+
+<div class="container">
+
+  <!-- ─────── HEADER ─────── -->
+  <div class="header">
+    <div class="version-chip">Aperion Shield · v0.3.0 · Developer One-Pager</div>
+    <h1>Local guardrails for AI coding agents,<br>in 60 seconds.</h1>
+    <p class="tagline">
+      A 1.2 MB binary that sits between Cursor / Claude Code and the real MCP servers your agent talks to (Postgres, GitHub, shell, filesystem...). Inspects every <code>tools/call</code> against 45 adaptive rules, blocks the destructive ones, prompts you for the high-risk ones, and lets the other 98% through. No cloud, no telemetry, Apache 2.0.
+    </p>
+    <div class="badge-row">
+      <span class="badge badge-emerald"><i class="fas fa-code-branch"></i>&nbsp;Apache 2.0</span>
+      <span class="badge badge-teal"><i class="fas fa-shield-halved"></i>&nbsp;45 rules · 8 surfaces</span>
+      <span class="badge badge-blue"><i class="fas fa-desktop"></i>&nbsp;macOS · Linux · Windows</span>
+      <span class="badge badge-violet"><i class="fab fa-rust"></i>&nbsp;95 tests · 0 dependencies on the call path</span>
+    </div>
+  </div>
+
+  <!-- ─────── HEADLINE KPI (real-world corpus) ─────── -->
+  <div class="area-heading">Validated against 12,912 real Cursor commands</div>
+  <div class="kpi-row">
+    <div class="kpi allow">    <div class="v">98.42%</div><div class="l">Allow</div></div>
+    <div class="kpi warn">     <div class="v">0.02%</div> <div class="l">Warn</div></div>
+    <div class="kpi approval"> <div class="v">1.48%</div> <div class="l">Approval</div></div>
+    <div class="kpi block">    <div class="v">0.08%</div> <div class="l">Block</div></div>
+  </div>
+
+  <!-- ─────── INSTALL (3 routes) ─────── -->
+  <div class="area-heading">Install (pick one)</div>
+  <div class="install-grid">
+    <div class="install-card brew">
+      <div class="head"><i class="fas fa-mug-hot"></i>&nbsp;Homebrew</div>
+      <pre>brew install \
+  AperionAI/tap/aperion-shield</pre>
+    </div>
+    <div class="install-card docker">
+      <div class="head"><i class="fab fa-docker"></i>&nbsp;Docker</div>
+      <pre>docker pull \
+  ghcr.io/aperionai/shield:shield-v0.3.0</pre>
+    </div>
+    <div class="install-card cargo">
+      <div class="head"><i class="fab fa-rust"></i>&nbsp;Cargo / Pre-built</div>
+      <pre>cargo install aperion-shield
+# or grab a binary tarball from
+# github.com/AperionAI/shield/releases</pre>
+    </div>
+  </div>
+
+  <!-- ─────── 60-SECOND INTEGRATION ─────── -->
+  <div class="area-heading">60-second integration</div>
+
+  <div class="feature new">
+    <div class="feature-header">
+      <div class="feature-num emerald">01</div>
+      <div class="feature-title-wrap">
+        <div class="feature-title">Wrap any MCP server with Shield in <code>~/.cursor/mcp.json</code></div>
+      </div>
+      <span class="area-tag tag-new">Cursor</span>
+    </div>
+    <div class="feature-body">
+      Shield speaks MCP over stdio. Put it as the program, push the real MCP server after <code>--</code>:
+    </div>
+<div class="code-block"><span class="cm">// ~/.cursor/mcp.json</span>
+{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"postgres"</span>: {
+      <span class="k">"command"</span>: <span class="s">"aperion-shield"</span>,
+      <span class="k">"args"</span>: [
+        <span class="s">"--rules"</span>, <span class="s">"~/.shield/shieldset.yaml"</span>,        <span class="cm">// optional; bundled defaults are used otherwise</span>
+        <span class="s">"--"</span>,
+        <span class="s">"npx"</span>, <span class="s">"@modelcontextprotocol/server-postgres"</span>,
+        <span class="s">"postgres://user:pass@host:5432/db"</span>
+      ]
+    }
+  }
+}</div>
+    <div class="feature-body">
+      Same shape works for Claude Code (<code>~/.claude/config.json</code>). On the first run from a clean shell, drop <code>--shadow</code> in <code>args</code> to observe-only for a week, then remove it to enforce.
+    </div>
+  </div>
+
+  <!-- ─────── ARCHITECTURE ─────── -->
+  <div class="area-heading">How it sees the traffic</div>
+  <div class="arch"><span class="sub">Cursor / Claude Code</span>
+       <span class="acc">│</span> JSON-RPC over stdio
+       <span class="acc">▼</span>
+<span class="acc">┌────────────────────────────────────────────────────────────┐</span>
+<span class="acc">│</span> aperion-shield         <span class="sub">  ← shieldset.yaml (45 rules)</span>      <span class="acc">│</span>
+<span class="acc">│</span>   intercepts tools/call                                    <span class="acc">│</span>
+<span class="acc">│</span>   ┌──────────────────────────────────────────────────────┐ <span class="acc">│</span>
+<span class="acc">│</span>   <span class="acc">│</span>  rules → matches → composite score                  <span class="acc">│</span> <span class="acc">│</span>
+<span class="acc">│</span>   <span class="acc">│</span>     <span class="sub">+ workspace_is_prod</span>     bump severity            <span class="acc">│</span> <span class="acc">│</span>
+<span class="acc">│</span>   <span class="acc">│</span>     <span class="sub">+ fingerprint_recent_deny</span>     bump severity      <span class="acc">│</span> <span class="acc">│</span>
+<span class="acc">│</span>   <span class="acc">│</span>     <span class="sub">+ burst_in_progress</span>     bump severity            <span class="acc">│</span> <span class="acc">│</span>
+<span class="acc">│</span>   <span class="acc">│</span>     <span class="sub">- fingerprint_repeated_ok</span>     demote severity    <span class="acc">│</span> <span class="acc">│</span>
+<span class="acc">│</span>   <span class="acc">│</span>  → final severity                                    <span class="acc">│</span> <span class="acc">│</span>
+<span class="acc">│</span>   <span class="acc">│</span>  → Allow │ Warn │ Approval │ Block                   <span class="acc">│</span> <span class="acc">│</span>
+<span class="acc">│</span>   └──────────────────────────────────────────────────────┘ <span class="acc">│</span>
+<span class="acc">└────────────────────────────────────────────────────────────┘</span>
+       <span class="acc">▼</span>
+<span class="sub">real upstream MCP server   (postgres, github, shell, fs, …)</span></div>
+
+  <!-- ─────── WHAT IT CATCHES (2-COLUMN BRIEF) ─────── -->
+  <div class="area-heading">What it catches</div>
+  <div class="two-col">
+    <div class="feature security">
+      <div class="feature-header">
+        <div class="feature-num pink">02</div>
+        <div class="feature-title-wrap"><div class="feature-title">Tool-call surface</div></div>
+        <span class="area-tag tag-security">tools/call</span>
+      </div>
+      <div class="feature-body">
+        <strong>SQL (9):</strong> <code>DROP DATABASE</code>, <code>DROP TABLE</code>, <code>TRUNCATE</code>, <code>ALTER … DROP COLUMN</code>, unscoped <code>UPDATE</code>/<code>DELETE</code>, <code>GRANT ALL</code>, <code>REVOKE FROM PUBLIC</code>, Postgres <code>COPY FROM PROGRAM</code>, MySQL <code>LOAD DATA INFILE</code>.<br>
+        <strong>Git (5):</strong> force-push to protected branches, history rewrites, <code>push --mirror --force</code>, <code>branch -D</code>, <code>checkout .</code>.<br>
+        <strong>Filesystem (6):</strong> <code>rm -rf /</code>, writes/deletes inside sensitive paths (<code>/etc</code>, <code>~/.ssh</code>, <code>~/.aws</code>, <code>/usr/local/bin</code>, …), <code>dd</code> to a block device, <code>find … -delete</code> sweeps, world-writable <code>chmod</code>, recursive <code>chown root</code>.<br>
+        <strong>Secrets exfil (3):</strong> <em>read-secret + post-to-network</em> in one chain, raw SSH/AWS key reads, <code>kubectl get secret … | base64 -d</code> dumps.<br>
+        <strong>Supply chain (2):</strong> <code>curl | sh</code> and family, untrusted npm/pip/cargo registries.<br>
+        <strong>Shells / Privilege (3):</strong> reverse-shell incantations across bash/nc/python/perl/ruby/openssl/socat/PowerShell, sudo-prefixed destruction, setuid grants.<br>
+        <strong>Cloud / k8s / Docker (11):</strong> <code>aws s3 rm --recursive</code>, RDS deletes without snapshot, <code>terraform destroy -auto-approve</code>, <code>kubectl delete namespace</code>, <code>helm uninstall</code>, <code>docker system prune --volumes</code>.<br>
+        <strong>Anomaly (1):</strong> destructive-burst detector across the sliding window.
+      </div>
+    </div>
+    <div class="feature security">
+      <div class="feature-header">
+        <div class="feature-num pink">03</div>
+        <div class="feature-title-wrap"><div class="feature-title">LLM-response surface</div></div>
+        <span class="area-tag tag-security">assistant plan</span>
+      </div>
+      <div class="feature-body">
+        A second pair of eyes on the assistant's <em>plan text</em> before any tool is invoked, catching cases where the agent describes a destructive step in prose:
+        <ul>
+          <li><strong>llm.suggests_drop_database</strong> — assistant proposes a <code>DROP DATABASE</code>.</li>
+          <li><strong>llm.suggests_force_push</strong> — assistant proposes a force-push to a protected branch.</li>
+          <li><strong>llm.suggests_rm_rf</strong> — assistant proposes a recursive delete at root scope.</li>
+          <li><strong>llm.suggests_curl_pipe_sh</strong> — assistant proposes a fetch-and-execute one-liner.</li>
+          <li><strong>llm.suggests_secret_exfil</strong> — assistant describes reading a secret file and piping it to a network endpoint.</li>
+        </ul>
+        Why both surfaces? Because the assistant often writes the plan in plain text <em>before</em> the destructive tool call lands, and a clean catch there is cheaper than catching it at <code>tools/call</code> time.
+      </div>
+    </div>
+  </div>
+
+  <!-- ─────── ADAPTIVE LAYER ─────── -->
+  <div class="area-heading">Adaptive layer (the v0.2 / v0.3 difference)</div>
+  <div class="two-col">
+    <div class="feature new">
+      <div class="feature-header"><div class="feature-num emerald">04</div><div class="feature-title-wrap"><div class="feature-title">Composite scoring</div></div></div>
+      <div class="feature-body">Every matching rule contributes <code>points</code>. The sum decides the final tier — so three medium signals can stack into a critical, and a single weak match never blocks on its own.</div>
+    </div>
+    <div class="feature new">
+      <div class="feature-header"><div class="feature-num teal">05</div><div class="feature-title-wrap"><div class="feature-title">Workspace probe</div></div></div>
+      <div class="feature-body">Shield checks for 12 prod-shaped signals (<code>.env.production</code>, <code>kubeconfig</code>, <code>terraform.tfstate</code>, …) at startup. If matched, every decision gets a <strong>+1 severity bump</strong> for the session.</div>
+    </div>
+    <div class="feature new">
+      <div class="feature-header"><div class="feature-num blue">06</div><div class="feature-title-wrap"><div class="feature-title">Decision memory</div></div></div>
+      <div class="feature-body">Per-fingerprint append-only log under <code>.aperion-shield/decisions.jsonl</code>. After 3 approvals of the same <code>(rule, argv)</code> shape, demote silently. After a recent deny, escalate.</div>
+    </div>
+    <div class="feature new">
+      <div class="feature-header"><div class="feature-num pink">07</div><div class="feature-title-wrap"><div class="feature-title">Burst detector</div></div></div>
+      <div class="feature-body">Sliding window across the current process: 5 destructive matches inside 300 s ⇒ workspace marked "burst-in-progress" and every subsequent match gets bumped one tier until the window clears.</div>
+    </div>
+  </div>
+
+  <!-- ─────── CLI CHEAT-SHEET ─────── -->
+  <div class="area-heading">CLI cheat-sheet</div>
+  <div class="table-wrap">
+    <table class="cheat">
+      <thead><tr><th style="width: 36%;">Flag</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>--rules PATH</code></td>      <td class="muted">Custom shieldset YAML. Bundled defaults if omitted.</td></tr>
+        <tr><td><code>--shadow</code></td>          <td class="muted">Observe-only — log everything, block nothing. Mirrors enterprise <code>SHIELD_MODE=shadow</code>.</td></tr>
+        <tr><td><code>--auto-deny-high</code></td>  <td class="muted">Auto-deny High-severity instead of prompting. CI / unattended scripts.</td></tr>
+        <tr><td><code>--no-workspace-probe</code></td><td class="muted">Disable the prod-signal bump.</td></tr>
+        <tr><td><code>--no-memory</code> · <code>--no-burst</code></td><td class="muted">Disable decision-memory or burst-detector adjustments.</td></tr>
+        <tr><td><code>--check</code></td>           <td class="muted">One-shot evaluation mode. Reads JSON-Lines from stdin, prints decisions to stdout. No MCP / IDE needed.</td></tr>
+        <tr><td><code>--workspace PATH</code></td>  <td class="muted">Override the probe root (check-mode only). Useful for batch testing.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ─────── TEST AGAINST YOUR OWN HISTORY ─────── -->
+  <div class="area-heading">Test against your own command history</div>
+  <div class="feature infra">
+    <div class="feature-header">
+      <div class="feature-num blue">08</div>
+      <div class="feature-title-wrap"><div class="feature-title">Mine your Cursor transcripts, run them through Shield</div></div>
+      <span class="area-tag tag-infra">wide-scale test</span>
+    </div>
+    <div class="feature-body">
+      Cursor stores every conversation as JSON-Lines under <code>~/.cursor/projects/**/*.jsonl</code>. The bundled <code>scripts/extract-cursor-corpus.py</code> walks them, pulls every shell command and assistant-text turn, redacts AKIA / sk- / ghp_ / JWT-shaped secrets, dedupes, and emits the <code>--check</code> schema directly:
+    </div>
+<div class="code-block"><span class="cm"># Mine your history, evaluate every command, surface non-allow decisions.</span>
+python3 scripts/extract-cursor-corpus.py --shell-only \
+  | aperion-shield --check --no-memory --no-burst \
+  | jq -c <span class="s">'select(.decision != "allow")'</span>
+
+<span class="cm"># Save the corpus for re-use; run again later after editing rules.</span>
+python3 scripts/extract-cursor-corpus.py --shell-only --out my-history.jsonl
+aperion-shield --check --rules my-shieldset.yaml &lt; my-history.jsonl &gt; decisions.jsonl</div>
+    <div class="feature-body">
+      The 13k-command corpus that drove the v0.3 rule-quality pass was harvested with this exact tool. No data leaves the machine.
+    </div>
+  </div>
+
+  <!-- ─────── FREE vs ENTERPRISE ─────── -->
+  <div class="area-heading">Free vs Enterprise</div>
+  <div class="compare">
+    <div class="free">
+      <h4><i class="fas fa-code-branch"></i> &nbsp;aperion-shield (this)</h4>
+      <ul>
+        <li>45 rules across 8 destructive surfaces</li>
+        <li>Composite scoring + workspace probe + decision memory + burst detector</li>
+        <li>YAML <code>shieldset</code> — bring your own rules</li>
+        <li>Local audit log (JSON-Lines to stderr)</li>
+        <li>Drop-in for Cursor and Claude Code over stdio</li>
+        <li>Apache 2.0 — no account, no telemetry, no cloud</li>
+      </ul>
+    </div>
+    <div class="paid">
+      <h4><i class="fas fa-shield-halved"></i> &nbsp;Aperion Smartflow (paid)</h4>
+      <ul>
+        <li>Hosted approval queue with Slack / Teams routing and SSO</li>
+        <li>Tamper-evident audit chain — RFC 3161 timestamps, hash-linked</li>
+        <li>AI-BOM + EU-AI-Act conformity console</li>
+        <li>Cross-fleet policy + per-team / per-repo overrides</li>
+        <li>SOC 2 / HIPAA / GDPR connectors</li>
+        <li>Same rule language — your <code>shieldset.yaml</code> works in both</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ─────── BUILD + LINKS ─────── -->
+  <div class="area-heading">Build from source · references</div>
+  <div class="feature infra">
+    <div class="feature-header">
+      <div class="feature-num blue">09</div>
+      <div class="feature-title-wrap"><div class="feature-title">From a fresh checkout</div></div>
+      <span class="area-tag tag-infra">build</span>
+    </div>
+    <div class="feature-body">Rust 1.75+ stable. No system dependencies, no native libraries on the call path.</div>
+<div class="code-block">git clone https://github.com/AperionAI/shield.git
+cd shield
+cargo build --release
+./target/release/aperion-shield --version    <span class="cm"># aperion-shield 0.3.0</span>
+cargo test --release    <span class="cm"># 44 unit + 51 integration = 95 tests, all green</span></div>
+    <div class="feature-body">
+      <strong>Repo:</strong> <a href="https://github.com/AperionAI/shield" style="color: #6ee7b7;">github.com/AperionAI/shield</a> &nbsp;·&nbsp;
+      <strong>Releases:</strong> <a href="https://github.com/AperionAI/shield/releases" style="color: #6ee7b7;">/releases</a> &nbsp;·&nbsp;
+      <strong>Container:</strong> <code>ghcr.io/aperionai/shield</code> &nbsp;·&nbsp;
+      <strong>Crate:</strong> <a href="https://crates.io/crates/aperion-shield" style="color: #6ee7b7;">crates.io/crates/aperion-shield</a> &nbsp;·&nbsp;
+      <strong>Full reference:</strong> <a href="https://docs.aperion.ai/aperion-shield.html" style="color: #6ee7b7;">docs.aperion.ai/aperion-shield</a> &nbsp;·&nbsp;
+      <strong>v0.2 release notes:</strong> <a href="https://docs.aperion.ai/aperion-shield-0.2.0-release.html" style="color: #6ee7b7;">/aperion-shield-0.2.0-release</a>
+    </div>
+  </div>
+
+  <div class="footer">
+    Aperion Shield is free, open-source, Apache 2.0 &nbsp;·&nbsp; built by <a href="https://aperion.ai">APERION</a> &nbsp;·&nbsp;
+    Print this page (Cmd-P / Ctrl-P → "Save as PDF") for a clean one-pager handout.
+  </div>
+
+</div>
+
+</body>
+</html>
