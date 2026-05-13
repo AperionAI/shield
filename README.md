@@ -10,8 +10,20 @@ supply-chain RCE, reverse shells, sudo / privilege escalation, cloud
 prompts you for approval, or lets it through with a warning banner.
 
 **v0.3 (current) eliminates noise.** Wide-scale validation against
-~13,000 real Cursor agent commands cut the false-positive approval
-rate from 73% to 1.5% by:
+~13,000 real Cursor agent commands -- run from a typical project root
+with no prod-signal files -- shows:
+
+```
+ 12,708 (98.42%)   allow      <-- legitimate operations pass through
+      3 (0.02%)   warn        <-- annotated, agent continues
+    191 (1.48%)   approval    <-- pause for human signoff (writes to
+                                    /etc, ~/.ssh, /usr/local/bin, etc.)
+     10 (0.08%)   block       <-- hard stop (curl|bash, env->curl
+                                    exfiltration, reverse-shell patterns)
+```
+
+That's a **94% reduction in approval-prompt noise vs v0.2** (which
+fired on 73% of commands). The fixes:
 
 - Recognising `ssh -i FILE`, `kubectl --kubeconfig FILE`, `KUBECONFIG=FILE`,
   and 20+ similar tool-flag patterns as identity / config args -- not
@@ -191,6 +203,47 @@ aperion-shield --shadow -- npx @modelcontextprotocol/server-postgres ...
 # CI / unattended use — never prompt, deny anything High
 aperion-shield --auto-deny-high -- npx @modelcontextprotocol/server-postgres ...
 ```
+
+---
+
+## Workspace probe (prod-shaped repos run stricter)
+
+Shield boots a tiny "is this a production-shaped workspace?" probe at
+startup. If the CWD contains any of these signals, every match in this
+session gets a **+1 severity bump** -- a warn becomes an approval, an
+approval becomes a block, a block stays a block:
+
+```
+.env.production    .env.prod              kubeconfig
+prod/              production/            .kube/config
+Procfile           production.yml         production.yaml
+k8s/prod/          deploy/prod/           .terraform/terraform.tfstate
+```
+
+This is by design: when you're operating an agent in a workspace that
+already touches live infrastructure, you want a harder gate. In a
+vanilla project root the probe doesn't fire and you see the raw rule
+output. The probe also runs at the cwd Shield started in, NOT at
+`$HOME` -- so dropping a kubeconfig in your home directory doesn't
+affect Shield invocations launched from a clean repo.
+
+Three ways to inspect / control:
+
+```bash
+# Confirm what the probe sees right now (printed in startup banner).
+aperion-shield --check --no-memory < /dev/null
+# [shield-check] ... workspace_prod=false signals=[]
+
+# Override the probe root -- useful for batch testing.
+aperion-shield --check --workspace /tmp/empty < cases.jsonl
+
+# Disable the probe entirely (raw rule output, no bumps).
+aperion-shield --check --no-workspace-probe < cases.jsonl
+```
+
+For interpreting wide-scale runs: anchor on the **realistic-project-
+root** number (probe off OR run from a vanilla repo). The probe-on
+number is the "strictest-mode preview" for prod-shaped workspaces.
 
 ---
 
