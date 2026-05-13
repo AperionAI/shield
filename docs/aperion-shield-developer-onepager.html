@@ -138,25 +138,46 @@ table.cheat td.muted { color: #94a3b8; }
 .footer a { color: #6ee7b7; text-decoration: none; }
 .footer a:hover { text-decoration: underline; }
 
-/* ── PRINT / PDF ────────────────────────────────────────────────── */
-@media print {
+/* ── PDF EXPORT TOOLBAR (screen only) ───────────────────────────── */
+.pdf-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 16px; margin: 0 auto 16px; max-width: 920px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid #334155; border-radius: 10px; font-size: 0.85em; color: #94a3b8; }
+.pdf-toolbar .pdf-label { font-weight: 700; color: #cbd5e1; margin-right: 4px; }
+.pdf-toolbar button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 7px; border: 1px solid; cursor: pointer; font-family: inherit; font-size: 0.92em; font-weight: 700; transition: transform .12s, box-shadow .12s; }
+.pdf-toolbar button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+.pdf-toolbar button.btn-dark  { background: linear-gradient(135deg, #064e3b 0%, #047857 100%); border-color: #10b981; color: #d1fae5; }
+.pdf-toolbar button.btn-light { background: #f1f5f9; border-color: #cbd5e1; color: #0f172a; }
+.pdf-toolbar button.btn-cli   { background: #1e293b; border-color: #475569; color: #cbd5e1; }
+.pdf-toolbar .toast { margin-left: auto; font-size: 0.85em; color: #6ee7b7; opacity: 0; transition: opacity .25s; }
+.pdf-toolbar .toast.show { opacity: 1; }
+@media (max-width: 700px) { .pdf-toolbar { font-size: 0.78em; } .pdf-toolbar .toast { margin-left: 0; flex-basis: 100%; } }
+@media print { .pdf-toolbar { display: none !important; } }
+</style>
+
+<!-- ── PRINT-LIGHT STYLESHEET (default print path) ────────────────
+     Lives in its own <style> tag with id="print-light" so the
+     "Save dark PDF" button can disable it at runtime by flipping
+     the media attribute to "not all". -->
+<style id="print-light" media="print">
   @page { size: Letter; margin: 0.5in; }
-  body { background: #fff; color: #1e293b; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { background: #fff !important; color: #1e293b !important; }
+  body { padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; font-size: 11pt; }
   .container { max-width: none; padding: 0; }
   .g-topnav { display: none; }
-  .header { background: #064e3b !important; padding: 28px 28px; margin-bottom: 20px; box-shadow: none; }
+  .header { background: #064e3b !important; padding: 28px 28px; margin-bottom: 18px; box-shadow: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .header h1, .header .tagline, .version-chip { color: #fff !important; }
   .header .tagline { color: #d1fae5 !important; }
   .header::before, .header::after { display: none; }
-  .area-heading { color: #475569; margin: 22px 0 10px; }
-  .area-heading::after { background: #cbd5e1; }
-  .feature, .install-card, .kpi, .arch, .code-block, .compare > div { background: #fff !important; border: 1px solid #cbd5e1 !important; color: #1e293b !important; box-shadow: none; page-break-inside: avoid; }
+  .area-heading { color: #475569 !important; margin: 18px 0 8px; }
+  .area-heading::after { background: #cbd5e1 !important; }
+  .feature, .install-card, .kpi, .compare > div { background: #fff !important; border: 1px solid #cbd5e1 !important; color: #1e293b !important; box-shadow: none !important; page-break-inside: avoid; }
+  .arch, .code-block { background: #f1f5f9 !important; border: 1px solid #cbd5e1 !important; color: #1e293b !important; page-break-inside: avoid; }
   .feature-title, .install-card .head, .compare h4 { color: #0f172a !important; }
   .feature-body, .feature-body strong, .compare ul { color: #334155 !important; }
-  .feature-body code, table.cheat code, .code-block, .arch { color: #047857 !important; background: #f1f5f9 !important; }
-  .arch { color: #1e293b !important; }
-  .arch .acc { color: #047857 !important; }
-  .arch .sub { color: #64748b !important; }
+  .feature-body code, table.cheat code { color: #047857 !important; background: #f1f5f9 !important; }
+  .code-block .cm, .arch .sub { color: #64748b !important; }
+  .code-block .k, .arch .acc  { color: #047857 !important; }
+  .code-block .s, .install-card.brew  .head { color: #b45309 !important; }
+  .code-block .n, .install-card.cargo .head { color: #be123c !important; }
+  .install-card.docker .head { color: #1e40af !important; }
   .kpi.allow    .v { color: #047857 !important; }
   .kpi.approval .v { color: #be185d !important; }
   .kpi.block    .v { color: #b91c1c !important; }
@@ -169,12 +190,31 @@ table.cheat td.muted { color: #94a3b8; }
   .badge-teal    { background: #ccfbf1 !important; color: #115e59 !important; }
   .badge-blue    { background: #dbeafe !important; color: #1e3a8a !important; }
   .badge-violet  { background: #ede9fe !important; color: #5b21b6 !important; }
-  .footer { color: #64748b; }
-  .footer a { color: #047857; }
-  /* Keep cards together when paginating */
-  .feature, .compare, .install-grid, .kpi-row, .arch { page-break-inside: avoid; }
+  .footer { color: #64748b !important; }
+  .footer a { color: #047857 !important; }
+  /* Pagination -- keep meaningful chunks together. */
+  .feature, .compare > div, .install-card, .kpi-row, .arch, .code-block, table.cheat { page-break-inside: avoid; }
+  .area-heading + .feature, .area-heading + .install-grid, .area-heading + .kpi-row { page-break-before: avoid; }
   h1, h2, .area-heading { page-break-after: avoid; }
-}
+</style>
+
+<!-- ── PRINT-DARK STYLESHEET (preserves the website's dark theme) ──
+     Disabled by default (media="not all"). The toolbar button or
+     `?theme=dark` URL param flips the media attribute to "print"
+     and disables print-light at the same time. Browsers honor
+     print-color-adjust: exact for these. -->
+<style id="print-dark" media="not all">
+  @page { size: Letter; margin: 0.4in; background: #0f172a; }
+  html, body { background: #0f172a !important; color: #e2e8f0 !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  body * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  body { padding: 0; font-size: 11pt; }
+  .container { max-width: none; padding: 0 0.1in; }
+  .g-topnav { display: none; }
+  /* Force the gradient header to render with bg-color fallback for any renderer that drops gradients. */
+  .header { background: linear-gradient(135deg, #064e3b 0%, #047857 45%, #0c2a3a 100%), #064e3b !important; box-shadow: none !important; }
+  .feature, .install-card, .kpi, .compare > div, .arch, .code-block { box-shadow: none !important; page-break-inside: avoid; }
+  .feature, .compare > div, .install-card, .kpi-row, .arch, .code-block, table.cheat { page-break-inside: avoid; }
+  h1, h2, .area-heading { page-break-after: avoid; }
 </style>
 </head>
 <body>
@@ -194,6 +234,21 @@ table.cheat td.muted { color: #94a3b8; }
 </nav>
 
 <div class="container">
+
+  <!-- ─────── PDF EXPORT TOOLBAR (screen only) ─────── -->
+  <div class="pdf-toolbar" role="toolbar" aria-label="PDF export controls">
+    <span class="pdf-label"><i class="fas fa-file-pdf"></i>&nbsp;Save as PDF:</span>
+    <button class="btn-dark"  type="button" id="btn-pdf-dark"  title="Preserve the site's dark theme">
+      <i class="fas fa-moon"></i>&nbsp;Dark (matches site)
+    </button>
+    <button class="btn-light" type="button" id="btn-pdf-light" title="White-background handout, ink-friendly">
+      <i class="fas fa-sun"></i>&nbsp;Light (handout)
+    </button>
+    <button class="btn-cli"   type="button" id="btn-pdf-cli"   title="Copy a headless-Chrome command for CLI / CI use">
+      <i class="fas fa-terminal"></i>&nbsp;Copy CLI command
+    </button>
+    <span class="toast" id="pdf-toast" aria-live="polite"></span>
+  </div>
 
   <!-- ─────── HEADER ─────── -->
   <div class="header">
@@ -449,10 +504,97 @@ cargo test --release    <span class="cm"># 44 unit + 51 integration = 95 tests, 
 
   <div class="footer">
     Aperion Shield is free, open-source, Apache 2.0 &nbsp;·&nbsp; built by <a href="https://aperion.ai">APERION</a> &nbsp;·&nbsp;
-    Print this page (Cmd-P / Ctrl-P → "Save as PDF") for a clean one-pager handout.
+    Use the toolbar above to save this page as a PDF (dark or light handout).
   </div>
 
 </div>
+
+<script>
+/* ───── PDF export controls ─────
+   The page ships TWO print stylesheets:
+     #print-light : applied by default when the browser prints  (white handout)
+     #print-dark  : disabled by default; flipped to media="print" for dark PDF
+   The dark button just swaps the media attributes, fires window.print(),
+   then swaps them back so the page is ready for the next click.
+
+   Users with the URL param ?theme=dark land directly in dark-print mode,
+   which is what the headless-Chrome CLI script uses. */
+(function () {
+  var light = document.getElementById('print-light');
+  var dark  = document.getElementById('print-dark');
+  var toast = document.getElementById('pdf-toast');
+
+  function showToast(msg) {
+    if (!toast) return;
+    toast.textContent = msg;
+    toast.classList.add('show');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(function () { toast.classList.remove('show'); }, 2200);
+  }
+
+  function setDarkPrint(on) {
+    if (!light || !dark) return;
+    if (on) { light.media = 'not all'; dark.media = 'print'; }
+    else    { light.media = 'print';   dark.media = 'not all'; }
+  }
+
+  // Honor ?theme=dark for headless Chrome / direct PDF links.
+  try {
+    var params = new URLSearchParams(window.location.search);
+    if ((params.get('theme') || '').toLowerCase() === 'dark') setDarkPrint(true);
+  } catch (_) { /* old browser, ignore */ }
+
+  function wire(id, fn) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('click', fn);
+  }
+
+  wire('btn-pdf-light', function () {
+    setDarkPrint(false);
+    showToast('Opening print dialog · choose "Save as PDF"');
+    setTimeout(function () { window.print(); }, 60);
+  });
+
+  wire('btn-pdf-dark', function () {
+    setDarkPrint(true);
+    showToast('Dark theme enabled · choose "Save as PDF" and tick "Background graphics"');
+    setTimeout(function () {
+      window.print();
+      // Restore default after the dialog returns, so a follow-up Cmd-P still gives a light handout.
+      setTimeout(function () { setDarkPrint(false); }, 800);
+    }, 60);
+  });
+
+  wire('btn-pdf-cli', function () {
+    var url = window.location.origin + window.location.pathname + '?theme=dark';
+    var cmd = [
+      '# Headless Chrome — generates a dark PDF identical to the site',
+      '/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\',
+      '  --headless=new --disable-gpu --no-pdf-header-footer \\',
+      '  --virtual-time-budget=10000 \\',
+      '  --print-to-pdf=aperion-shield-onepager-dark.pdf \\',
+      '  "' + url + '"'
+    ].join('\n');
+    var ok = false;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cmd).then(
+        function () { showToast('CLI command copied to clipboard'); },
+        function () { fallback(); }
+      );
+      ok = true;
+    }
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = cmd; ta.setAttribute('readonly',''); ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); showToast('CLI command copied'); }
+      catch (e) { window.prompt('Copy this command:', cmd); }
+      document.body.removeChild(ta);
+    }
+    if (!ok) fallback();
+  });
+})();
+</script>
 
 </body>
 </html>

@@ -436,6 +436,48 @@ The binary is self-contained: ship just the file.
 
 ---
 
+## Developer one-pager (PDF)
+
+A self-contained HTML one-pager lives at
+[`docs/aperion-shield-developer-onepager.html`](docs/aperion-shield-developer-onepager.html)
+(also published at <https://docs.aperion.ai/aperion-shield-developer-onepager.html>).
+
+Open the page and use the **Save as PDF** toolbar at the top — two one-click
+options:
+
+| Button                  | Result                                                                   |
+| ----------------------- | ------------------------------------------------------------------------ |
+| **Dark (matches site)** | PDF preserves the website's dark navy / emerald theme exactly.           |
+| **Light (handout)**     | White-background, ink-friendly handout for printing & internal hand-out. |
+| **Copy CLI command**    | Copies a headless-Chrome command for CI / batch generation.              |
+
+When you click "Save as PDF" in the browser dialog, make sure **Background
+graphics** is enabled (Chrome: *More settings → Options → Background graphics*).
+Without it the browser strips colors and you get a faded version.
+
+### CLI export (headless Chrome)
+
+For CI, automation, or "just give me the file" use:
+
+```bash
+# Dark theme (default) — looks identical to the site
+./scripts/render-onepager-pdf.sh
+
+# White-background handout
+./scripts/render-onepager-pdf.sh --light
+
+# Custom URL / output path
+./scripts/render-onepager-pdf.sh --url file://$PWD/docs/aperion-shield-developer-onepager.html \
+                                  --out ~/Desktop/shield.pdf
+```
+
+The script auto-detects Chrome, Chromium, Brave, or Edge. Set `CHROME_BIN` to
+override. Append `?theme=dark` to the URL manually if you're feeding it to
+another PDF renderer — the page's JS picks that up and swaps the print
+stylesheet at load time.
+
+---
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
