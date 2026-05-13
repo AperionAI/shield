@@ -173,6 +173,59 @@ aperion-shield --auto-deny-high -- npx @modelcontextprotocol/server-postgres ...
 
 ---
 
+## Wide-scale testing without an IDE
+
+Want to throw hundreds of synthetic tool-calls at the engine before
+wiring it into Cursor? Shield ships a one-shot `--check` mode that
+reads JSON-Lines from stdin, runs each one through the full engine
+(rules + composite scoring + workspace probe + memory + burst), and
+emits one decision per line to stdout.
+
+```bash
+# One-off
+echo '{"tool":"execute_sql","params":{"query":"DROP DATABASE x"}}' \
+  | aperion-shield --check
+
+# Batch — JSON-Lines in, JSON-Lines out
+aperion-shield --check < tests/corpus/golden.jsonl
+```
+
+Input schema per line (the `expect` field is optional and enables
+pass/fail grading + a non-zero exit on any mismatch):
+
+```json
+{"tool":"execute_sql","params":{"query":"DROP DATABASE x"},"expect":"block"}
+{"text":"I will rm -rf /","expect":"warn"}
+```
+
+The bundled corpus at
+[`tests/corpus/golden.jsonl`](tests/corpus/golden.jsonl)
+covers every shipping rule (positive + negative cases). The
+[`scripts/check-corpus.sh`](scripts/check-corpus.sh) wrapper formats
+the output for humans:
+
+```bash
+# Build once, run the corpus
+cargo build --release
+SHIELD_BIN=./target/release/aperion-shield scripts/check-corpus.sh
+
+# Against your own corpus
+SHIELD_BIN=./target/release/aperion-shield scripts/check-corpus.sh ./my-cases.jsonl
+
+# With a custom ruleset and a fixtured prod workspace
+RULES=my.yaml WORKSPACE=/tmp/fake-prod \
+  SHIELD_BIN=./target/release/aperion-shield scripts/check-corpus.sh
+```
+
+`--check` honours the same `--rules`, `--no-workspace-probe`,
+`--no-memory`, and `--no-burst` flags as the MCP-proxy mode. There's
+also a `--workspace <PATH>` flag (check-mode only) that overrides the
+prod-probe root so you can simulate "what would happen in a prod repo"
+without `cd`-ing anywhere. Decision memory and burst are auto-disabled
+inside `check-corpus.sh` for deterministic batch runs.
+
+---
+
 ## Approving a request
 
 When a `High`-severity rule fires, Shield logs a line like:

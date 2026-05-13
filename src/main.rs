@@ -95,6 +95,26 @@ struct Cli {
     #[arg(long, value_name = "MODE", value_parser = ["public", "off"])]
     telemetry: Option<String>,
 
+    /// One-shot evaluation mode: read tool-call descriptors from stdin
+    /// (one JSON object per line), print the engine's decision for each
+    /// as JSON to stdout, and exit. No MCP / upstream / IDE required --
+    /// designed for batch testing, CI, and ad-hoc rule validation.
+    ///
+    /// Input schema per line:
+    ///   {"tool": "execute_sql", "params": {"query": "DROP DATABASE x"}}
+    ///   {"text": "I will DROP DATABASE prod"}             (llm_response scope)
+    ///   {... "expect": "allow|warn|approval|block"}       (optional)
+    ///
+    /// Exit code: 0 if all expectations met (or none given), 1 otherwise.
+    #[arg(long, conflicts_with = "upstream")]
+    check: bool,
+
+    /// Override the workspace root for the prod-probe (check-mode only).
+    /// Default: current working directory. Useful for fixturing prod-bump
+    /// behaviour against a temporary directory tree.
+    #[arg(long, value_name = "PATH", requires = "check")]
+    workspace: Option<PathBuf>,
+
     /// Trailing args after `--` are the upstream MCP server command.
     /// Example: `aperion-shield -- npx @modelcontextprotocol/server-postgres ...`
     #[arg(trailing_var_arg = true, num_args = 0..)]
@@ -131,9 +151,14 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
+    if cli.check {
+        return run_check_mode(&cli).await;
+    }
+
     if cli.upstream.is_empty() {
         return Err(anyhow!(
-            "no upstream MCP server command given. Usage: aperion-shield [--rules PATH] [--shadow] -- <upstream-mcp> [args...]"
+            "no upstream MCP server command given. Usage: aperion-shield [--rules PATH] [--shadow] -- <upstream-mcp> [args...]\n\
+             (For one-shot rule testing without MCP, use `aperion-shield --check`.)"
         ));
     }
 
@@ -268,6 +293,199 @@ fn load_engine(path: Option<&std::path::Path>) -> anyhow::Result<Engine> {
         }
         None => Ok(Engine::builtin_default()),
     }
+}
+
+/// One-shot batch evaluation. Reads JSON-Lines from stdin, prints one
+/// JSON decision per line to stdout, summary to stderr, exits non-zero
+/// if any `expect` field failed.
+///
+/// Designed for wide-scale rule validation, CI checks, and ad-hoc
+/// red-team exploration -- the same code path the MCP proxy uses, but
+/// without MCP / IDE / upstream-process plumbing.
+async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
+    let engine = load_engine(cli.rules.as_deref())?;
+
+    let workspace = {
+        let mut policy = engine.policy.clone();
+        if cli.no_workspace_probe {
+            policy.workspace_probe.enabled = false;
+        }
+        match &cli.workspace {
+            Some(p) => WorkspaceContext::probe_at(&policy, p),
+            None => WorkspaceContext::probe(&policy),
+        }
+    };
+    let mut mem_cfg = engine.policy.decision_memory.clone();
+    if cli.no_memory {
+        mem_cfg.enabled = false;
+    }
+    let memory = DecisionMemory::open(mem_cfg);
+    let mut burst_cfg = engine.policy.burst_detector.clone();
+    if cli.no_burst {
+        burst_cfg.enabled = false;
+    }
+    let burst = BurstDetector::new(burst_cfg);
+
+    eprintln!(
+        "[shield-check] engine: {} rules | workspace_prod={} signals={:?} composite={} memory={} burst={}",
+        engine.rules.len(),
+        workspace.is_prod,
+        workspace.matched_signals,
+        engine.policy.composite_scoring.enabled,
+        memory.enabled(),
+        engine.policy.burst_detector.enabled,
+    );
+
+    let mut total = 0usize;
+    let mut expected_failures = 0usize;
+    let mut by_decision: std::collections::BTreeMap<&'static str, usize> = Default::default();
+
+    let stdin = tokio::io::stdin();
+    let mut reader = BufReader::new(stdin);
+    let mut line = String::new();
+    let mut stdout = tokio::io::stdout();
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                error!("[shield-check] stdin read error: {}", e);
+                break;
+            }
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+        let input: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(e) => {
+                let err = json!({"error": format!("invalid JSON: {}", e), "input": trimmed});
+                let _ = stdout.write_all(err.to_string().as_bytes()).await;
+                let _ = stdout.write_all(b"\n").await;
+                expected_failures += 1;
+                total += 1;
+                continue;
+            }
+        };
+
+        // Two input shapes: tool-call OR llm_response text.
+        let expect = input.get("expect").and_then(|v| v.as_str()).map(str::to_string);
+
+        let (eval, scope) = if let Some(text) = input.get("text").and_then(|v| v.as_str()) {
+            let adj = Adjustments {
+                workspace_is_prod: workspace.is_prod,
+                burst_in_progress: burst.in_burst(),
+                ..Default::default()
+            };
+            (engine.evaluate_text(text, adj), "llm_response")
+        } else {
+            let tool = input.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+            let params = input.get("params").cloned().unwrap_or(Value::Null);
+            // Canonicalise so fingerprints / extractors see what the proxy sees.
+            let canonical = if params.get("name").is_some() || params.get("arguments").is_some() {
+                params.clone()
+            } else {
+                json!({ "name": tool, "arguments": params })
+            };
+            // Pre-pass to fingerprint the primary rule, then re-eval with memory.
+            let first_adj = Adjustments {
+                workspace_is_prod: workspace.is_prod,
+                burst_in_progress: burst.in_burst(),
+                ..Default::default()
+            };
+            let first = engine.evaluate(tool, &canonical, first_adj);
+            let mv = if let Some(primary) = first
+                .matches
+                .iter()
+                .max_by(|a, b| a.severity.cmp(&b.severity).then(a.points.cmp(&b.points)))
+            {
+                let fp = fingerprint(&primary.rule_id, &canonical);
+                memory.verdict_for(&fp)
+            } else {
+                Default::default()
+            };
+            let adj = Adjustments {
+                workspace_is_prod: workspace.is_prod,
+                burst_in_progress: burst.in_burst(),
+                fingerprint_recently_denied: mv.recent_deny,
+                fingerprint_repeatedly_approved: mv.repeated_approve,
+            };
+            (engine.evaluate(tool, &canonical, adj), "tool_call")
+        };
+
+        let decision = decide(&eval);
+        let label = decision.label();
+        *by_decision.entry(label).or_insert(0) += 1;
+
+        // Track burst window (parity with proxy path).
+        if decision.is_blocking() || matches!(decision, Decision::Warn { .. }) {
+            let _ = burst.observe();
+        }
+
+        let passed = expect.as_deref().map(|e| e.eq_ignore_ascii_case(label));
+        if passed == Some(false) {
+            expected_failures += 1;
+        }
+        total += 1;
+
+        let mut record = json!({
+            "input": input,
+            "scope": scope,
+            "decision": label,
+            "matched_rules": eval.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>(),
+            "raw_severity": eval.raw_severity.as_str(),
+            "composite_points": eval.composite_points,
+            "composite_severity": eval.composite_severity.as_str(),
+            "final_severity": eval.final_severity.as_str(),
+            "adjustments": eval.adjustments_applied,
+        });
+        match &decision {
+            Decision::Block { rule_id, reason, safer_alternative, contributing_rules, .. }
+            | Decision::Approval { rule_id, reason, safer_alternative, contributing_rules, .. } => {
+                record["primary_rule_id"] = json!(rule_id);
+                record["reason"] = json!(reason);
+                if let Some(s) = safer_alternative {
+                    record["safer_alternative"] = json!(s);
+                }
+                record["contributing_rules"] = json!(contributing_rules);
+            }
+            Decision::Warn { rule_id, banner, safer_alternative, .. } => {
+                record["primary_rule_id"] = json!(rule_id);
+                record["banner"] = json!(banner);
+                if let Some(s) = safer_alternative {
+                    record["safer_alternative"] = json!(s);
+                }
+            }
+            Decision::Allow => {}
+        }
+        if let Some(ok) = passed {
+            record["expected"] = json!(expect.as_deref().unwrap_or(""));
+            record["passed"] = json!(ok);
+        }
+
+        let _ = stdout.write_all(record.to_string().as_bytes()).await;
+        let _ = stdout.write_all(b"\n").await;
+    }
+    let _ = stdout.flush().await;
+
+    eprintln!(
+        "[shield-check] total={} {} expected_failures={}",
+        total,
+        by_decision
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join(" "),
+        expected_failures,
+    );
+
+    if expected_failures > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn spawn_upstream(cmd: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdout)> {
