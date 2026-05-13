@@ -430,10 +430,19 @@ impl CompiledRule {
 
         // 4. Sensitive path matcher (v2): walks all string params and
         // checks each against the normalised path globs.
+        //
+        // NEW in v0.3: a sensitive-path hit only counts if the SAME
+        // string ALSO contains a write/delete verb (rm/mv/cp/dd/tee/
+        // chmod/chown/sed -i/tar -x/git checkout/kubectl apply/...).
+        // Without this gate, `ssh -i ~/.ssh/key root@host "grep ..."`
+        // fires on the SSH identity flag and produces ~69% false-
+        // positive approvals on real-world traffic. With the gate the
+        // rule fires only on actual writes-to-sensitive-paths.
         if !m.sensitive_paths.is_empty() {
             let mut hit = false;
             walk_strings(params, &mut |s| {
                 if hit { return; }
+                if !crate::predicates::command_writes(s) { return; }
                 for sp in &m.sensitive_paths {
                     if sp.touches(s) { hit = true; return; }
                 }

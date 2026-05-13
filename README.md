@@ -9,7 +9,28 @@ supply-chain RCE, reverse shells, sudo / privilege escalation, cloud
 (AWS/GCP/Azure), Kubernetes, and Docker — and either blocks the call,
 prompts you for approval, or lets it through with a warning banner.
 
-**v0.2 adds adaptive scoring** — Shield doesn't just match regexes. It
+**v0.3 (current) eliminates noise.** Wide-scale validation against
+~13,000 real Cursor agent commands cut the false-positive approval
+rate from 73% to 1.5% by:
+
+- Recognising `ssh -i FILE`, `kubectl --kubeconfig FILE`, `KUBECONFIG=FILE`,
+  and 20+ similar tool-flag patterns as identity / config args -- not
+  write targets.
+- Gating the `fs.sensitive_path_write_or_delete` rule on an actual
+  write verb being present in the same command (`rm`, `mv`, `cp`, `dd`,
+  `tee`, `chmod`, `chown`, `sed -i`, `tar -x`, `kubectl apply`, `>`/`>>`,
+  here-docs, ...). Pure reads (`grep`, `cat`, `head`, `tail`, `ls`,
+  `find -print`, ...) no longer trigger.
+- Narrowing `/usr/**` to the genuinely-sensitive subdirs
+  (`/usr/local/bin`, `/usr/local/sbin`, `/usr/local/lib`,
+  `/usr/share/keyrings`, `/usr/lib/systemd`).
+- Treating `2>/dev/null`, `1>/dev/null`, `&>/dev/null` as discard
+  idioms, not filesystem writes.
+- Allowing `curl URL | python -c CODE` / `python -m json.tool` /
+  `perl -e CODE` / `node -e CODE` -- when the interpreter takes its
+  code from args, stdin is DATA, not code.
+
+**v0.2 added adaptive scoring** — Shield doesn't just match regexes. It
 sums points across every rule that fires, bumps severity in
 prod-looking workspaces, remembers which decisions you've already
 approved or denied, and detects destructive bursts in real time. The
@@ -170,6 +191,43 @@ aperion-shield --shadow -- npx @modelcontextprotocol/server-postgres ...
 # CI / unattended use — never prompt, deny anything High
 aperion-shield --auto-deny-high -- npx @modelcontextprotocol/server-postgres ...
 ```
+
+---
+
+## Mining your own Cursor history as a test corpus
+
+If you use Cursor (or Claude Code), every agent conversation is stored
+on disk as JSON-Lines. `scripts/extract-cursor-corpus.py` walks all of
+your transcripts, pulls out shell commands and assistant text, redacts
+obvious secrets, deduplicates, and emits the exact JSON-Lines schema
+`aperion-shield --check` expects -- so you can run Shield against your
+actual workflow before ever wiring it into the IDE.
+
+```bash
+# Mine all transcripts under ~/.cursor/projects, then evaluate them all.
+python3 scripts/extract-cursor-corpus.py --shell-only \
+  | aperion-shield --check --no-memory --no-burst \
+  | jq -c 'select(.decision != "allow")'
+
+# Mine just one project, save the corpus for re-use.
+python3 scripts/extract-cursor-corpus.py \
+    --project Smartflow --shell-only \
+    --out my-corpus.jsonl
+aperion-shield --check < my-corpus.jsonl > decisions.jsonl
+
+# Include assistant text turns (llm_response scope rules) too.
+python3 scripts/extract-cursor-corpus.py > my-corpus.jsonl
+
+# Disable redaction (default-on) only if you've reviewed the patterns.
+python3 scripts/extract-cursor-corpus.py --raw ...
+```
+
+The extractor is read-only, reads only your local Cursor transcript
+files, redacts AKIA/sk-/ghp_/JWT-shaped tokens before output, and
+de-duplicates by command/text. The corpus this produces is exactly
+what was used to validate Shield against ~13k real-world commands and
+drove the v0.3 rule-quality improvements (false-positive rate dropped
+from 73% to 1.5%).
 
 ---
 

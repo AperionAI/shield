@@ -13,3 +13,9 @@
 # Local secrets (none expected, but just in case)
 .env
 .env.local
+
+# Personal corpora harvested from Cursor / Claude Code history.
+# These are user-specific and may contain hostnames, IPs, paths, etc.
+# from real workflow -- keep them local, don't commit.
+/tests/corpus/cursor-history-*.jsonl
+/tests/corpus/personal-*.jsonl
