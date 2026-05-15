@@ -514,11 +514,18 @@ Loosening one can silently let a destructive call through. Neither
 outcome should land without PR review and a corpus-level dry-run.
 
 See [`docs/shieldset-as-code.md`](docs/shieldset-as-code.md) for the
-full pattern: a three-layer test stack (load → golden corpus →
-your team's actual Cursor history), a drop-in GitHub Actions workflow
-that runs all three on every PR and surfaces the decision-distribution
-delta inline on the checks tab, and a PR review checklist for both the
-author and the reviewer.
+full pattern: a four-layer test stack (load → golden corpus → your
+team's actual Cursor history → human-readable behavior diff with rule
+attribution), a drop-in GitHub Actions workflow that runs all four on
+every PR and posts the behavior diff as a PR comment, and a PR review
+checklist for both the author and the reviewer.
+
+The behavior-diff explainer
+([`scripts/shield-diff.py`](scripts/shield-diff.py)) takes two
+shieldsets and a corpus and prints exactly which rule caused which
+lines to flip — *"supply.curl_pipe_sh fires on 27 new lines, all
+allow → approval, expect ~27 more daily prompts"* — so the PR
+reviewer reads consequences instead of jq diffs.
 
 ---
 

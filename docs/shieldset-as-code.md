@@ -24,9 +24,9 @@ protection, ...) and the same pattern applies here.
 
 ---
 
-## The three-layer test stack
+## The four-layer test stack
 
-Shield ships with everything you need to run three progressively
+Shield ships with everything you need to run four progressively
 stricter checks on a `shieldset.yaml` change before it merges:
 
 | Layer | What it asserts | Speed | When it runs |
@@ -34,9 +34,10 @@ stricter checks on a `shieldset.yaml` change before it merges:
 | **1. Load** | The YAML parses; every rule compiles; no unsupported regex constructs | <100ms | On `aperion-shield` startup, in `--check` mode, in CI |
 | **2. Golden corpus** | Every documented positive/negative case for every rule still produces the expected decision | <1s | In CI on every PR that touches the shieldset |
 | **3. Workflow corpus** | The proposed shieldset doesn't change the decision distribution on your team's actual recent Cursor history in surprising ways | 1-5s per 1k commands | In CI on every PR; optionally daily against fresh history |
+| **4. Behavior diff** | A human-readable explanation of *which rule* caused *which lines to flip* — generated from layers 1-3 | 5-15s per 1k commands | In CI on every PR; output posted as a PR comment |
 
-Layers 1 and 2 are the same for every team. Layer 3 is per-team and
-is the one most people skip — it's also the one that catches the
+Layers 1 and 2 are the same for every team. Layers 3 and 4 are per-team
+and are the ones most people skip — they're also what catches the
 "this will spam my team with prompts" footgun before merge.
 
 ---
@@ -183,7 +184,103 @@ diff <(jq -c '{i: .input, d: .decision}' /tmp/current.decisions.jsonl) \
 
 ---
 
-## A CI workflow that runs all three
+## Layer 4 — Behavior-diff explainer
+
+The decision-distribution diff above answers *what changed*. It does
+not answer *why*, or *which rule is responsible*. Reading the raw
+JSON-Lines decision output to figure that out is the chore that most
+teams will skip.
+
+Shield ships [`scripts/shield-diff.py`](../scripts/shield-diff.py) to
+close that gap: it runs `aperion-shield --check` against the corpus
+twice (once with the current shieldset, once with the proposed one),
+attributes every flipped line to the specific rule whose YAML
+changed, and prints a single readable report.
+
+```bash
+python3 scripts/shield-diff.py \
+    --rules-before main-shieldset.yaml \
+    --rules-after  pr-shieldset.yaml \
+    --corpus       tests/corpus/team-cursor-history.jsonl
+```
+
+Sample output:
+
+```
+shield-diff: main-shieldset.yaml -> pr-shieldset.yaml
+corpus:      12,706 commands
+
+DECISION DISTRIBUTION
+                before     after         delta
+  allow        12,540    12,485    (-55, -0.4%)
+  warn              3         3         (+0)
+  approval        191       218   (+27, +14.1%)
+  block            10        10         (+0)
+
+RULESET CHANGES
+  modified (1): supply.curl_pipe_sh
+  unchanged: 44 rules
+
+  --- supply.curl_pipe_sh (modified) ---
+    --- supply.curl_pipe_sh.before
+    +++ supply.curl_pipe_sh.after
+    @@ ... @@
+     match:
+       any_param_matches:
+    -    - '(?i)\bcurl\s+.*(npmjs\.org|pypi\.org)' # allowlist
+    +    - '(?i)\bcurl\s+.*--checksum\b'           # require inline checksum
+
+BEHAVIORAL IMPACT BY RULE
+  supply.curl_pipe_sh:
+    fired before:  0 lines
+    fired after:   27 lines  (+27)
+    sample of 3 of 27 flipped lines:
+      [allow -> approval]  run_terminal: npm install --registry https://npm.internal.corp/ axios
+      [allow -> approval]  run_terminal: pip install --index-url https://pypi.corp/internal/ requests
+      [allow -> approval]  run_terminal: curl https://artifacts.corp/install.sh | sh
+
+SUMMARY
+  flipped lines:    27 of 12,706  (0.21% of corpus)
+    allow -> approval         27
+  no loosening detected.
+
+GUIDANCE: based on this corpus, expect ~27 more daily approval prompts.
+Review the flipped-line samples above to confirm these are the prompts
+the change intends to add.
+```
+
+**That's the artifact you want a reviewer reading**, not raw jq output.
+Other useful flags:
+
+```bash
+# markdown output (paste into a PR comment, or pipe straight to gh)
+python3 scripts/shield-diff.py --format markdown ... | gh pr comment --body-file -
+
+# json output (for programmatic consumption in your own tooling)
+python3 scripts/shield-diff.py --format json ...
+
+# CI gate: fail the PR if any line moved toward MORE permissive
+python3 scripts/shield-diff.py --fail-if-loosened ...
+
+# CI gate: fail if more than N lines flipped to `allow`
+python3 scripts/shield-diff.py --fail-if-allows-loosened 0 ...
+```
+
+**Status:** the explainer is a Python prototype (stdlib + PyYAML, no
+network) shipped today. A Rust-native `aperion-shield --diff` mode is
+planned for v0.6/v0.7 with the same output schema, so any CI you wire
+up against the Python script keeps working unchanged when the native
+mode lands.
+
+> **One-time setup:** PyYAML must be installed against the same
+> Python interpreter you'll run the script with — on conda / pyenv /
+> brew-vs-system setups `pip3 install pyyaml` often lands somewhere
+> else. Use `python3 -m pip install pyyaml` and verify with
+> `python3 -c "import yaml; print(yaml.__version__)"`.
+
+---
+
+## A CI workflow that runs all four
 
 GitHub Actions example. Drop into `.github/workflows/shieldset.yml`
 in any repo that hosts a `shieldset.yaml`:
@@ -219,34 +316,54 @@ jobs:
         run: ./aperion-shield --rules shieldset.yaml --check < tests/corpus/golden.jsonl
         # --check returns non-zero if any `expect:` line fails
 
-      # Layer 3 — workflow corpus diff
-      - name: Decision-distribution diff vs. main
+      # Layer 3 + 4 — workflow corpus diff + behavior-diff explainer
+      - name: Behavior diff vs. main
         if: hashFiles('tests/corpus/team-cursor-history.jsonl') != ''
         run: |
           git show origin/main:shieldset.yaml > /tmp/main-shieldset.yaml
+          python3 -m pip install --quiet pyyaml
 
-          ./aperion-shield --rules /tmp/main-shieldset.yaml \
-                           --check --no-memory --no-burst \
-                           < tests/corpus/team-cursor-history.jsonl \
-                           > /tmp/main.decisions.jsonl
+          # render text version inline on the checks tab
+          python3 scripts/shield-diff.py \
+              --shield-bin ./aperion-shield \
+              --rules-before /tmp/main-shieldset.yaml \
+              --rules-after  shieldset.yaml \
+              --corpus       tests/corpus/team-cursor-history.jsonl \
+              | tee /tmp/shield-diff.txt
+          echo '```'                   >> $GITHUB_STEP_SUMMARY
+          cat /tmp/shield-diff.txt     >> $GITHUB_STEP_SUMMARY
+          echo '```'                   >> $GITHUB_STEP_SUMMARY
 
-          ./aperion-shield --rules shieldset.yaml \
-                           --check --no-memory --no-burst \
-                           < tests/corpus/team-cursor-history.jsonl \
-                           > /tmp/pr.decisions.jsonl
+          # render markdown version and post as a PR comment
+          python3 scripts/shield-diff.py \
+              --shield-bin ./aperion-shield \
+              --rules-before /tmp/main-shieldset.yaml \
+              --rules-after  shieldset.yaml \
+              --corpus       tests/corpus/team-cursor-history.jsonl \
+              --format       markdown \
+              > /tmp/shield-diff.md
+          gh pr comment "${{ github.event.pull_request.number }}" \
+              --body-file /tmp/shield-diff.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          echo "## main shieldset"   >> $GITHUB_STEP_SUMMARY
-          jq -r '.decision' /tmp/main.decisions.jsonl | sort | uniq -c | sort -rn \
-            | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
-
-          echo "## proposed shieldset" >> $GITHUB_STEP_SUMMARY
-          jq -r '.decision' /tmp/pr.decisions.jsonl | sort | uniq -c | sort -rn \
-            | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
+      # Optional CI gate: fail the PR if any line moves toward `allow`
+      - name: Block loosening without explicit reviewer signoff
+        if: hashFiles('tests/corpus/team-cursor-history.jsonl') != ''
+        run: |
+          python3 scripts/shield-diff.py \
+              --shield-bin ./aperion-shield \
+              --rules-before /tmp/main-shieldset.yaml \
+              --rules-after  shieldset.yaml \
+              --corpus       tests/corpus/team-cursor-history.jsonl \
+              --fail-if-allows-loosened 0 \
+              --format json > /dev/null
 ```
 
 The workflow's `$GITHUB_STEP_SUMMARY` output renders inline on the PR
-checks tab, so reviewers see the decision-distribution delta without
-opening logs.
+checks tab, **and** the markdown version is posted as a comment on
+the PR. Reviewers see the rule-attributed behavior diff at the top of
+the PR conversation without opening logs.
 
 ---
 
@@ -311,21 +428,30 @@ opening logs.
 
 ---
 
-## Where this story is still incomplete
+## Roadmap
 
-The diff workflow above gives you **what changed**: decision counts,
-specific lines that flipped. It does not give you **why**.
+The current behavior-diff explainer is a Python prototype
+([`scripts/shield-diff.py`](../scripts/shield-diff.py)). It depends on
+stdlib + PyYAML and shells out to the `aperion-shield --check` binary
+twice. That's enough to ship the artifact today and let teams run it
+in CI on every PR.
 
-A behaviour-diff explainer — *"you removed npmjs.org from the
-allowlist, expect 3 more approval prompts/day across your team"* —
-is the v0.6 / v0.7 roadmap candidate. If your team or your
-portfolio companies would actually use it, open an issue at
+The v0.6 / v0.7 roadmap candidate is a Rust-native equivalent built
+into the binary as `aperion-shield --diff --rules-before X
+--rules-after Y < corpus.jsonl`. The output schema (text / markdown /
+json) will be source-compatible, so any CI you wire up against the
+Python script today keeps working unchanged when the native mode
+lands. The native version's value adds:
+
+- **One process** instead of two (faster on 100k+ corpora)
+- **Direct access to the parsed rule structs** (better explanations of
+  what changed in a regex without re-running the engine)
+- **A streaming diff** when the corpus is too big to hold in memory
+
+If your team has a use case that the Python prototype doesn't cover
+or that motivates one of the additions above, open an issue at
 <https://github.com/AperionAI/shield/issues> and describe the
 workflow. That's the signal to prioritise.
-
-Until then: read the diff. It's not hard, and the discipline of
-doing so is itself the value. A guardrail you understand is a
-guardrail you'll trust.
 
 ---
 
@@ -335,4 +461,5 @@ guardrail you'll trust.
 - [README — Wide-scale testing without an IDE](../README.md#wide-scale-testing-without-an-ide)
 - [`tests/corpus/golden.jsonl`](../tests/corpus/golden.jsonl) — the shipped positive/negative cases
 - [`scripts/extract-cursor-corpus.py`](../scripts/extract-cursor-corpus.py) — the extractor
+- [`scripts/shield-diff.py`](../scripts/shield-diff.py) — the behavior-diff explainer
 - [`docs/aperion-shield-developer-onepager.html`](aperion-shield-developer-onepager.html) — printable one-pager
