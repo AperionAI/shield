@@ -507,6 +507,19 @@ prod-probe root so you can simulate "what would happen in a prod repo"
 without `cd`-ing anywhere. Decision memory and burst are auto-disabled
 inside `check-corpus.sh` for deterministic batch runs.
 
+### Reviewing `shieldset.yaml` changes like code
+
+Tightening one regex can add 50 approval prompts to your team's day.
+Loosening one can silently let a destructive call through. Neither
+outcome should land without PR review and a corpus-level dry-run.
+
+See [`docs/shieldset-as-code.md`](docs/shieldset-as-code.md) for the
+full pattern: a three-layer test stack (load → golden corpus →
+your team's actual Cursor history), a drop-in GitHub Actions workflow
+that runs all three on every PR and surfaces the decision-distribution
+delta inline on the checks tab, and a PR review checklist for both the
+author and the reviewer.
+
 ---
 
 ## Approving a request
