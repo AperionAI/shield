@@ -119,8 +119,8 @@ shieldset:
       match:
         tool: [execute_sql, postgres.query, postgres.execute, mysql.query, snowflake.query, bigquery.query]
         sql_predicates: [unscoped_update]
-      reason: "Unbounded UPDATE affects every row -- add a WHERE clause."
-      safer_alternative: "Add a WHERE clause, e.g. `UPDATE users SET status='X' WHERE id = 7`. If you really mean every row, run it in a transaction with a row-count assertion."
+      reason: "Unbounded UPDATE affects every row in the table. Includes tautological WHERE clauses (e.g. `WHERE col = FALSE` paired with `SET col = TRUE`) where the WHERE selects exactly the rows the SET would change -- functionally equivalent to no WHERE."
+      safer_alternative: "Add a WHERE clause that narrows by something OTHER than the column being SET, e.g. `WHERE id = 7`, `WHERE created_at > NOW() - INTERVAL '7 days'`, or `WHERE tenant_id = $1`. If you really mean every row, run it in a transaction with a row-count assertion and request approval."
 
     - id: sql.grant_or_revoke_all
       severity: Medium
@@ -605,3 +605,77 @@ shieldset:
           - '(?i)cat\s+.*\.env.*\|\s*curl'
           - '(?i)curl\s+.*--data-binary\s+@~?/\.(aws|ssh)/'
       reason: "Assistant plan reads a secret file and pipes it to a network endpoint -- exfiltration pattern."
+
+    # ═════════════════════════════════════════════════════════════════
+    # IDENTITY-GATED RULES (v0.4+) -- ID.me biometric verification
+    # ─────────────────────────────────────────────────────────────────
+    # Rules with an `identity:` block emit a new `IdentityVerification`
+    # decision when matched. The MCP middleman looks up the local
+    # signed-proof cache and, on miss, opens a one-time verify URL on a
+    # localhost callback server. The held tool call resumes the moment
+    # a fresh proof lands in the cache (within `max_proof_age_seconds`).
+    #
+    # The examples below are COMMENTED OUT by default -- enable them by
+    # uncommenting and replacing `allowed_subjects` with the email or
+    # `provider|subject` identifier for the operators who should be
+    # able to authorise the action. Use `"*"` to allow any verified user.
+    #
+    # Provider config lives in `~/.aperion-shield/identity.yaml` (see
+    # the bundled `examples/identity.yaml` for a starter). Until the
+    # ID.me sandbox is wired up, point `provider: mock` at the always-
+    # verifies mock so you can exercise the full flow end-to-end.
+    # ═════════════════════════════════════════════════════════════════
+
+    # - id: scm.commit_or_push_to_main
+    #   severity: High
+    #   points: 4
+    #   where: tool_call
+    #   match:
+    #     tool: ["run_terminal", "shell", "Bash", "terminal"]
+    #     any_param_matches:
+    #       - '(?i)\bgit\s+(commit|push|tag)\b'
+    #       - '(?i)\bgit\s+merge\s+--no-ff\b'
+    #   identity:
+    #     provider: id_me
+    #     scope: scm.commit_or_push_to_main
+    #     allowed_subjects:
+    #       - "[email protected]"
+    #       - "[email protected]"
+    #     max_proof_age_seconds: 900
+    #     loa: 2
+    #   reason: "Commits / pushes to main require biometric ID.me verification."
+    #   safer_alternative: "Open a PR from a feature branch instead of committing directly."
+
+    # - id: db.production_apply
+    #   severity: Critical
+    #   points: 5
+    #   where: tool_call
+    #   match:
+    #     tool: ["execute_sql", "postgres_query", "mysql_query"]
+    #     sql_predicates: [unscoped_update, unscoped_delete]
+    #   identity:
+    #     provider: id_me
+    #     scope: db.production_apply
+    #     allowed_subjects: ["[email protected]"]
+    #     max_proof_age_seconds: 300
+    #     loa: 3
+    #   reason: "Unscoped writes to a production database require an LOA-3 biometric verification."
+    #   safer_alternative: "Add a WHERE clause that limits the row set, or run inside a transaction with a planned rollback."
+
+    # - id: infra.terraform_apply_production
+    #   severity: Critical
+    #   points: 5
+    #   where: tool_call
+    #   match:
+    #     tool: ["run_terminal", "shell", "Bash", "terminal"]
+    #     any_param_matches:
+    #       - '(?i)\bterraform\s+apply\b.*(production|prod)'
+    #       - '(?i)\bterragrunt\s+apply\b.*(production|prod)'
+    #   identity:
+    #     provider: id_me
+    #     scope: infra.terraform_apply_production
+    #     allowed_subjects: ["*"]              # any verified operator
+    #     max_proof_age_seconds: 600
+    #     loa: 2
+    #   reason: "`terraform apply` against a production workspace requires biometric verification."
+    #   safer_alternative: "Run `terraform plan` first and post the plan output for review."

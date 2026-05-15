@@ -72,6 +72,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use crate::identity::Requirement as IdentityRequirement;
 use crate::predicates::{CommandPredicate, SensitivePath};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -138,6 +139,19 @@ pub enum Decision {
         safer_alternative: Option<String>,
         contributing_rules: Vec<String>,
     },
+    /// The matched rule carried an `identity:` block AND resolved to a
+    /// High-or-higher severity. The caller must check the identity
+    /// proof cache and, on miss, surface a verification URL to the
+    /// user. Held tool calls block until the proof lands or the hold
+    /// window elapses.
+    IdentityVerification {
+        rule_id: String,
+        severity: Severity,
+        reason: String,
+        safer_alternative: Option<String>,
+        contributing_rules: Vec<String>,
+        requirement: IdentityRequirement,
+    },
     Block {
         rule_id: String,
         severity: Severity,
@@ -149,7 +163,10 @@ pub enum Decision {
 
 impl Decision {
     pub fn is_blocking(&self) -> bool {
-        matches!(self, Decision::Block { .. } | Decision::Approval { .. })
+        matches!(
+            self,
+            Decision::Block { .. } | Decision::Approval { .. } | Decision::IdentityVerification { .. }
+        )
     }
 
     pub fn label(&self) -> &'static str {
@@ -157,6 +174,7 @@ impl Decision {
             Decision::Allow => "allow",
             Decision::Warn { .. } => "warn",
             Decision::Approval { .. } => "approval",
+            Decision::IdentityVerification { .. } => "identity_verification",
             Decision::Block { .. } => "block",
         }
     }
@@ -328,6 +346,13 @@ pub struct YamlRule {
     pub reason: String,
     #[serde(default)]
     pub safer_alternative: Option<String>,
+    /// Optional identity gate. When present AND the rule resolves to a
+    /// High-or-Critical severity, the engine emits a
+    /// [`Decision::IdentityVerification`] instead of Approval/Block.
+    /// The MCP middleman then handles the verification flow (cache
+    /// lookup, callback server, hold-then-surface).
+    #[serde(default)]
+    pub identity: Option<IdentityRequirement>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -377,6 +402,10 @@ pub struct CompiledRule {
     pub scope: Scope,
     pub reason: String,
     pub safer_alternative: Option<String>,
+    /// Identity gate carried over from the YAML. None for the vast
+    /// majority of rules; Some for the small set the customer explicitly
+    /// wires to biometric verification.
+    pub identity: Option<IdentityRequirement>,
     matcher: Option<Match>,
 }
 
@@ -490,6 +519,10 @@ pub struct MatchInfo {
     pub points: u32,
     pub reason: String,
     pub safer_alternative: Option<String>,
+    /// Carried through from the rule. Used by `decide()` to detect
+    /// when the resolved decision should be promoted to
+    /// `IdentityVerification` instead of plain Approval/Block.
+    pub identity: Option<IdentityRequirement>,
 }
 
 impl Engine {
@@ -548,6 +581,7 @@ impl Engine {
                 scope,
                 reason: y.reason,
                 safer_alternative: y.safer_alternative,
+                identity: y.identity,
                 matcher,
             });
         }
@@ -576,6 +610,7 @@ impl Engine {
                     points: r.points,
                     reason: r.reason.clone(),
                     safer_alternative: r.safer_alternative.clone(),
+                    identity: r.identity.clone(),
                 });
             }
         }
@@ -595,6 +630,7 @@ impl Engine {
                     points: r.points,
                     reason: r.reason.clone(),
                     safer_alternative: r.safer_alternative.clone(),
+                    identity: r.identity.clone(),
                 });
             }
         }
@@ -677,20 +713,50 @@ pub fn decide(eval: &Evaluation) -> Decision {
         .collect();
 
     match eval.final_severity {
-        Severity::Critical => Decision::Block {
-            rule_id: primary.rule_id.clone(),
-            severity: eval.final_severity,
-            reason: primary.reason.clone(),
-            safer_alternative: primary.safer_alternative.clone(),
-            contributing_rules: contributing,
-        },
-        Severity::High => Decision::Approval {
-            rule_id: primary.rule_id.clone(),
-            severity: eval.final_severity,
-            reason: primary.reason.clone(),
-            safer_alternative: primary.safer_alternative.clone(),
-            contributing_rules: contributing,
-        },
+        Severity::Critical => {
+            // Identity gates supersede plain Block. The point of the
+            // gate is "this is destructive enough that we want a fresh
+            // biometric receipt before allowing it" -- if Shield just
+            // hard-blocks, the gate never gets a chance to consent.
+            if let Some(req) = primary.identity.clone() {
+                Decision::IdentityVerification {
+                    rule_id: primary.rule_id.clone(),
+                    severity: eval.final_severity,
+                    reason: primary.reason.clone(),
+                    safer_alternative: primary.safer_alternative.clone(),
+                    contributing_rules: contributing,
+                    requirement: req,
+                }
+            } else {
+                Decision::Block {
+                    rule_id: primary.rule_id.clone(),
+                    severity: eval.final_severity,
+                    reason: primary.reason.clone(),
+                    safer_alternative: primary.safer_alternative.clone(),
+                    contributing_rules: contributing,
+                }
+            }
+        }
+        Severity::High => {
+            if let Some(req) = primary.identity.clone() {
+                Decision::IdentityVerification {
+                    rule_id: primary.rule_id.clone(),
+                    severity: eval.final_severity,
+                    reason: primary.reason.clone(),
+                    safer_alternative: primary.safer_alternative.clone(),
+                    contributing_rules: contributing,
+                    requirement: req,
+                }
+            } else {
+                Decision::Approval {
+                    rule_id: primary.rule_id.clone(),
+                    severity: eval.final_severity,
+                    reason: primary.reason.clone(),
+                    safer_alternative: primary.safer_alternative.clone(),
+                    contributing_rules: contributing,
+                }
+            }
+        }
         Severity::Medium => Decision::Warn {
             rule_id: primary.rule_id.clone(),
             severity: eval.final_severity,
@@ -770,7 +836,19 @@ fn matches_sql_predicate(p: SqlPredicate, sql: &str) -> bool {
         if f.is_empty() { continue; }
         match p {
             SqlPredicate::UnscopedUpdate => {
-                if UPDATE_HEAD.is_match(f) && !WHERE_CLAUSE.is_match(f) { return true; }
+                if !UPDATE_HEAD.is_match(f) { continue; }
+                // Case 1 -- no WHERE clause at all.
+                if !WHERE_CLAUSE.is_match(f) { return true; }
+                // Case 2 -- tautological WHERE clause: the WHERE
+                // selects exactly the rows the SET would change, so
+                // the UPDATE is functionally identical to an unscoped
+                // UPDATE. Catches "fake scope" patterns like
+                //   UPDATE users SET email_verified = TRUE
+                //   WHERE email_verified = FALSE;
+                // (every FALSE row gets flipped; no FALSE row is left
+                // behind; the WHERE adds nothing the SET wasn't
+                // already going to do.)
+                if where_is_tautological_for_update(f) { return true; }
             }
             SqlPredicate::UnscopedDelete => {
                 if DELETE_HEAD.is_match(f) && !WHERE_CLAUSE.is_match(f) { return true; }
@@ -778,6 +856,192 @@ fn matches_sql_predicate(p: SqlPredicate, sql: &str) -> bool {
         }
     }
     false
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tautological-WHERE detection
+//
+// A WHERE clause is "tautological" for an UPDATE when it selects
+// exactly the rows the SET clause would CHANGE -- meaning every row
+// in the table either matches the WHERE and gets rewritten, or
+// doesn't match and would have been a no-op anyway. The UPDATE is
+// then semantically equivalent to one with no WHERE clause, and
+// `sql.unscoped_update` should fire.
+//
+// Patterns caught (per (col, set_val) pair in the SET clause):
+//   1. Boolean opposite:    SET col = TRUE  WHERE col = FALSE
+//                           SET col = FALSE WHERE col = TRUE
+//                           (also accepts t/f and 1/0 literals)
+//   2. Inequality:          SET col = X     WHERE col != X
+//                           SET col = X     WHERE col <> X
+//   3. IS NOT:              SET col = X     WHERE col IS NOT X
+//   4. NULL as falsy:       SET col = TRUE  WHERE col IS NULL
+//   5. Negation:            SET col = TRUE  WHERE NOT col
+//
+// AND-conjunction handling: every conjunct in the WHERE clause must
+// be tautological w.r.t. some SET pair. If even one conjunct adds
+// real scope (e.g. `... AND created_at > NOW() - INTERVAL '7 days'`),
+// the WHERE is NOT tautological and the rule does NOT fire.
+//
+// OR-disjunctions and nested expressions are handled conservatively:
+// we currently inspect the WHERE clause as a flat sequence of
+// AND-separated conjuncts. A WHERE clause that uses OR in ways the
+// AND-split cannot represent will fall through to "not tautological"
+// and the rule will not fire on it -- that's a v0.7 enhancement once
+// we vendor a proper SQL AST parser.
+// ─────────────────────────────────────────────────────────────────────────
+
+static SET_AND_WHERE_RE: Lazy<Regex> = Lazy::new(|| {
+    // (?is) -- case-insensitive, dot matches newline. SET ... WHERE ...
+    // terminated by LIMIT / RETURNING / end-of-statement.
+    Regex::new(r"(?is)\bSET\b\s+(.+?)\s+\bWHERE\b\s+(.+?)(?:\s+\b(?:LIMIT|RETURNING|ORDER\s+BY|GROUP\s+BY)\b.*)?$")
+        .expect("static")
+});
+
+fn where_is_tautological_for_update(sql: &str) -> bool {
+    let caps = match SET_AND_WHERE_RE.captures(sql) {
+        Some(c) => c,
+        None => return false,
+    };
+    let set_part = match caps.get(1) { Some(m) => m.as_str(), None => return false };
+    let where_part = match caps.get(2) { Some(m) => m.as_str(), None => return false };
+
+    let set_pairs = parse_set_pairs(set_part);
+    if set_pairs.is_empty() { return false; }
+
+    let conjuncts = split_where_on_and(where_part);
+    if conjuncts.is_empty() { return false; }
+
+    for conjunct in &conjuncts {
+        let trimmed = conjunct.trim_matches(|c: char| c.is_whitespace() || c == '(' || c == ')');
+        if trimmed.is_empty() { continue; }
+        let mut matched = false;
+        for (col, val) in &set_pairs {
+            if predicate_is_tautological(col, val, trimmed) {
+                matched = true;
+                break;
+            }
+        }
+        if !matched { return false; }
+    }
+    true
+}
+
+/// Parse `col1 = val1, col2 = val2, ...` into a vector of (col, val) pairs.
+/// Naive on commas (does not respect commas inside string literals or
+/// function calls). For the destructive-UPDATE cases we care about
+/// (booleans, simple constants, NULL) this is more than enough.
+fn parse_set_pairs(set_part: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for raw in set_part.split(',') {
+        let mut halves = raw.splitn(2, '=');
+        let col = match halves.next() { Some(c) => c.trim(), None => continue };
+        let val = match halves.next() { Some(v) => v.trim(), None => continue };
+        if col.is_empty() || val.is_empty() { continue; }
+        let col_norm = col.trim_matches(|c: char| c == '"' || c == '`').to_string();
+        let val_norm = val.trim_matches(|c: char| c == '\'' || c == '"').to_string();
+        out.push((col_norm, val_norm));
+    }
+    out
+}
+
+/// Split a WHERE clause body on case-insensitive ` AND `. Conservative
+/// -- treats the body as a flat sequence; nested boolean expressions
+/// with OR or parentheses fall through to "no split" and the caller
+/// will inspect the whole clause as a single conjunct.
+fn split_where_on_and(where_part: &str) -> Vec<&str> {
+    static AND_SPLIT: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?i)\s+AND\s+").expect("static")
+    });
+    AND_SPLIT.split(where_part).collect()
+}
+
+fn predicate_is_tautological(col: &str, set_val: &str, predicate: &str) -> bool {
+    let col_esc = regex::escape(col);
+    let set_val_lower = set_val.to_ascii_lowercase();
+    let val_esc = regex::escape(set_val);
+    // String literals in SQL WHERE clauses are wrapped in single (or,
+    // less commonly, double) quotes. Our parsed `set_val` has those
+    // quotes stripped, so we must tolerate optional surrounding quotes
+    // on the WHERE side. Booleans / numerics typically aren't quoted.
+    let q = r#"['"]?"#;
+
+    // Pattern 1 -- inequality: col != X / col <> X.
+    if regex_match(
+        &format!(r"(?i)^\s*{}\s*(?:!=|<>)\s*{}{}{}\s*$", col_esc, q, val_esc, q),
+        predicate,
+    ) {
+        return true;
+    }
+
+    // Pattern 2 -- IS NOT: col IS NOT X (or IS DISTINCT FROM X).
+    if regex_match(
+        &format!(r"(?i)^\s*{}\s+IS\s+(?:NOT|DISTINCT\s+FROM)\s+{}{}{}\s*$", col_esc, q, val_esc, q),
+        predicate,
+    ) {
+        return true;
+    }
+
+    // Pattern 3 -- boolean opposite. Only valid when the SET value
+    // is a boolean literal; then the WHERE selects the only other
+    // possible value.
+    if is_bool_literal(&set_val_lower) {
+        let opposite_pat = bool_opposite_regex_alt(&set_val_lower);
+        if regex_match(
+            &format!(r"(?i)^\s*{}\s*=\s*{}(?:{}){}\s*$", col_esc, q, opposite_pat, q),
+            predicate,
+        ) {
+            return true;
+        }
+    }
+
+    // Pattern 4 -- IS NULL on a SET col = TRUE pair: NULL is not
+    // TRUE, so flipping all NULLs to TRUE captures every "not yet
+    // verified" row.
+    if set_val_lower == "true" || set_val_lower == "t" || set_val_lower == "1" {
+        if regex_match(
+            &format!(r"(?i)^\s*{}\s+IS\s+NULL\s*$", col_esc),
+            predicate,
+        ) {
+            return true;
+        }
+        // Pattern 5 -- NOT col: SQL truthiness negation; functionally
+        // identical to col IS NOT TRUE for boolean columns.
+        if regex_match(&format!(r"(?i)^\s*NOT\s+{}\s*$", col_esc), predicate) {
+            return true;
+        }
+        // Pattern 6 -- col IS NOT TRUE (Postgres-style).
+        if regex_match(
+            &format!(r"(?i)^\s*{}\s+IS\s+NOT\s+TRUE\s*$", col_esc),
+            predicate,
+        ) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_bool_literal(s: &str) -> bool {
+    matches!(s, "true" | "false" | "t" | "f" | "1" | "0")
+}
+
+/// Regex alternation matching the OPPOSITE boolean literal of `lit`.
+/// `true` / `t` / `1` are all equivalent; `false` / `f` / `0` are all
+/// equivalent. Used to detect `SET col = TRUE WHERE col = FALSE`
+/// regardless of which spelling the agent emitted on either side.
+fn bool_opposite_regex_alt(lit: &str) -> &'static str {
+    match lit {
+        "true" | "t" | "1" => "false|f|0",
+        "false" | "f" | "0" => "true|t|1",
+        _ => "",
+    }
+}
+
+fn regex_match(pattern: &str, haystack: &str) -> bool {
+    Regex::new(pattern)
+        .map(|re| re.is_match(haystack))
+        .unwrap_or(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -857,6 +1121,106 @@ mod tests {
             Decision::Approval { rule_id, .. } => assert_eq!(rule_id, "sql.unscoped_update"),
             other => panic!("expected Approval, got {}", other.label()),
         }
+    }
+
+    #[test]
+    fn tautological_where_email_verified_boolean_opposite() {
+        // The exact agent-emitted SQL from the 2026-05-15 demo
+        // recording. `WHERE email_verified = FALSE` selects every row
+        // the SET would change; functionally identical to no WHERE.
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET email_verified = TRUE WHERE email_verified = FALSE"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        match decide(&ev) {
+            Decision::Approval { rule_id, .. } => assert_eq!(rule_id, "sql.unscoped_update"),
+            other => panic!("expected Approval on tautological WHERE, got {}", other.label()),
+        }
+    }
+
+    #[test]
+    fn tautological_where_inequality_fires() {
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET status = 'active' WHERE status != 'active'"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        assert!(matches!(decide(&ev), Decision::Approval { .. }),
+                "expected Approval on `WHERE col != X` tautology");
+    }
+
+    #[test]
+    fn tautological_where_ne_operator_fires() {
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET status = 'active' WHERE status <> 'active'"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        assert!(matches!(decide(&ev), Decision::Approval { .. }),
+                "expected Approval on `WHERE col <> X` tautology");
+    }
+
+    #[test]
+    fn tautological_where_is_null_with_set_true_fires() {
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET verified = TRUE WHERE verified IS NULL"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        assert!(matches!(decide(&ev), Decision::Approval { .. }),
+                "expected Approval on `WHERE col IS NULL` + `SET col = TRUE` tautology");
+    }
+
+    #[test]
+    fn tautological_where_not_col_fires() {
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET banned = TRUE WHERE NOT banned"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        assert!(matches!(decide(&ev), Decision::Approval { .. }),
+                "expected Approval on `WHERE NOT col` + `SET col = TRUE` tautology");
+    }
+
+    #[test]
+    fn tautological_where_is_not_true_fires() {
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET email_verified = TRUE WHERE email_verified IS NOT TRUE"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        assert!(matches!(decide(&ev), Decision::Approval { .. }),
+                "expected Approval on `WHERE col IS NOT TRUE` + `SET col = TRUE` tautology");
+    }
+
+    #[test]
+    fn tautological_where_handles_1_0_spellings() {
+        // Some Postgres / MySQL drivers serialize booleans as 1/0.
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET email_verified = 1 WHERE email_verified = 0"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        assert!(matches!(decide(&ev), Decision::Approval { .. }),
+                "expected Approval on 1/0 boolean opposites");
+    }
+
+    #[test]
+    fn real_scope_narrowing_with_and_does_not_fire() {
+        // The legitimate "safer SQL" version from DEMO.md Take 2.
+        // The agent ADDS a real time-window scope to the WHERE clause;
+        // this is genuine narrowing and should NOT fire the rule.
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET email_verified = TRUE WHERE email_verified = FALSE AND created_at > NOW() - INTERVAL '7 days'"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        assert!(matches!(decide(&ev), Decision::Allow { .. } | Decision::Warn { .. }),
+                "expected Allow/Warn on real time-window scope; got {}", decide(&ev).label());
+    }
+
+    #[test]
+    fn scoped_update_by_id_does_not_fire() {
+        // A truly narrow update by primary key -- must NOT fire.
+        let e = engine();
+        let p = json!({"arguments": {"query":
+            "UPDATE users SET email_verified = TRUE WHERE id = 7"}});
+        let ev = e.evaluate("execute_sql", &p, Adjustments::default());
+        assert!(matches!(decide(&ev), Decision::Allow { .. } | Decision::Warn { .. }),
+                "expected Allow/Warn on scoped UPDATE by id; got {}", decide(&ev).label());
     }
 
     #[test]

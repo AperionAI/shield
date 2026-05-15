@@ -22,13 +22,19 @@
 pub mod burst;
 pub mod context;
 pub mod engine;
+pub mod identity;
 pub mod memory;
+pub mod orgmode;
 pub mod predicates;
 
 pub use burst::BurstDetector;
 pub use context::WorkspaceContext;
 pub use engine::{
     decide, fingerprint, Adjustments, Decision, Engine, Evaluation, MatchInfo, Policy, Severity,
+};
+pub use identity::{
+    IdentityConfig, IdentityGate, IdentityProvider, IdMeProvider, MockProvider, Proof,
+    ProviderConfig, ProviderKind, Requirement as IdentityRequirement,
 };
 pub use memory::{DecisionMemory, MemoryEntry, MemoryVerdict, Outcome};
 pub use predicates::{CommandPredicate, SensitivePath};

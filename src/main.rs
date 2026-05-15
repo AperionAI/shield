@@ -45,8 +45,13 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use aperion_shield::{
-    decide, fingerprint, Adjustments, BurstDetector, Decision, DecisionMemory, Engine, Outcome,
-    WorkspaceContext,
+    decide, fingerprint, identity, orgmode, Adjustments, BurstDetector, Decision, DecisionMemory,
+    Engine, IdMeProvider, IdentityConfig, IdentityGate, IdentityProvider, MockProvider, Outcome,
+    ProviderKind, WorkspaceContext,
+};
+use aperion_shield::orgmode::{
+    smartflow_provider::ResolveOutcome, AuditEvent, AuditSink, EnrolledHandles, OrgApi, OrgState,
+    SmartflowProvider,
 };
 
 /// Aperion Shield -- local MCP guardrail.
@@ -115,6 +120,80 @@ struct Cli {
     #[arg(long, value_name = "PATH", requires = "check")]
     workspace: Option<PathBuf>,
 
+    /// Path to an `identity.yaml` overriding the default discovery
+    /// (`$APERION_SHIELD_IDENTITY_CONFIG`, `~/.aperion-shield/identity.yaml`,
+    /// then built-in mock-only defaults).
+    #[arg(long, value_name = "PATH")]
+    identity_config: Option<PathBuf>,
+
+    /// Disable the identity-verification subsystem entirely. Rules
+    /// carrying an `identity:` block will fall back to plain
+    /// Approval / Block.
+    #[arg(long)]
+    no_identity: bool,
+
+    /// Print how many cached identity proofs exist (with subjects and
+    /// scopes) and exit. Does not start the MCP middleman.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    identity_list: bool,
+
+    /// Drop every cached identity proof and exit. Forces re-verification
+    /// on the next gated call.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    identity_flush: bool,
+
+    // ── Org-mode (v0.5+) ──────────────────────────────────────────
+    //
+    // Enroll this Shield against a Smartflow control plane so policy,
+    // identity, and audit are managed centrally. See
+    // docs/strategy/shield-org-tier-plan.md for the full design.
+
+    /// Enroll this Shield against a Smartflow control plane. Requires
+    /// `--smartflow-url` and `--token`. Persists the resulting vkey at
+    /// `~/.aperion-shield/orgmode.json` (mode 0600). Subsequent runs
+    /// pull policy, send audit, and use Smartflow as the identity
+    /// relying party.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    enroll: bool,
+
+    /// Print the current org-mode enrollment status (or "standalone")
+    /// and exit. Probes the Smartflow control plane for liveness.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "enroll")]
+    status: bool,
+
+    /// Remove the local org-mode enrollment record (turns this Shield
+    /// back into a standalone). Use `--revoke` to also revoke the vkey
+    /// server-side.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "enroll")]
+    disenroll: bool,
+
+    /// When used with `--disenroll`, also calls
+    /// `DELETE /api/enterprise/devices/{id}` to revoke the vkey on
+    /// Smartflow before removing the local record.
+    #[arg(long, requires = "disenroll")]
+    revoke: bool,
+
+    /// Smartflow control-plane base URL, e.g.
+    /// `https://smartflow.example.com`. Required for `--enroll`.
+    #[arg(long, value_name = "URL", requires = "enroll")]
+    smartflow_url: Option<String>,
+
+    /// One-time enrollment token issued from the Smartflow dashboard.
+    /// Required for `--enroll`.
+    #[arg(long, value_name = "TOKEN", requires = "enroll")]
+    token: Option<String>,
+
+    /// Friendly device name shown in the fleet view. Defaults to
+    /// `<hostname>-shield`. Used with `--enroll`.
+    #[arg(long, value_name = "NAME", requires = "enroll")]
+    device_name: Option<String>,
+
+    /// Owner email for audit + fleet display (informational; the
+    /// policy group is still resolved server-side from the enrollment
+    /// token).
+    #[arg(long, value_name = "EMAIL", requires = "enroll")]
+    enroll_email: Option<String>,
+
     /// Trailing args after `--` are the upstream MCP server command.
     /// Example: `aperion-shield -- npx @modelcontextprotocol/server-postgres ...`
     #[arg(trailing_var_arg = true, num_args = 0..)]
@@ -123,12 +202,36 @@ struct Cli {
 
 /// Runtime state shared across both stdio pumps.
 struct Shield {
-    engine: Engine,
+    /// Always present. In standalone mode the receiver only ever sees
+    /// the engine handed in at startup; in org mode the orgmode
+    /// policy-pull task pushes new engines on every version bump.
+    /// Snapshotting on every tool call is cheap (`watch::Receiver::borrow`
+    /// is a single atomic increment).
+    engine_rx: tokio::sync::watch::Receiver<Arc<Engine>>,
     workspace: WorkspaceContext,
     memory: DecisionMemory,
     burst: BurstDetector,
     shadow: bool,
     auto_deny: bool,
+    /// `None` when the user passed `--no-identity` OR no rule in the
+    /// loaded shieldset carries an `identity:` block (we don't pay the
+    /// cost of setting up the gate if nothing will use it).
+    identity_gate: Option<Arc<IdentityGate>>,
+    /// `Some(...)` when the binary started with a populated
+    /// `~/.aperion-shield/orgmode.json`. Holding the handles keeps the
+    /// heartbeat / policy-pull / audit-sink tasks alive for the
+    /// lifetime of the process.
+    orgmode: Option<Arc<EnrolledHandles>>,
+    /// Smartflow-mediated identity provider. Built once at startup
+    /// when org-mode is active; cheap to clone.
+    smartflow_identity: Option<Arc<SmartflowProvider>>,
+}
+
+impl Shield {
+    /// Snapshot the current engine. Cheap.
+    fn current_engine(&self) -> Arc<Engine> {
+        self.engine_rx.borrow().clone()
+    }
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -151,8 +254,37 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
+    if cli.identity_list {
+        return run_identity_list(&cli).await;
+    }
+    if cli.identity_flush {
+        return run_identity_flush(&cli).await;
+    }
     if cli.check {
         return run_check_mode(&cli).await;
+    }
+
+    // ── Org-mode subcommands ──────────────────────────────────────
+    if cli.enroll {
+        let url = cli.smartflow_url.as_deref().ok_or_else(|| {
+            anyhow!("--enroll requires --smartflow-url <URL>")
+        })?;
+        let token = cli.token.as_deref().ok_or_else(|| {
+            anyhow!("--enroll requires --token <TOKEN>")
+        })?;
+        return orgmode::run_enroll(
+            url,
+            token,
+            cli.device_name.as_deref(),
+            cli.enroll_email.as_deref(),
+        )
+        .await;
+    }
+    if cli.status {
+        return orgmode::run_status().await;
+    }
+    if cli.disenroll {
+        return orgmode::run_disenroll(cli.revoke).await;
     }
 
     if cli.upstream.is_empty() {
@@ -205,15 +337,71 @@ async fn main() -> anyhow::Result<()> {
         info!("[shield] workspace probe: no prod signals matched in {}", workspace.root.display());
     }
 
+    // ── Identity gate (only built if at least one rule needs it) ──
+    let identity_gate = if cli.no_identity {
+        warn!("[shield] --no-identity: identity-gated rules will fall back to plain Approval/Block");
+        None
+    } else if engine.rules.iter().any(|r| r.identity.is_some()) {
+        match build_identity_gate(cli.identity_config.as_deref()).await {
+            Ok(g) => {
+                warn!(
+                    "[shield] identity gate ready: providers=[{}] cached_proofs={} hold={}s",
+                    g.config()
+                        .providers
+                        .iter()
+                        .map(|p| format!(
+                            "{}:{}{}",
+                            p.id,
+                            match p.kind { ProviderKind::IdMe => "id_me", ProviderKind::Mock => "mock" },
+                            if matches!(p.kind, ProviderKind::IdMe)
+                                && !is_idme_ready(p)
+                            { "(unready)" } else { "" }
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    g.cached_count(),
+                    g.hold_seconds(),
+                );
+                Some(Arc::new(g))
+            }
+            Err(e) => {
+                error!("[shield] identity gate setup failed: {}", e);
+                None
+            }
+        }
+    } else {
+        info!("[shield] no rules have `identity:` blocks -- identity gate inactive");
+        None
+    };
+
+    // ── Org-mode bootstrap (v0.5+) ────────────────────────────────
+    //
+    // If `~/.aperion-shield/orgmode.json` exists we treat this as an
+    // enrolled Shield: pull the org's shieldset from Smartflow (falls
+    // back to the local engine on failure), start the heartbeat /
+    // policy-pull / audit-sink tasks, and prepare the
+    // `SmartflowProvider` so identity-gated rules route through
+    // Smartflow instead of the local OAuth dance.
+    let (orgmode_state, orgmode_handles, smartflow_identity, engine_rx) =
+        bootstrap_orgmode(engine).await?;
+    if orgmode_state.is_some() {
+        warn!("[shield] running in ORG MODE (centrally managed)");
+    } else {
+        info!("[shield] running in STANDALONE mode (no orgmode.json)");
+    }
+
     let (mut child, mut child_in, child_out) = spawn_upstream(&cli.upstream)?;
 
     let shield = Arc::new(Shield {
-        engine,
+        engine_rx,
         workspace,
         memory,
         burst,
         shadow: cli.shadow,
         auto_deny: cli.auto_deny_high,
+        identity_gate,
+        orgmode: orgmode_handles,
+        smartflow_identity,
     });
 
     let stdin = tokio::io::stdin();
@@ -280,6 +468,18 @@ async fn main() -> anyhow::Result<()> {
     let _ = from_child_handle.await;
     let _ = child.kill().await;
     let _ = child.wait().await;
+
+    // Best-effort: give the org-mode audit sink one last chance to ship
+    // any buffered events before the process exits. Capped at 6 s so
+    // we don't hang on a wedged control plane.
+    if let Some(handles) = shield.orgmode.as_ref() {
+        let drain = handles.audit.clone();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(6), async move {
+            drain.drain().await;
+        })
+        .await;
+    }
+
     info!("[shield] shutdown complete");
     Ok(())
 }
@@ -452,6 +652,23 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
                 }
                 record["contributing_rules"] = json!(contributing_rules);
             }
+            Decision::IdentityVerification {
+                rule_id, reason, safer_alternative, contributing_rules, requirement, ..
+            } => {
+                record["primary_rule_id"] = json!(rule_id);
+                record["reason"] = json!(reason);
+                if let Some(s) = safer_alternative {
+                    record["safer_alternative"] = json!(s);
+                }
+                record["contributing_rules"] = json!(contributing_rules);
+                record["identity_requirement"] = json!({
+                    "provider": requirement.provider,
+                    "scope": requirement.scope,
+                    "allowed_subjects": requirement.allowed_subjects,
+                    "max_proof_age_seconds": requirement.max_proof_age_seconds,
+                    "loa": requirement.loa,
+                });
+            }
             Decision::Warn { rule_id, banner, safer_alternative, .. } => {
                 record["primary_rule_id"] = json!(rule_id);
                 record["banner"] = json!(banner);
@@ -529,7 +746,8 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
         burst_in_progress: shield.burst.in_burst(),
         ..Default::default()
     };
-    let first = shield.engine.evaluate(tool_name, &canonical_params, initial_adj);
+    let engine = shield.current_engine();
+    let first = engine.evaluate(tool_name, &canonical_params, initial_adj);
     if first.matches.is_empty() {
         return None;
     }
@@ -551,7 +769,7 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
         fingerprint_recently_denied: mv.recent_deny,
         fingerprint_repeatedly_approved: mv.repeated_approve,
     };
-    let eval = shield.engine.evaluate(tool_name, &canonical_params, adj);
+    let eval = engine.evaluate(tool_name, &canonical_params, adj);
     let decision = decide(&eval);
 
     // Anything beyond Allow counts toward the burst window.
@@ -577,8 +795,65 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
     });
     eprintln!("{}", audit);
 
+    // Ship the same event to Smartflow when we're enrolled. Best-effort;
+    // the sink owns its own queue + retry loop so failures never block
+    // the hot path.
+    if let Some(handles) = shield.orgmode.as_ref() {
+        handles
+            .audit
+            .record(AuditEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: chrono::Utc::now(),
+                rule_id: primary_id.clone(),
+                decision: decision.label().to_string(),
+                severity: eval.final_severity.as_str().to_string(),
+                tool: tool_name.to_string(),
+                fingerprint: fp.clone(),
+                context: audit.clone(),
+            })
+            .await;
+    }
+
     match decision {
         Decision::Allow => None,
+        Decision::IdentityVerification {
+            rule_id,
+            severity,
+            reason,
+            safer_alternative,
+            contributing_rules,
+            requirement,
+        } => {
+            // Org-mode wins when present: Smartflow is the relying
+            // party. Falls through to the local IdentityGate path
+            // otherwise (or when Smartflow says the provider isn't
+            // ready -- we don't want to silently allow gated calls).
+            if let Some(sf) = shield.smartflow_identity.clone() {
+                return handle_identity_decision_orgmode(
+                    id,
+                    tool_name,
+                    &fp,
+                    rule_id,
+                    severity,
+                    requirement,
+                    sf,
+                )
+                .await;
+            }
+            handle_identity_decision(
+                id,
+                tool_name,
+                &fp,
+                shield,
+                rule_id,
+                severity,
+                reason,
+                safer_alternative,
+                contributing_rules,
+                requirement,
+            )
+            .await
+        }
         Decision::Warn { rule_id, severity, banner, safer_alternative } => {
             warn!(
                 "[shield] WARN rule={} severity={} tool={}: {}",
@@ -747,4 +1022,514 @@ fn jsonrpc_error(id: Value, code: i64, msg: &str, data: Value) -> Value {
             "data": data,
         }
     })
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Identity-gated tool calls
+// ────────────────────────────────────────────────────────────────────
+
+fn is_idme_ready(p: &aperion_shield::ProviderConfig) -> bool {
+    let cid = p.client_id_env.as_deref()
+        .and_then(|v| std::env::var(v).ok())
+        .filter(|s| !s.is_empty());
+    let csec = p.client_secret_env.as_deref()
+        .and_then(|v| std::env::var(v).ok())
+        .filter(|s| !s.is_empty());
+    cid.is_some() && csec.is_some()
+}
+
+async fn build_identity_gate(explicit: Option<&std::path::Path>) -> anyhow::Result<IdentityGate> {
+    let cfg = IdentityConfig::load(explicit)?;
+    let state_dir = IdentityConfig::state_dir();
+    let mut providers: Vec<Arc<dyn IdentityProvider>> = Vec::new();
+    for p in &cfg.providers {
+        match p.kind {
+            ProviderKind::Mock => {
+                providers.push(Arc::new(MockProvider::new(
+                    p.id.clone(),
+                    p.subject.clone().unwrap_or_else(|| format!("{}-subject", p.id)),
+                    p.email.clone(),
+                    p.loa,
+                )));
+            }
+            ProviderKind::IdMe => {
+                let (a_def, t_def, u_def) = aperion_shield::identity::providers::idme::IdMeConfig::endpoint_defaults(p.sandbox);
+                let cfg_idme = aperion_shield::identity::providers::idme::IdMeConfig {
+                    id: p.id.clone(),
+                    sandbox: p.sandbox,
+                    client_id: p.client_id_env.as_deref().and_then(|v| std::env::var(v).ok()),
+                    client_secret: p.client_secret_env.as_deref().and_then(|v| std::env::var(v).ok()),
+                    scopes: p.scopes.clone(),
+                    authorize_url: p.authorize_url.clone().unwrap_or(a_def),
+                    token_url: p.token_url.clone().unwrap_or(t_def),
+                    userinfo_url: p.userinfo_url.clone().unwrap_or(u_def),
+                };
+                providers.push(Arc::new(IdMeProvider::new(cfg_idme)));
+            }
+        }
+    }
+    IdentityGate::new(cfg, providers, state_dir)
+}
+
+/// Handle a [`Decision::IdentityVerification`]: check the cache, surface
+/// a verify URL on miss, hold up to `hold_seconds`, then resolve.
+#[allow(clippy::too_many_arguments)]
+async fn handle_identity_decision(
+    id: Value,
+    tool_name: &str,
+    fp: &str,
+    shield: &Shield,
+    rule_id: String,
+    severity: aperion_shield::Severity,
+    reason: String,
+    safer_alternative: Option<String>,
+    contributing_rules: Vec<String>,
+    requirement: aperion_shield::IdentityRequirement,
+) -> Option<Value> {
+    let gate = match shield.identity_gate.as_ref() {
+        Some(g) => g.clone(),
+        None => {
+            // Fallback path: gate was disabled (--no-identity) yet a
+            // rule still asks for verification. Demote to plain
+            // Approval-denial so we don't accidentally allow the call.
+            error!(
+                "[shield] identity rule {} fired but identity gate is disabled -- denying",
+                rule_id
+            );
+            return Some(jsonrpc_error(
+                id,
+                -32096,
+                "shield_identity_unavailable",
+                json!({
+                    "rule_id": rule_id,
+                    "severity": severity.as_str(),
+                    "reason": "Identity gate is disabled (--no-identity). Re-run Shield without that flag to allow this call.",
+                    "fingerprint": fp,
+                    "tool": tool_name,
+                }),
+            ));
+        }
+    };
+
+    // 1) Cache hit -- fresh proof, allow immediately.
+    if let Some(p) = gate.cached_proof_for(&requirement) {
+        let audit = json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "kind": "identity_satisfied",
+            "tool": tool_name,
+            "rule_id": rule_id,
+            "fingerprint": fp,
+            "provider": p.provider,
+            "subject": p.subject,
+            "email": p.email,
+            "loa": p.loa,
+            "scope": p.scope,
+            "verified_at": p.verified_at,
+            "expires_at": p.expires_at,
+        });
+        eprintln!("{}", audit);
+        info!(
+            "[shield] identity satisfied rule={} subject={} loa={} (cached) -- allowing tool={}",
+            rule_id, p.subject, p.loa, tool_name
+        );
+        return None;
+    }
+
+    // 2) Cache miss -- mint a challenge with the matching provider.
+    let provider = match gate.provider(&requirement.provider) {
+        Some(p) => p,
+        None => {
+            error!(
+                "[shield] identity rule {} references unknown provider '{}'",
+                rule_id, requirement.provider
+            );
+            return Some(jsonrpc_error(
+                id,
+                -32095,
+                "shield_identity_provider_unknown",
+                json!({
+                    "rule_id": rule_id,
+                    "requested_provider": requirement.provider,
+                    "available_providers": gate.config().providers.iter().map(|p| &p.id).collect::<Vec<_>>(),
+                    "fingerprint": fp,
+                    "tool": tool_name,
+                }),
+            ));
+        }
+    };
+    if !provider.is_ready() {
+        warn!(
+            "[shield] identity provider '{}' not ready (credentials missing) -- denying tool={}",
+            provider.id(),
+            tool_name
+        );
+        return Some(jsonrpc_error(
+            id,
+            -32094,
+            "shield_identity_provider_unready",
+            json!({
+                "rule_id": rule_id,
+                "provider": provider.id(),
+                "reason": format!(
+                    "Provider '{}' is not yet activated. For id_me, set the env vars referenced by client_id_env / client_secret_env in identity.yaml.",
+                    provider.id()
+                ),
+                "fingerprint": fp,
+                "tool": tool_name,
+            }),
+        ));
+    }
+
+    let base = match gate.callback_base().await {
+        Ok(b) => b,
+        Err(e) => {
+            error!("[shield] failed to start callback server: {}", e);
+            return Some(jsonrpc_error(
+                id,
+                -32093,
+                "shield_identity_callback_unavailable",
+                json!({
+                    "rule_id": rule_id,
+                    "error": e.to_string(),
+                    "fingerprint": fp,
+                    "tool": tool_name,
+                }),
+            ));
+        }
+    };
+    let callback_url = format!("{}/callback", base);
+    let challenge_id = format!("ch_{}", uuid::Uuid::new_v4().simple());
+    let creq = identity::ChallengeRequest {
+        rule_id: rule_id.clone(),
+        requirement: requirement.clone(),
+        callback_url,
+        challenge_id: challenge_id.clone(),
+    };
+    let challenge = match provider.begin(creq).await {
+        Ok(c) => c,
+        Err(e) => {
+            error!("[shield] identity begin failed: {}", e);
+            return Some(jsonrpc_error(
+                id,
+                -32092,
+                "shield_identity_begin_failed",
+                json!({
+                    "rule_id": rule_id,
+                    "error": e.to_string(),
+                    "fingerprint": fp,
+                    "tool": tool_name,
+                }),
+            ));
+        }
+    };
+    if let Err(e) = gate
+        .register_inflight(&challenge, requirement.clone(), provider.id().to_string(), rule_id.clone())
+        .await
+    {
+        error!("[shield] failed to register inflight: {}", e);
+    }
+
+    // User-facing verify URL: prefer the local /verify/<id> entry point
+    // so the mock flow short-circuits and the real flow gets a stable
+    // landing page even before the redirect to ID.me.
+    let user_url = format!("{}/verify/{}", base, challenge_id);
+
+    let audit = json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": "identity_required",
+        "tool": tool_name,
+        "rule_id": rule_id,
+        "fingerprint": fp,
+        "provider": provider.id(),
+        "scope": requirement.scope,
+        "allowed_subjects": requirement.allowed_subjects,
+        "loa": requirement.loa,
+        "verify_url": user_url,
+        "challenge_id": challenge_id,
+        "hold_seconds": gate.hold_seconds(),
+    });
+    eprintln!("{}", audit);
+    warn!(
+        "[shield] IDENTITY VERIFICATION REQUIRED rule={} tool={}: {}",
+        rule_id, tool_name, reason
+    );
+    warn!("[shield]   open this URL to verify: {}", user_url);
+    if let Some(ref s) = safer_alternative {
+        warn!("[shield]   safer alternative: {}", s);
+    }
+
+    // 3) Hold the call server-side up to hold_seconds, then re-check.
+    if let Some(proof) = gate.wait_for_proof(&requirement, gate.hold_seconds()).await {
+        let audit = json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "kind": "identity_satisfied",
+            "tool": tool_name,
+            "rule_id": rule_id,
+            "fingerprint": fp,
+            "provider": proof.provider,
+            "subject": proof.subject,
+            "email": proof.email,
+            "loa": proof.loa,
+            "scope": proof.scope,
+            "challenge_id": challenge_id,
+            "via": "hold",
+        });
+        eprintln!("{}", audit);
+        info!(
+            "[shield] identity verified by {} (subject={} loa={}) -- releasing tool={}",
+            proof.email.clone().unwrap_or_else(|| proof.subject.clone()),
+            proof.subject,
+            proof.loa,
+            tool_name
+        );
+        return None;
+    }
+
+    // 4) Hold elapsed without verification -- surface the URL to the
+    //    agent so it can retry once the user has verified.
+    Some(jsonrpc_error(
+        id,
+        -32091,
+        "shield_identity_required",
+        json!({
+            "rule_id": rule_id,
+            "severity": severity.as_str(),
+            "reason": reason,
+            "safer_alternative": safer_alternative,
+            "contributing_rules": contributing_rules,
+            "fingerprint": fp,
+            "tool": tool_name,
+            "verify_url": user_url,
+            "challenge_id": challenge_id,
+            "provider": provider.id(),
+            "scope": requirement.scope,
+            "loa": requirement.loa,
+            "instructions": format!(
+                "Open {} in a browser to complete identity verification, then retry the tool call.",
+                user_url
+            ),
+        }),
+    ))
+}
+
+async fn run_identity_list(cli: &Cli) -> anyhow::Result<()> {
+    let gate = build_identity_gate(cli.identity_config.as_deref()).await?;
+    let cfg = gate.config();
+    println!("identity providers:");
+    for p in &cfg.providers {
+        let ready = match p.kind {
+            ProviderKind::Mock => "ready",
+            ProviderKind::IdMe => if is_idme_ready(p) { "ready" } else { "unready (set client_id_env/client_secret_env)" },
+        };
+        println!(
+            "  - id={:<10} kind={:<6} sandbox={:<5} -- {}",
+            p.id,
+            match p.kind { ProviderKind::IdMe => "id_me", ProviderKind::Mock => "mock" },
+            p.sandbox,
+            ready
+        );
+    }
+    println!();
+    println!(
+        "cached proofs (signature-verified, non-expired): {}",
+        gate.cached_count()
+    );
+    println!("state dir: {}", IdentityConfig::state_dir().display());
+    Ok(())
+}
+
+async fn run_identity_flush(cli: &Cli) -> anyhow::Result<()> {
+    let gate = build_identity_gate(cli.identity_config.as_deref()).await?;
+    let n = gate.flush()?;
+    println!("flushed {} cached identity proof(s).", n);
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Org-mode bootstrap + identity handler
+// ──────────────────────────────────────────────────────────────────────
+
+/// Bootstrap the org-mode subsystem at startup.
+///
+/// Returns a tuple of:
+///   * `Option<OrgState>` -- the persisted enrollment record, if any
+///   * `Option<Arc<EnrolledHandles>>` -- handles for background tasks
+///   * `Option<Arc<SmartflowProvider>>` -- identity provider for the
+///     IdentityVerification dispatch
+///   * `watch::Receiver<Arc<Engine>>` -- the engine snapshot the main
+///     loop uses for every evaluation
+///
+/// In standalone mode (no `orgmode.json`) the receiver yields a single
+/// value -- the engine handed in -- forever. In org mode the policy-pull
+/// task pushes a new engine on every version bump.
+async fn bootstrap_orgmode(
+    local_engine: Engine,
+) -> anyhow::Result<(
+    Option<OrgState>,
+    Option<Arc<EnrolledHandles>>,
+    Option<Arc<SmartflowProvider>>,
+    tokio::sync::watch::Receiver<Arc<Engine>>,
+)> {
+    let state = match OrgState::load() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                "[shield] could not load orgmode state ({}); continuing standalone",
+                e
+            );
+            None
+        }
+    };
+
+    let Some(state) = state else {
+        // Standalone mode: build a static watch channel that yields the
+        // local engine. Drop the sender so the receiver is effectively
+        // read-only.
+        let (tx, rx) = tokio::sync::watch::channel(Arc::new(local_engine));
+        drop(tx);
+        return Ok((None, None, None, rx));
+    };
+
+    // Org mode: pull initial policy (falls back to local on failure),
+    // start the heartbeat / policy-pull / audit-sink tasks, and build
+    // the SmartflowProvider for identity dispatch.
+    let api = Arc::new(OrgApi::from_state(&state));
+    let initial_engine = orgmode::load_initial_engine(&state, &api, local_engine).await;
+
+    let initial_version = api
+        .get_shieldset_version(&state.policy_group)
+        .await
+        .ok()
+        .map(|v| v.version)
+        .unwrap_or(0);
+
+    let pull = aperion_shield::orgmode::start_policy_pull(
+        api.clone(),
+        state.clone(),
+        Arc::new(initial_engine),
+        initial_version,
+    );
+    let engine_rx = pull.current.clone();
+
+    let heartbeat_task = aperion_shield::orgmode::start_heartbeat(api.clone(), state.clone());
+
+    let audit = AuditSink::new(api.clone());
+
+    let smartflow_identity = Arc::new(SmartflowProvider::new(api.clone()));
+
+    let handles = Arc::new(EnrolledHandles {
+        state: state.clone(),
+        api,
+        policy: pull,
+        audit,
+        _heartbeat_task: heartbeat_task,
+    });
+
+    Ok((Some(state), Some(handles), Some(smartflow_identity), engine_rx))
+}
+
+/// Handle [`Decision::IdentityVerification`] when running in org mode.
+/// Delegates to [`SmartflowProvider::resolve`] and translates the
+/// outcome into either a release (return `None`) or a structured
+/// JSON-RPC error mirroring the local-IdentityGate behaviour.
+async fn handle_identity_decision_orgmode(
+    id: Value,
+    tool_name: &str,
+    fp: &str,
+    rule_id: String,
+    severity: aperion_shield::Severity,
+    requirement: aperion_shield::IdentityRequirement,
+    sf: Arc<SmartflowProvider>,
+) -> Option<Value> {
+    match sf.resolve(&requirement).await {
+        ResolveOutcome::Verified(proof) => {
+            let audit = json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "kind": "identity_satisfied",
+                "via": "smartflow",
+                "tool": tool_name,
+                "rule_id": rule_id,
+                "fingerprint": fp,
+                "provider": proof.provider,
+                "subject": proof.subject,
+                "loa": proof.loa,
+                "scope": requirement.scope,
+                "expires_at": proof.expires_at,
+                "signature": proof.signature,
+            });
+            eprintln!("{}", audit);
+            info!(
+                "[shield] identity satisfied via smartflow subject={} loa={} -- releasing tool={}",
+                proof.subject, proof.loa, tool_name
+            );
+            None
+        }
+        ResolveOutcome::HoldExpired {
+            verify_url,
+            challenge_id,
+        } => {
+            warn!(
+                "[shield] identity hold expired rule={} tool={} challenge={}",
+                rule_id, tool_name, challenge_id
+            );
+            Some(jsonrpc_error(
+                id,
+                -32091,
+                "shield_identity_required",
+                json!({
+                    "rule_id": rule_id,
+                    "severity": severity.as_str(),
+                    "fingerprint": fp,
+                    "tool": tool_name,
+                    "via": "smartflow",
+                    "verify_url": verify_url,
+                    "challenge_id": challenge_id,
+                    "provider": requirement.provider,
+                    "scope": requirement.scope,
+                    "loa": requirement.loa,
+                    "instructions": format!(
+                        "Open {} in a browser to complete identity verification, then retry the tool call.",
+                        verify_url
+                    ),
+                }),
+            ))
+        }
+        ResolveOutcome::ProviderUnready { provider, message } => {
+            error!(
+                "[shield] smartflow identity provider '{}' is unready: {} -- denying tool={}",
+                provider, message, tool_name
+            );
+            Some(jsonrpc_error(
+                id,
+                -32094,
+                "shield_identity_provider_unready",
+                json!({
+                    "rule_id": rule_id,
+                    "provider": provider,
+                    "via": "smartflow",
+                    "message": message,
+                    "fingerprint": fp,
+                    "tool": tool_name,
+                }),
+            ))
+        }
+        ResolveOutcome::Error(e) => {
+            error!(
+                "[shield] smartflow identity check failed for rule={}: {} -- denying tool={}",
+                rule_id, e, tool_name
+            );
+            Some(jsonrpc_error(
+                id,
+                -32092,
+                "shield_identity_unavailable",
+                json!({
+                    "rule_id": rule_id,
+                    "via": "smartflow",
+                    "message": e.to_string(),
+                    "fingerprint": fp,
+                    "tool": tool_name,
+                }),
+            ))
+        }
+    }
 }

@@ -9,9 +9,48 @@ supply-chain RCE, reverse shells, sudo / privilege escalation, cloud
 (AWS/GCP/Azure), Kubernetes, and Docker — and either blocks the call,
 prompts you for approval, or lets it through with a warning banner.
 
-**v0.3 (current) eliminates noise.** Wide-scale validation against
-~13,000 real Cursor agent commands -- run from a typical project root
-with no prod-signal files -- shows:
+Plus, when you need to prove **who** approved a destructive call —
+not just that *someone* did — Shield can gate selected rules behind
+**biometric identity verification** (ID.me, or a pluggable OIDC provider).
+And when you outgrow the single-machine model, the **same binary**
+enrolls into a Smartflow control plane with one command to pull
+org-wide policy, ship audit upstream, and use your existing IdP as
+the relying party — no rewrite, no re-install.
+
+---
+
+## What's new in v0.5
+
+- **Identity gates** (new): selected high-blast-radius rules can now require a
+  cryptographically-fresh proof of human identity *before* the call is forwarded.
+  Pluggable providers ship with a mock-friendly default; ID.me OIDC + an
+  optional local callback server lands behind a feature flag. Ed25519
+  signatures on every proof; cache lives under `~/.aperion-shield/proofs/`
+  (mode 0600). See [Identity gates](#identity-gates-new-in-v05).
+- **Org mode** (new, opt-in): `aperion-shield --enroll --smartflow-url <URL>
+  --token <ENROLL_TOKEN>` enrolls this Shield against a Smartflow control
+  plane. On enrollment the client persists an Ed25519 vkey, then every run
+  pulls policy, streams audit, and lets your existing Smartflow IdP serve as
+  the relying party for identity gates. The control-plane code path is **inert
+  until you enroll** — out-of-the-box `aperion-shield` is standalone and
+  offline. See [Org mode](#org-mode-new-in-v05).
+- **Tautological-WHERE detection** in `sql.unscoped_update` (new): the rule now
+  catches the agent's favourite work-around — *"sure, I'll add a `WHERE`
+  clause: `WHERE email_verified = FALSE` when I'm `SET email_verified = TRUE`"*
+  — which selects exactly the rows the `SET` would change. Six tautology
+  patterns are detected (boolean opposites, `IS NULL`-vs-`SET <value>`,
+  inequality-vs-equality, etc.). Genuine scope-narrowing (`WHERE created_at >
+  NOW() - INTERVAL '7 days'`) passes through.
+- **0.5 is a strict superset of 0.3**: every rule, decision, and corpus
+  result below still holds; identity gates and org mode are *additions*, not
+  replacements, and the v0.3 noise-floor work (below) carries forward.
+
+---
+
+## v0.3 baseline (still in force in v0.5)
+
+Wide-scale validation against ~13,000 real Cursor agent commands -- run
+from a typical project root with no prod-signal files -- shows:
 
 ```
  12,708 (98.42%)   allow      <-- legitimate operations pass through
@@ -140,10 +179,9 @@ goes through Shield first.
 }
 ```
 
-See [`docs/shield-public/cursor-quickstart.md`](../../docs/shield-public/cursor-quickstart.md)
-and [`docs/shield-public/claude-code-quickstart.md`](../../docs/shield-public/claude-code-quickstart.md)
-for the full walk-through (including how to combine multiple MCP
-servers under a single Shield).
+For the longer walk-through (combining multiple MCP servers under a
+single Shield, IDE-specific tips, troubleshooting), see
+[docs.aperion.ai/aperion-shield.html](https://docs.aperion.ai/aperion-shield.html).
 
 ---
 
@@ -153,7 +191,7 @@ The bundled ruleset covers eight destructive surfaces with 45+ rules:
 
 | Category          | Examples                                                                                       |
 |-------------------|------------------------------------------------------------------------------------------------|
-| SQL               | `DROP DATABASE`, `DROP TABLE`, `TRUNCATE`, unscoped `UPDATE`/`DELETE`, `COPY FROM PROGRAM`, `LOAD DATA INFILE`, `GRANT ALL`, `REVOKE FROM PUBLIC` |
+| SQL               | `DROP DATABASE`, `DROP TABLE`, `TRUNCATE`, unscoped `UPDATE`/`DELETE` (incl. **tautological-WHERE** detection — `WHERE col = FALSE` paired with `SET col = TRUE`), `COPY FROM PROGRAM`, `LOAD DATA INFILE`, `GRANT ALL`, `REVOKE FROM PUBLIC` |
 | Git               | `git push --force` to protected branches, `filter-branch` / `filter-repo`, `reset --hard HEAD~`, `branch -D`, `clean -fxd`, `checkout .`         |
 | Filesystem        | `rm -rf /`, `dd` to `/dev/sd*`, deletes/writes under `/etc`, `/var/lib`, `~/.ssh`, `~/.aws`; world-writable `chmod 777`; recursive `chown root`  |
 | Secrets exfil     | compound *(read `.env` / `~/.aws/credentials` / `~/.ssh/id_*`) + (curl / wget / nc post)* in the same command — near-certain exfiltration         |
@@ -181,6 +219,140 @@ Memory lives at `.aperion-shield/decisions.jsonl` in your project root.
 It never leaves your machine; the standalone is offline-only.
 
 You can layer your own rules on top via `--rules my.yaml`.
+
+---
+
+## Identity gates (new in v0.5)
+
+For the highest-blast-radius calls -- `DROP DATABASE`, force-push to a
+protected branch, `aws rds delete-db-instance`, an unscoped `UPDATE` on
+prod, or whatever you decide is *"a human signature should be on this"*
+-- a `block` or `approval` isn't always enough. You want a fresh proof
+that the *person* on the other end of the keyboard is who they claim to
+be, *right now*, before the call is forwarded.
+
+Identity gates do that. Any rule can carry an `identity:` block:
+
+```yaml
+shieldset:
+  version: 1
+  rules:
+    - id: sql.drop_database
+      severity: Critical
+      where: tool_call
+      match:
+        tool: [execute_sql]
+        sql_predicate: drop_database
+      identity:
+        require: true            # gate this rule on a fresh identity proof
+        ial: 2                   # NIST IAL2 minimum (in-person or remote biometric)
+        aal: 2                   # NIST AAL2 minimum (MFA bound to a hardware token)
+        max_age_seconds: 300     # proof must be < 5 min old
+        scopes: ["destructive_db"]
+      reason: "DROP DATABASE is never auto-allowed."
+```
+
+When that rule fires, Shield emits a `Decision::IdentityVerification`
+to the caller (the agent, surfaced in the IDE), opens a local callback
+server, and waits for the user to complete an OIDC flow with the
+configured provider. On success it caches an **Ed25519-signed proof**
+in `~/.aperion-shield/proofs/` (mode 0600). Subsequent calls within
+`max_age_seconds` re-use the cached proof; older proofs force a fresh
+verification.
+
+### Providers
+
+| Provider           | Status        | Use it for                                    |
+|--------------------|---------------|-----------------------------------------------|
+| `mock`             | default       | Local dev / CI; instantly issues a proof      |
+| `idme`             | feature-gated | ID.me OIDC, IAL/AAL-graded biometric          |
+| `smartflow`        | org mode only | Uses your Smartflow tenant's IdP (Okta / Auth0 / Azure AD / Google) as the relying party |
+| custom (trait impl)| any           | Implement `IdentityProvider` and link it in    |
+
+Config lives at `~/.aperion-shield/identity.yaml` (or pass
+`--identity-config path.yaml`). An annotated example is at
+[`examples/identity.yaml`](examples/identity.yaml).
+
+### CLI
+
+```bash
+# Disable identity gating entirely (rules' identity blocks become plain Approval/Block).
+aperion-shield --no-identity -- npx ...
+
+# Inspect the cached-proof store.
+aperion-shield --identity-list
+
+# Drop every cached proof; forces re-verification on the next gated call.
+aperion-shield --identity-flush
+```
+
+ID.me sandbox access is pending; until then the `mock` provider is the
+recommended default and the YAML schema is stable.
+
+---
+
+## Org mode (new in v0.5)
+
+Standalone Shield is single-machine, offline, and never phones home.
+That's the right default for individual developers and tight
+engineering teams. But once you have ten or a hundred Shields running
+across a workforce, you'll want:
+
+- one shieldset for the whole org, versioned centrally
+- audit centralised in one place, tamper-evident
+- identity gates that lean on your existing IdP, not on per-laptop config
+- a kill-switch that disables a compromised laptop in <60s
+
+Org mode is the upgrade path. The **same `aperion-shield` binary** in
+this repo, when enrolled into a Smartflow control plane, becomes a
+tenant-aware client. Out of the box it is dormant. You opt in:
+
+```bash
+# 1. From a Smartflow admin console: mint an enrollment token (one-shot, scoped).
+
+# 2. On the user's laptop, once:
+aperion-shield --enroll \
+    --smartflow-url https://shield.your-tenant.smartflow.ai \
+    --token sf_enroll_eyJhb...
+
+# Persists an Ed25519 vkey at ~/.aperion-shield/orgmode.json (mode 0600).
+# Subsequent `aperion-shield` runs:
+#   - pull policy from the control plane on startup
+#   - watch a long-poll endpoint for shieldset / killswitch updates
+#   - stream every decision as a signed audit record upstream
+#   - use the tenant's IdP as the identity-gate relying party
+```
+
+Status:
+
+```bash
+aperion-shield --status
+# Standalone:  prints "standalone (not enrolled)" and exits 0.
+# Enrolled:    prints tenant ID, last policy sync, last heartbeat, etc.
+```
+
+The control-plane code path **only activates once you enroll**. Without
+an enrollment token + Smartflow URL the org-mode subsystem stays
+inert -- Shield runs identically to the standalone configuration.
+
+Why ship the client code in the OSS binary? Because:
+
+1. It's the bridge to the paid product. Engineers exploring the OSS
+   today should be able to read exactly how the upgrade works -- no
+   binary swap, no re-install, no surprise dependencies. When their
+   shop buys Smartflow, the laptops they already have keep running.
+2. Auditability. The wire protocol, the signing scheme, the policy-pull
+   semantics, and the audit-record format are all in
+   [`src/orgmode/`](src/orgmode/). You can review them before adopting.
+3. Inert until enrolled. The code does not initiate any outbound
+   traffic, look at any env vars, or open any sockets until `--enroll`
+   has been run and a vkey is persisted on disk.
+
+Smartflow itself (the control plane, the dashboards, the EU-AI-Act
+conformity console, the WORM audit chain) is a separate, commercial
+product at [aperion.ai](https://aperion.ai). The wire format the
+OSS client speaks is documented in
+[`src/orgmode/mod.rs`](src/orgmode/mod.rs).
 
 ---
 
@@ -389,24 +561,34 @@ and restart your IDE.
 
 ## Free vs paid
 
-| Feature                                        | Free standalone | Smartflow (paid) |
-|------------------------------------------------|:---------------:|:----------------:|
-| Local rule engine + default ruleset            | ✅              | ✅               |
-| Cursor / Claude Code MCP adapter               | ✅              | ✅               |
-| Custom rules via local YAML                    | ✅              | ✅               |
-| Shadow / enforce / audit modes                 | ✅              | ✅               |
-| Local stderr audit log                         | ✅              | ✅               |
-| Hosted approval queue + dashboard              | —               | ✅               |
-| Tamper-evident audit chain (RFC 3161)          | —               | ✅               |
-| WORM compliance connectors (S3 Object Lock)    | —               | ✅               |
-| EU AI Act conformity console + AI-BOM          | —               | ✅               |
-| Shared team rules + role-based approval        | —               | ✅               |
-| MCP trust registry (signed servers)            | —               | ✅               |
-| Sigstore-signed binaries + admission policies  | —               | ✅               |
+| Feature                                                                | Free standalone | Smartflow (paid) |
+|------------------------------------------------------------------------|:---------------:|:----------------:|
+| Local rule engine + default ruleset (45+ rules)                        | ✅              | ✅               |
+| Cursor / Claude Code MCP adapter                                       | ✅              | ✅               |
+| Custom rules via local YAML                                            | ✅              | ✅               |
+| Shadow / enforce / auto-deny modes                                     | ✅              | ✅               |
+| Composite scoring + workspace probe + decision memory + burst detector | ✅              | ✅               |
+| Local stderr audit log + `.aperion-shield/decisions.jsonl`             | ✅              | ✅               |
+| `--check` mode (CI / corpus testing)                                   | ✅              | ✅               |
+| Identity gates -- mock provider + ID.me provider (feature-gated)       | ✅              | ✅               |
+| Org-mode **client** (`--enroll`, policy pull, audit stream, vkey)      | ✅              | ✅               |
+| Hosted approval queue + dashboard                                      | —               | ✅               |
+| Org-wide shieldset distribution + versioning                           | —               | ✅               |
+| Killswitch + remote-disable a compromised laptop in <60s               | —               | ✅               |
+| Tamper-evident audit chain (RFC 3161)                                  | —               | ✅               |
+| WORM compliance connectors (S3 Object Lock)                            | —               | ✅               |
+| EU AI Act conformity console + AI-BOM                                  | —               | ✅               |
+| Shared team rules + role-based approval                                | —               | ✅               |
+| Tenant IdP as identity-gate relying party (Okta/Auth0/Azure AD/Google) | —               | ✅               |
+| MCP trust registry (signed servers)                                    | —               | ✅               |
+| Sigstore-signed binaries + admission policies                          | —               | ✅               |
 
-The free product is governed by Apache 2.0; the paid product is a
-commercial Aperion subscription. Both products live in this monorepo so
-rules and tests stay in sync.
+The free product is governed by Apache 2.0 — including the `src/orgmode/`
+client. The paid product is the Smartflow **control plane** that the
+client talks to: a hosted service, separately licensed. Both halves
+share the same `shieldset.yaml` schema and the same audit-record format,
+so policy you author for standalone Shield works unchanged once you
+enroll into Smartflow.
 
 ---
 
@@ -427,12 +609,14 @@ gated on legal / DPO review.
 ## Build from source
 
 ```bash
-cd tools/shield-standalone
+git clone https://github.com/AperionAI/shield.git
+cd shield
 cargo build --release
 ./target/release/aperion-shield --help
 ```
 
-The binary is self-contained: ship just the file.
+The binary is self-contained: ship just the file. Builds on macOS,
+Linux, and Windows with stable Rust (1.75+).
 
 ---
 

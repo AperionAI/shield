@@ -1,0 +1,76 @@
+# Aperion Shield -- identity.yaml example.
+#
+# Copy this file to one of:
+#   * `~/.aperion-shield/identity.yaml`  (default discovery path)
+#   * Anywhere, and point Shield at it with `--identity-config <PATH>`
+#   * Anywhere, and export `$APERION_SHIELD_IDENTITY_CONFIG=<PATH>`
+#
+# The file lists the identity providers Shield can talk to and any
+# shared knobs (callback host/port, hold timeout).
+#
+# How it slots into rules
+# -----------------------
+#
+# Each rule in `shieldset.yaml` can carry an `identity:` block:
+#
+#   - id: scm.commit_to_main
+#     ...
+#     identity:
+#       provider: id_me             # references one of the `providers[*].id` below
+#       scope: scm.commit_to_main   # cache partition + audit scope
+#       allowed_subjects: ["[email protected]", "id_me|abc-123"]
+#       max_proof_age_seconds: 900
+#       loa: 2
+#
+# When the rule fires, Shield looks up `providers[*]` by id, prompts the
+# user to verify (browser flow), and caches the resulting signed proof
+# under `<state_dir>/identity-cache.json` for re-use by future calls.
+
+identity:
+  # Master switch. Set to false to disable every identity gate.
+  enabled: true
+
+  # The callback server only ever binds to loopback by default. Don't
+  # change this unless you really know what you're doing -- exposing the
+  # OAuth callback on a public interface is a credential-stealing risk.
+  callback_host: 127.0.0.1
+
+  # 0 = OS assigns a free port. Pin a port (e.g. 49725) if you've
+  # registered a fixed `redirect_uri` with the provider.
+  callback_port: 0
+
+  # How long Shield holds a tool call server-side, waiting for the
+  # user to complete verification, before returning a "verify out-of-
+  # band" error to the agent. The user can still verify after the
+  # timeout and retry the call; the proof is cached either way.
+  hold_seconds: 120
+
+  providers:
+    # ── ID.me production / sandbox ────────────────────────────────
+    # Wires up the full OAuth 2.0 + PKCE flow. Stays in "unready"
+    # state until both env vars below resolve to non-empty values
+    # (Shield refuses to operate the gate with missing credentials).
+    - id: id_me
+      kind: id_me
+      sandbox: true                       # use the idmelabs.com sandbox
+      client_id_env: IDME_CLIENT_ID
+      client_secret_env: IDME_CLIENT_SECRET
+      scopes:
+        - openid
+        - ial2                            # request the biometric tier
+      # Optional explicit endpoint overrides. Defaults are derived
+      # from `sandbox` (idmelabs.com vs api.id.me). Override only if
+      # you're talking to a private federation gateway.
+      # authorize_url: https://api.idmelabs.com/oauth/authorize
+      # token_url:     https://api.idmelabs.com/oauth/token
+      # userinfo_url:  https://api.idmelabs.com/api/public/v3/attributes.json
+
+    # ── Local mock (for tests / demos before the sandbox is live) ─
+    # The mock always verifies and returns the synthetic subject /
+    # email / LOA below. NEVER use this provider in production --
+    # it has no security properties.
+    - id: mock
+      kind: mock
+      subject: "demo-subject-0001"
+      email:   "demo@aperion"
+      loa: 2

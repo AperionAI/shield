@@ -1,8 +1,8 @@
 [package]
 name = "aperion-shield"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
-description = "Aperion Shield -- a local MCP guardrail for AI coding agents. Standalone, free, open source."
+description = "Aperion Shield -- a local MCP guardrail for AI coding agents with optional biometric identity gates (ID.me). Standalone, free, open source."
 license = "Apache-2.0"
 authors = ["Aperion <support@aperion.ai>"]
 readme = "README.md"
@@ -56,6 +56,26 @@ sha2 = "0.10"
 # Cross-platform home-directory resolution for ~/.aperion-shield/ and
 # for normalising paths in the sensitive-path matcher.
 dirs = "5"
+
+# ── Identity-gated tool calls (ID.me partnership, v0.4+) ──────────────
+# All four crates are tiny pure-Rust dependencies; total binary growth
+# is < 200 KB. The HTTP client + server stay in-process so Shield never
+# has to talk to an external daemon.
+async-trait = "0.1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+url = "2"
+# Local OAuth callback server (binds to 127.0.0.1 on an OS-assigned
+# port, exposes /verify/<id> and /callback). hyper 0.14 + tokio 1.x
+# is the most stable pairing and keeps the dep tree small.
+hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
+# Outbound HTTPS for ID.me /oauth/token and /userinfo. rustls so we
+# don't pick up a system OpenSSL dependency on Linux.
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+# Atomic write of the proof cache file.
+fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
