@@ -1,0 +1,53 @@
+# cargo-audit configuration for aperion-shield
+#
+# This file documents the security advisories that we have analyzed
+# and intentionally chosen NOT to treat as blocking for the current
+# (v0.5.x) release line. Every entry below MUST have a written
+# justification in SECURITY.md at the repo root.
+#
+# Run with:
+#   cargo install cargo-audit
+#   cargo audit
+#
+# When v0.6.0 lands on 2026-05-18, the dependency upgrade closes all
+# three advisories below and this file's `ignore` list should be
+# trimmed to `[]`. The audit run for v0.6.0 must be clean without
+# ignores.
+
+[advisories]
+ignore = [
+    # rustls-webpki: reachable panic on malformed CRL BIT STRING.
+    # Severity High in Dependabot; NOT exploitable in aperion-shield
+    # because Shield does not parse CRLs in any code path. See
+    # SECURITY.md §4.1.
+    "RUSTSEC-2026-0104",
+
+    # rustls-webpki: name constraints for URI names incorrectly
+    # accepted. Severity Low. Exploitation requires a misissued
+    # certificate in a CA chain already trusted by the OS; if that
+    # condition holds, every TLS-using application on the host is
+    # affected, not just Shield. See SECURITY.md §4.2.
+    "RUSTSEC-2026-0098",
+
+    # rustls-webpki: wildcard names accepted under name constraints.
+    # Severity Low. Same exploitation profile as RUSTSEC-2026-0098.
+    # See SECURITY.md §4.3.
+    "RUSTSEC-2026-0099",
+]
+
+# Hard policy: vulnerabilities fail audit unless explicitly ignored
+# above (with documented reasoning in SECURITY.md).
+vulnerability = "deny"
+
+# Unmaintained / yanked crates: warn, do not fail. We get noisy
+# notifications about long-tail crates that the rustls / hyper /
+# reqwest ecosystem still depends on transitively; not actionable
+# from the application layer.
+unmaintained = "warn"
+yanked       = "warn"
+notice       = "warn"
+
+[output]
+deny    = ["warnings"]
+format  = "terminal"
+quiet   = false

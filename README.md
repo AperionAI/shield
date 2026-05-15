@@ -626,6 +626,24 @@ gated on legal / DPO review.
 
 ---
 
+## Security
+
+See [`SECURITY.md`](SECURITY.md) for:
+
+- Our **threat model** and trust boundaries
+- How to **report a vulnerability** (GitHub Security Advisories or
+  `security@aperion.ai`, with response targets and safe-harbour terms)
+- The **current open advisories** affecting Shield's dependency tree,
+  our analysis of each, and the release in which they close
+- **Hardening recommendations** for enterprise operators
+
+A machine-readable companion at [`.cargo/audit.toml`](.cargo/audit.toml)
+documents which advisories `cargo audit` should treat as known and
+analyzed, with a line-by-line justification mapped to the section
+numbers in `SECURITY.md`.
+
+---
+
 ## Build from source
 
 ```bash
