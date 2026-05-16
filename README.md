@@ -1,5 +1,12 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Release](https://github.com/AperionAI/shield/actions/workflows/release.yml/badge.svg)](https://github.com/AperionAI/shield/actions/workflows/release.yml)
+[![Tests](https://img.shields.io/badge/tests-133%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
+[![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
+
 `aperion-shield` is a tiny, local MCP server that sits between your AI
 coding agent (Cursor, Claude Code, …) and the **real** MCP servers your
 agent talks to (postgres, github, shell, filesystem, …). On every
@@ -49,8 +56,10 @@ the relying party — no rewrite, no re-install.
 
 ## v0.3 baseline (still in force in v0.5)
 
-Wide-scale validation against ~13,000 real Cursor agent commands -- run
-from a typical project root with no prod-signal files -- shows:
+Wide-scale validation against **12,912 real Cursor agent commands**
+(see [`docs/methodology.md`](docs/methodology.md) for the
+reproducible methodology — corpus, exact command, raw counts,
+caveats) — run from a typical project root with no prod-signal files:
 
 ```
  12,708 (98.42%)   allow      <-- legitimate operations pass through
@@ -60,6 +69,14 @@ from a typical project root with no prod-signal files -- shows:
      10 (0.08%)   block       <-- hard stop (curl|bash, env->curl
                                     exfiltration, reverse-shell patterns)
 ```
+
+The single number we publish is **98.4% pass-through** — the sum of
+the `allow` and `warn` columns; the operational definition of "did
+not interrupt the developer." Any reader can reproduce this number
+on their own machine in under 60 seconds using the methodology doc
+linked above. We treat the false-positive rate as the product KPI
+and we publish it because a guardrail with a high false-positive
+rate gets disabled within a week.
 
 That's a **94% reduction in approval-prompt noise vs v0.2** (which
 fired on 73% of commands). The fixes:
@@ -202,10 +219,32 @@ The bundled ruleset covers eight destructive surfaces with 45+ rules:
 | LLM plans         | Assistant-text mentions of the same destructive patterns above (second-pair-of-eyes)                                                              |
 | Anomaly           | Burst of destructive verbs by the same actor inside a 5-minute window                                                                             |
 
-### Adaptive scoring (new in v0.2)
+### How it decides (adaptive scoring, new in v0.2)
 
-Shield combines five signals when deciding whether to allow, warn,
-prompt, or block a call:
+A regex-only guardrail is brittle in both directions: it under-fires
+when an agent paraphrases its way around a literal pattern, and it
+over-fires on legitimate commands that happen to lexically resemble
+something dangerous. Shield's design bet is that the decision should
+be a composite of multiple weak signals, not a single regex match,
+because the false-positive rate is what determines whether the tool
+gets deployed at all.
+
+So instead of "did rule X match? — block / allow," Shield runs every
+rule in parallel, sums their contributions, and then adjusts the
+result against four context signals: the workspace, the user's prior
+decisions on similar fingerprints, the rate of destructive operations
+in the last five minutes, and the threshold curve in the shieldset
+itself. A single `Medium`-rated match is a warning; three independent
+`Medium` matches on the same call stack into a `High` and trigger a
+human approval. A prior denial of the same fingerprint within a week
+escalates the next match by one tier; three prior approvals demote
+it. A burst of five destructive matches in a 5-minute window bumps
+every subsequent match in the window by one tier until the burst
+clears.
+
+The result is fewer false-positive prompts on benign repeats, harder
+gates on the operations that actually matter, and a teach-as-you-go
+`safer_alternative` hint on every block. The five signals:
 
 | Signal                      | Effect                                                          |
 |-----------------------------|------------------------------------------------------------------|
@@ -579,6 +618,101 @@ and restart your IDE.
 
 ---
 
+## Compared to
+
+The AI-agent governance space splits into "prove what happened"
+(signed audit trails) and "control what happens" (policy enforcement).
+Shield is in the control bucket, at the MCP transport layer.
+
+### Direct comparators (same problem, different approach)
+
+- **[SigmaShake](https://sigmashake.com/)** — closest direct competitor.
+  Local CLI + MCP server, signed and versioned ruleset hub at
+  `hub.sigmashake.com`, sub-2ms evaluation, decision verbs
+  (ALLOW/DENY/BLOCK/ASK/FORCE/LOG). Strengths: signed rule
+  distribution, multi-IDE support (Cursor / Claude Code / Copilot /
+  Codex / Gemini), mature web dashboard. **How Shield differs:**
+  Apache-2.0 OSS for the full client (SigmaShake's CLI is closed-
+  source); adaptive composite scoring across five signals vs.
+  first-match-wins; published, reproducible false-positive rate
+  against a real-history corpus; embeddable Rust crate for non-MCP
+  hosts.
+- **[Captain Hook](https://github.com/securityreviewai/captain-hook)** by
+  SecurityReview.ai — Python, Claude-Code-specific, YAML rules at
+  `.claude/captain-hook.yaml`. Intercepts tool calls, prompts, and
+  responses; rules for file/network/MCP/bash/prompt-injection.
+  **How Shield differs:** generalises to any MCP-speaking agent
+  (not Claude-Code-only); single Rust binary (no Python runtime);
+  adaptive scoring; identity-gated tool calls.
+- **[`mcp-context-protector`](https://github.com/trailofbits/mcp-context-protector)**
+  by Trail of Bits — Python wrapper specifically targeting MCP
+  prompt-injection and server-configuration-change attacks.
+  **How Shield differs:** broader destructive-op coverage (SQL /
+  filesystem / cloud / secrets / supply chain / privilege), not
+  prompt-injection-specific; adaptive scoring; Rust performance.
+- **[`mcp-guardian`](https://github.com/eqtylab/mcp-guardian)** by
+  EQTY Lab — manages an LLM assistant's access to MCP servers
+  through real-time ACL-style controls. **How Shield differs:**
+  rule-based destructive-op detection in addition to allow-list
+  ACLs; published false-positive metrics; embedded Rust crate.
+- **[MCP Defender](https://github.com/MCP-Defender/MCP-Defender)** —
+  blocks malicious MCP traffic. **How Shield differs:** developer-
+  friendly `safer_alternative` text on every block; reproducible
+  false-positive measurement; identity gates.
+
+### Adjacent (overlapping scope, different layer)
+
+- **[Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)**
+  — Policy-as-code with Cedar, multi-language SDKs (Python /
+  TypeScript / .NET / Rust / Go), 9,500+ tests, the most mature
+  policy engine in the space. **How Shield differs:** transport-
+  level wrapping vs. SDK integration into the agent — Shield works
+  with any MCP-speaking client without code changes; single binary;
+  rule language tuned specifically for destructive-op detection
+  rather than general policy.
+
+### Different category (we don't compete here, but people ask)
+
+- **[NeMo Guardrails](https://github.com/NVIDIA/NeMo-Guardrails)** —
+  NVIDIA's Colang DSL for chatbot conversation safety, topic
+  control, and jailbreak prevention. Designed for the LLM-output
+  layer of customer-facing chatbots, not agent tool-call enforcement.
+- **[Guardrails AI](https://github.com/guardrails-ai/guardrails)** —
+  output validation and structural guarantees on LLM responses
+  (schemas, classifiers, validators). Complementary, not competitive.
+- **[Open Policy Agent (OPA)](https://www.openpolicyagent.org/)** —
+  general-purpose policy engine for Kubernetes / microservices.
+  Shield could *use* OPA as a rule backend; we don't compete with it.
+- **[asqav](https://github.com/jagmarques/asqav-sdk)**,
+  **[AgentMint](https://github.com/aniketh-maddipati/agentmint-python)** —
+  cryptographically-signed audit trails (ML-DSA-65 quantum-safe for
+  asqav, Ed25519 + RFC 3161 for AgentMint). These tools answer
+  "what happened, and can the auditor trust the log?". Shield
+  answers "should this call be allowed to happen at all?". Both
+  layers are required for regulated industries; Shield's
+  tamper-evident audit chain (SHA-256) is intentionally simpler
+  than the dedicated audit tools, and signed audit records are on
+  our v0.7 roadmap.
+
+### Honest gaps
+
+| Capability                                  | Shield v0.5 | The competitor that does it best |
+|---------------------------------------------|:-----------:|----------------------------------|
+| Signed audit-record chain                   |     —       | asqav (quantum-safe) / AgentMint |
+| Quantum-safe signatures                     |     —       | asqav (ML-DSA-65)                |
+| Multi-language SDKs                         |     —       | Microsoft AGT (Python / TS / .NET / Rust / Go) |
+| Hosted ruleset-distribution hub             |     —       | SigmaShake (`hub.sigmashake.com`) |
+| Conversation-level prompt safety / Colang   |     —       | NeMo Guardrails                  |
+| LLM-output schema validation                |     —       | Guardrails AI                    |
+
+If your problem is one of the items above, use the named tool. If
+your problem is "AI coding agents emit destructive operations and
+I need them blocked before they reach my real MCP server, with a
+false-positive rate I can verify against my own data," Shield is
+the answer.
+
+---
+
 ## Free vs paid
 
 | Feature                                                                | Free standalone | Smartflow (paid) |
@@ -623,6 +757,53 @@ destructive ops Shield blocked across the entire user base, never
 including the actual SQL / prompt / payload) is being designed; if /
 when it ships, it will be **explicitly opt-in** at install time and
 gated on legal / DPO review.
+
+---
+
+## Limitations (what Shield is NOT)
+
+A guardrail product should be clear about its scope, because a tool
+that claims to defend against everything is also defending against
+nothing in particular. The full threat model lives in
+[`SECURITY.md`](SECURITY.md) §3; the short developer-facing version:
+
+- **Shield is not a defence against an adversary with local shell
+  access.** It runs as the local user; anyone who can already run
+  arbitrary commands on the host can disable Shield, edit its rules,
+  or replace the binary. Shield is a guardrail for *agents*, not
+  for *attackers with root*.
+- **Shield does not validate the upstream MCP server.** If the
+  postgres MCP server you wired Shield in front of is itself
+  malicious or compromised, Shield's `allow` decisions send traffic
+  to a malicious tool. Use a trusted MCP server upstream;
+  Shield governs *what calls reach it*, not what it then does.
+- **Shield does not do conversation-level prompt safety.** It
+  evaluates `tools/call` payloads and a small set of assistant-text
+  patterns. It does not enforce topic control, jailbreak detection,
+  or output schema validation — those are different tools (NeMo
+  Guardrails, Guardrails AI). See **Compared to** above for the
+  honest competitor map.
+- **Shield does not provide cryptographically-signed audit records
+  yet.** The audit chain is SHA-256 hash-chained; signed receipts
+  are on the v0.7 roadmap. If you need post-quantum-signed audit
+  trails today, use `asqav`; if you need Ed25519 receipts, use
+  `AgentMint`. Both are complementary to Shield, not replacements.
+- **Shield's pass-through rate is workload-specific.** The published
+  98.4% is measured against a real Cursor command corpus with the
+  workspace probe off and decision memory off, for determinism. A
+  team running primarily in `kubeconfig`-containing directories
+  will see a lower pass-through rate by design (the probe escalates
+  severity in prod-shaped workspaces — that's the feature, not a
+  bug). See [`docs/methodology.md`](docs/methodology.md).
+- **Shield does not patch your operating system, IDE, or upstream
+  MCP servers.** It governs the boundary between your IDE and your
+  MCP servers. Vulnerabilities upstream or downstream of that
+  boundary are outside Shield's scope.
+
+If your problem is on this list, you need a tool other than Shield
+(or in addition to Shield). We try to be clear about this because
+it's the difference between Shield being useful and Shield being
+[security theatre](https://www.schneier.com/essays/archives/2003/04/the_dangers_of_secur.html).
 
 ---
 
