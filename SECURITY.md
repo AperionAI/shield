@@ -23,8 +23,9 @@ If you only read one section, read **§4 — Open advisories** below.
 
 | Version | Status | Receives fixes |
 |---|---|---|
-| `0.5.x` | current stable | yes |
-| `< 0.5` | superseded   | no |
+| `0.6.x` | current stable | yes |
+| `0.5.x` | previous       | no — superseded by v0.6.0 on 2026-05-18 |
+| `< 0.5` | superseded     | no |
 
 We do **not** backport fixes to pre-1.0 minor lines. Stay on the
 latest tagged release. Homebrew users get this automatically; pinned
@@ -129,27 +130,27 @@ This section is the truthful, technical answer to the question
 "are there any known vulnerabilities affecting aperion-shield?"
 It is updated when alerts open and when they close.
 
-### As of 2026-05-15
+### As of 2026-05-18 — none
 
-GitHub Dependabot has surfaced **three open advisories** against a
-single transitive dependency, `rustls-webpki 0.101.7`. All three were
-published 2026-04-14 → 2026-04-22 by the rustls maintainers. They
-showed up against Shield's repository within hours of our first
-public release because Dependabot scans every public repo's
-`Cargo.lock` on push.
+`cargo audit` against the v0.6.0 `Cargo.lock` returns clean.
+GitHub Dependabot has zero open advisories against the
+`AperionAI/shield` repository on `main`.
 
-We have analyzed each advisory against Shield's actual usage of
-the affected crate and concluded that **none of the three is
-practically exploitable in Shield's default configuration**. The fix
-is nonetheless scheduled for **v0.6.0 on Monday 2026-05-18** — see
-§4.4 below for the upgrade plan.
+The three `rustls-webpki 0.101.7` advisories that were open between
+2026-05-15 and 2026-05-18 are now **closed in v0.6.0** by the
+dependency upgrade described in §4.5 below. Their detailed analysis
+is retained in §4.1 – §4.3 for the historical record so anyone
+auditing the pre-v0.6.0 line can see the reasoning we applied.
 
 #### 4.1 [RUSTSEC-2026-0104](https://rustsec.org/advisories/RUSTSEC-2026-0104.html) — `rustls-webpki`: reachable panic on malformed CRL BIT STRING
 
+- **Status:** **CLOSED in v0.6.0** by upgrading `rustls-webpki`
+  `0.101.7` → `0.103.13`. `Cargo.lock` no longer references the
+  vulnerable crate.
 - **Severity (GitHub):** High
 - **Triggering condition (from the advisory):** *"Applications that
   do not use CRLs are not affected."*
-- **Does this affect aperion-shield?** **No.** Shield does not use
+- **Was Shield exploitable?** **No.** Shield does not use
   Certificate Revocation Lists. The default rustls configuration
   used by `reqwest` does not perform CRL checking, and we do not
   call either `BorrowedCertRevocationList::from_der` or
@@ -158,30 +159,32 @@ is nonetheless scheduled for **v0.6.0 on Monday 2026-05-18** — see
 
 #### 4.2 [RUSTSEC-2026-0098](https://rustsec.org/advisories/RUSTSEC-2026-0098.html) — `rustls-webpki`: URI name constraints incorrectly accepted
 
+- **Status:** **CLOSED in v0.6.0** (same upgrade as §4.1).
 - **Severity (GitHub):** Low
 - **Triggering condition (from the advisory):** *"This bug is
   reachable only after signature verification and requires
   misissuance to exploit."*
-- **Does this affect aperion-shield?** **In practice, no.** The
-  exploit requires a certificate authority in the OS trust store
-  to misissue a certificate with malformed URI name constraints.
-  If that condition is true, every TLS-using application on your
-  machine is at risk — not just Shield. We rely on the system
-  trust store and rustls' standard chain validation; we do not
-  add or remove CAs. The advisory itself notes the library does
-  not currently expose an API for asserting URI names, which makes
-  the practical exploit surface narrow.
+- **Was Shield exploitable?** **In practice, no.** The exploit
+  required a certificate authority in the OS trust store to
+  misissue a certificate with malformed URI name constraints.
+  If that condition were true, every TLS-using application on the
+  machine would be at risk — not just Shield. We rely on the
+  system trust store and rustls' standard chain validation; we do
+  not add or remove CAs. The advisory itself notes the library
+  does not currently expose an API for asserting URI names, which
+  made the practical exploit surface narrow.
 
 #### 4.3 [RUSTSEC-2026-0099](https://rustsec.org/advisories/RUSTSEC-2026-0099.html) — `rustls-webpki`: wildcard names accepted under name constraints
 
+- **Status:** **CLOSED in v0.6.0** (same upgrade as §4.1).
 - **Severity (GitHub):** Low
 - **Triggering condition (from the advisory):** *"requires
   misissuance to exploit."*
-- **Does this affect aperion-shield?** **In practice, no.** Same
-  reasoning as §4.2. The exploit requires a misissued certificate
-  in the chain to a CA your machine already trusts.
+- **Was Shield exploitable?** **In practice, no.** Same reasoning
+  as §4.2. The exploit required a misissued certificate in the
+  chain to a CA the host already trusted.
 
-### 4.4 Why we are not yanking v0.5.0
+### 4.4 Historical: why we did not yank v0.5.0
 
 The three advisories are real, but **not exploitable in Shield's
 actual usage**:
@@ -200,35 +203,38 @@ security posture. We choose to leave the release in place,
 document the analysis here, and ship the dependency upgrade as
 part of the **next planned release**.
 
-### 4.5 Fix plan: v0.6.0 on Monday 2026-05-18
+### 4.5 Fix shipped in v0.6.0 (2026-05-18)
 
-All three advisories are fixed by `rustls-webpki >= 0.103.13`. That
-version requires `rustls 0.23.x`, which in turn requires
-`reqwest 0.12.x`, which in turn aligns naturally with `hyper 1.x`.
-The dependency-graph upgrade is therefore a connected change of:
+All three advisories were fixed by upgrading the connected
+`reqwest` / `rustls` / `hyper` dependency cluster:
 
-- `reqwest`        `0.11.27` → `0.12.x`
-- `rustls`         `0.21.12` → `0.23.x`
-- `rustls-webpki`  `0.101.7` → `0.103.13+` (closes all three advisories)
-- `hyper-rustls`   `0.24.2`  → newer compatible release
-- `hyper`          `0.14.x`  → `1.x` (modest API refactor in
-  `src/identity/server.rs`, our OIDC callback server)
+| Dependency | v0.5.x | v0.6.0 |
+|---|---|---|
+| `reqwest`       | `0.11.27` | `0.12.28` |
+| `rustls`        | `0.21.12` | `0.23.40` |
+| `rustls-webpki` | `0.101.7` | `0.103.13` (closes all three advisories) |
+| `hyper-rustls`  | `0.24.2`  | `0.27.9`  |
+| `hyper`         | `0.14.32` | `1.9.0`   |
+| `tokio-rustls`  | `0.24.1`  | `0.26.4`  |
+| `webpki-roots`  | `0.25.4`  | `1.0.7`   |
 
-This upgrade is scheduled for **`shield-v0.6.0`, releasing Monday
-2026-05-18**, alongside the v0.6 native `aperion-shield --diff` mode
-(see [`docs/shieldset-as-code.md`](docs/shieldset-as-code.md)).
+The hyper 0.14 → 1.x bump required a refactor of the OIDC callback
+server in `src/identity/server.rs` to the new
+`http1::Builder` / per-connection `serve_connection` model and the
+`http_body_util::Full<Bytes>` body type. The refactor is contained
+to that one file; the rest of the binary saw no API surface change.
 
-When v0.6.0 lands:
+**Verification on the v0.6.0 release commit:**
 
-1. `Cargo.lock` no longer references `rustls-webpki 0.101.7`.
-2. GitHub Dependabot auto-closes all three advisories within minutes.
-3. `cargo audit` against the v0.6.0 `Cargo.lock` returns clean.
-4. The updated `.cargo/audit.toml` (in this repo) drops the three
-   ignored advisory IDs once the underlying advisory text no longer
-   applies to our `Cargo.lock`.
-
-If a verified exploit path is discovered against Shield's actual
-configuration before 2026-05-18, we will accelerate the release.
+1. `cargo audit` returns clean against an empty
+   `.cargo/audit.toml` ignore list (the file is in the repo at the
+   tagged commit if you want to confirm).
+2. `cargo build --release --locked` succeeds.
+3. `cargo test --release` passes all 148 tests (133 from v0.5.0 +
+   15 new diff-mode tests in v0.6.0).
+4. End-to-end identity flow against the mock OIDC provider in
+   `tests/identity_e2e.rs` still completes successfully on the
+   refactored hyper 1.x callback server.
 
 ---
 
@@ -242,6 +248,7 @@ Every release on GitHub ships:
   build-attestation provenance (`linux/amd64` + `linux/arm64`).
 - Source available at the tag (`shield-v0.5.0`, `shield-v0.6.0`, ...)
   with the full build history.
+- A CI gate that runs `cargo audit` against every push to `main`.
 
 The Homebrew formula at `AperionAI/homebrew-tap` references the
 GitHub-Release binaries by their published `sha256` hashes.
@@ -281,3 +288,4 @@ If you operate Shield as part of an enterprise deployment:
 | Date | Change |
 |---|---|
 | 2026-05-15 | Initial policy. Documents the three open Dependabot advisories surfaced by Shield's first public release and the v0.6.0 fix plan. |
+| 2026-05-18 | v0.6.0 shipped. RUSTSEC-2026-0098 / -0099 / -0104 closed by `rustls-webpki 0.103.13` (transitively via the `reqwest 0.12` / `rustls 0.23` / `hyper 1.x` upgrade). `.cargo/audit.toml` ignore list trimmed back to `[]`. Supported-versions table updated. |

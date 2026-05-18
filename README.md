@@ -26,6 +26,38 @@ the relying party — no rewrite, no re-install.
 
 ---
 
+## What's new in v0.6
+
+- **`aperion-shield --diff` mode** (new): native Rust behavior-diff
+  explainer for shieldset changes. Run the engine over the same
+  corpus under two different shieldsets and get a per-rule
+  attribution of which lines flipped. Drop-in CI gate
+  (`--fail-if-loosened`, `--fail-if-allows-loosened N`) for PRs
+  that touch your `shieldset.yaml`. Text / markdown / json output.
+  See [`docs/shieldset-as-code.md`](docs/shieldset-as-code.md)
+  Layer 4. This is the Rust port of `scripts/shield-diff.py`; the
+  Python script is now a thin wrapper, so existing CI keeps working.
+- **Dependency upgrade closes 3 Dependabot advisories**:
+  `reqwest 0.11 → 0.12`, `rustls 0.21 → 0.23`, `hyper 0.14 → 1.x`,
+  `rustls-webpki 0.101.7 → 0.103.13`. This closes the three open
+  RUSTSEC advisories that surfaced against `rustls-webpki 0.101.7`
+  in v0.5.x. None were practically exploitable in Shield's
+  configuration; the upgrade is hygiene. Full analysis in
+  [`SECURITY.md`](SECURITY.md) §4. `cargo audit` clean against an
+  empty ignore list.
+- **OIDC callback server refactored** for the hyper 1.x API. The
+  `--identity-*` family (ID.me partnership, gated identity
+  verification rules) continues to work without any user-visible
+  change. 7 end-to-end identity tests against a mock OIDC provider
+  still pass post-refactor.
+- **Test count: 148** (was 133 in v0.5.0). The +15 is 4 new unit
+  tests in `src/diff/render.rs` and 11 integration tests in
+  `tests/diff_integration.rs` covering 6 fixture pairs in
+  `tests/diff/` (loosen / tighten / noop / added / removed /
+  modified).
+
+---
+
 ## What's new in v0.5
 
 - **Identity gates** (new): selected high-blast-radius rules can now require a
@@ -696,7 +728,7 @@ Shield is in the control bucket, at the MCP transport layer.
 
 ### Honest gaps
 
-| Capability                                  | Shield v0.5 | The competitor that does it best |
+| Capability                                  | Shield v0.6 | The competitor that does it best |
 |---------------------------------------------|:-----------:|----------------------------------|
 | Signed audit-record chain                   |     —       | asqav (quantum-safe) / AgentMint |
 | Quantum-safe signatures                     |     —       | asqav (ML-DSA-65)                |
