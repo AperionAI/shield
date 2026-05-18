@@ -1,0 +1,2 @@
+{"tool": "execute_sql", "params": {"query": "UPDATE prod_users SET tier='gold' WHERE id=1"}}
+{"tool": "execute_sql", "params": {"query": "SELECT 1"}}

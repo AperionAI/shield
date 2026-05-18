@@ -1,0 +1,22 @@
+shieldset:
+  policy:
+    composite_scoring:
+      enabled: false
+    workspace_probe:
+      enabled: false
+    decision_memory:
+      enabled: false
+    burst_detector:
+      enabled: false
+
+  rules:
+    # Permissive starting point: a generic shell rule that audits
+    # but does not block curl-pipe-sh patterns.
+    - id: supply.curl_pipe_sh
+      severity: Low
+      points: 1
+      where: tool_call
+      match:
+        tool: [shell]
+        command_predicates: [curl_pipe_sh]
+      reason: "Curl piped to shell is risky."

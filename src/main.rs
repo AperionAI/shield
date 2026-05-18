@@ -114,11 +114,76 @@ struct Cli {
     #[arg(long, conflicts_with = "upstream")]
     check: bool,
 
-    /// Override the workspace root for the prod-probe (check-mode only).
-    /// Default: current working directory. Useful for fixturing prod-bump
-    /// behaviour against a temporary directory tree.
-    #[arg(long, value_name = "PATH", requires = "check")]
+    /// Override the workspace root for the prod-probe. Default: current
+    /// working directory. Useful for fixturing prod-bump behaviour
+    /// against a temporary directory tree. Honoured by `--check` and
+    /// `--diff` (which both run the engine over a corpus).
+    #[arg(long, value_name = "PATH")]
     workspace: Option<PathBuf>,
+
+    // ── Behavior-diff explainer (v0.6+) ────────────────────────────
+    //
+    // `aperion-shield --diff` runs the engine over the same corpus
+    // under two different shieldsets and reports which lines flipped,
+    // attributed to the rules that materially changed. This is the
+    // native Rust port of `scripts/shield-diff.py` (which now just
+    // wraps this mode). See docs/shieldset-as-code.md for the full
+    // PR-review pattern this enables.
+
+    /// Behavior-diff mode: run the engine twice over the same corpus
+    /// (once with `--rules-before`, once with `--rules-after`) and
+    /// emit a report describing which decisions changed and why.
+    /// Reads the corpus from `--corpus PATH` or stdin. Does NOT
+    /// start the MCP middleman.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "enroll",
+        conflicts_with = "status",
+        conflicts_with = "disenroll",
+        conflicts_with = "identity_list",
+        conflicts_with = "identity_flush"
+    )]
+    diff: bool,
+
+    /// Current (main-branch) shieldset YAML. Required with `--diff`.
+    #[arg(long, value_name = "PATH", requires = "diff")]
+    rules_before: Option<PathBuf>,
+
+    /// Proposed (PR-branch) shieldset YAML. Required with `--diff`.
+    #[arg(long, value_name = "PATH", requires = "diff")]
+    rules_after: Option<PathBuf>,
+
+    /// JSON-Lines corpus path. Defaults to stdin.
+    #[arg(long, value_name = "PATH", requires = "diff")]
+    corpus: Option<PathBuf>,
+
+    /// Report format for `--diff`. Default: text.
+    #[arg(long, value_name = "FMT", value_parser = ["text", "markdown", "json"], requires = "diff")]
+    format: Option<String>,
+
+    /// Max flipped-line samples to show per rule. Default: 3.
+    #[arg(long, value_name = "N", default_value_t = 3, requires = "diff")]
+    max_samples: usize,
+
+    /// Exit 1 if any line's decision flipped between the two
+    /// shieldsets. Useful for CI gates that require explicit reviewer
+    /// approval on behavior-changing PRs.
+    #[arg(long, requires = "diff")]
+    fail_if_flipped: bool,
+
+    /// Exit 1 if any line moved toward a more permissive decision.
+    /// This is the policy gate most teams want -- tightening is
+    /// fine, loosening needs explicit sign-off.
+    #[arg(long, requires = "diff")]
+    fail_if_loosened: bool,
+
+    /// Exit 1 if more than N lines flipped TO `allow`. Less strict
+    /// than `--fail-if-loosened`; permits warn -> allow on a
+    /// case-by-case basis up to the threshold.
+    #[arg(long, value_name = "N", requires = "diff")]
+    fail_if_allows_loosened: Option<usize>,
 
     /// Path to an `identity.yaml` overriding the default discovery
     /// (`$APERION_SHIELD_IDENTITY_CONFIG`, `~/.aperion-shield/identity.yaml`,
@@ -262,6 +327,10 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.check {
         return run_check_mode(&cli).await;
+    }
+    if cli.diff {
+        let exit_code = run_diff_mode(&cli).await?;
+        std::process::exit(exit_code);
     }
 
     // ── Org-mode subcommands ──────────────────────────────────────
@@ -703,6 +772,39 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// `aperion-shield --diff` entrypoint. Translates CLI flags into
+/// `DiffOptions` and invokes the engine. Returns the shell exit code:
+/// 0 for success, 1 for a CI gate trip (`--fail-if-flipped` etc.),
+/// 2 (via anyhow::bail!) for I/O or schema errors.
+async fn run_diff_mode(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::diff::{run_diff_mode as run, DiffOptions, OutputFormat};
+
+    let rules_before = cli
+        .rules_before
+        .clone()
+        .ok_or_else(|| anyhow!("--diff requires --rules-before PATH"))?;
+    let rules_after = cli
+        .rules_after
+        .clone()
+        .ok_or_else(|| anyhow!("--diff requires --rules-after PATH"))?;
+    let format = match cli.format.as_deref() {
+        Some(s) => OutputFormat::parse(s)?,
+        None => OutputFormat::Text,
+    };
+    let opts = DiffOptions {
+        rules_before,
+        rules_after,
+        corpus: cli.corpus.clone(),
+        workspace: cli.workspace.clone(),
+        format,
+        max_samples: cli.max_samples,
+        fail_if_flipped: cli.fail_if_flipped,
+        fail_if_loosened: cli.fail_if_loosened,
+        fail_if_allows_loosened: cli.fail_if_allows_loosened,
+    };
+    run(opts).await
 }
 
 fn spawn_upstream(cmd: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdout)> {

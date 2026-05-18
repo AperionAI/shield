@@ -1,0 +1,23 @@
+shieldset:
+  policy:
+    composite_scoring:
+      enabled: false
+    workspace_probe:
+      enabled: false
+    decision_memory:
+      enabled: false
+    burst_detector:
+      enabled: false
+
+  rules:
+    # sql.drop_database deliberately removed -- this is the loosening
+    # case under test (block -> allow on DROP DATABASE calls).
+
+    - id: sql.drop_table
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [execute_sql]
+        sql_matches: ['(?i)\bDROP\s+TABLE\b']
+      reason: "DROP TABLE requires human approval."

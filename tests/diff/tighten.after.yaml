@@ -1,0 +1,24 @@
+shieldset:
+  policy:
+    composite_scoring:
+      enabled: false
+    workspace_probe:
+      enabled: false
+    decision_memory:
+      enabled: false
+    burst_detector:
+      enabled: false
+
+  rules:
+    # Tightened: same matcher, severity promoted Low -> High so the
+    # decision now requires Approval. This mirrors the "swap the
+    # allowlist for a checksum requirement" pattern called out in the
+    # roadmap -- the effect on the corpus is the same: allow -> approval.
+    - id: supply.curl_pipe_sh
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [shell]
+        command_predicates: [curl_pipe_sh]
+      reason: "Curl piped to shell now requires explicit approval."

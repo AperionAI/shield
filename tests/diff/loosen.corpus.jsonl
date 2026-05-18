@@ -1,0 +1,6 @@
+// Loosen-scenario corpus: one DROP DATABASE (was Block in `before`,
+// should be Allow in `after`) and one DROP TABLE (Approval in both,
+// unchanged) and one benign SELECT (Allow in both).
+{"tool": "execute_sql", "params": {"query": "DROP DATABASE production"}}
+{"tool": "execute_sql", "params": {"query": "DROP TABLE old_users"}}
+{"tool": "execute_sql", "params": {"query": "SELECT * FROM users LIMIT 5"}}

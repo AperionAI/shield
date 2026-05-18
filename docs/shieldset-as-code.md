@@ -191,14 +191,13 @@ not answer *why*, or *which rule is responsible*. Reading the raw
 JSON-Lines decision output to figure that out is the chore that most
 teams will skip.
 
-Shield ships [`scripts/shield-diff.py`](../scripts/shield-diff.py) to
-close that gap: it runs `aperion-shield --check` against the corpus
-twice (once with the current shieldset, once with the proposed one),
-attributes every flipped line to the specific rule whose YAML
-changed, and prints a single readable report.
+`aperion-shield --diff` closes that gap: it runs the engine over the
+same corpus twice (once with the current shieldset, once with the
+proposed one), attributes every flipped line to the specific rule
+whose YAML changed, and prints a single readable report.
 
 ```bash
-python3 scripts/shield-diff.py \
+aperion-shield --diff \
     --rules-before main-shieldset.yaml \
     --rules-after  pr-shieldset.yaml \
     --corpus       tests/corpus/team-cursor-history.jsonl
@@ -254,29 +253,29 @@ Other useful flags:
 
 ```bash
 # markdown output (paste into a PR comment, or pipe straight to gh)
-python3 scripts/shield-diff.py --format markdown ... | gh pr comment --body-file -
+aperion-shield --diff --format markdown ... | gh pr comment --body-file -
 
 # json output (for programmatic consumption in your own tooling)
-python3 scripts/shield-diff.py --format json ...
+aperion-shield --diff --format json ...
 
 # CI gate: fail the PR if any line moved toward MORE permissive
-python3 scripts/shield-diff.py --fail-if-loosened ...
+aperion-shield --diff --fail-if-loosened ...
 
 # CI gate: fail if more than N lines flipped to `allow`
-python3 scripts/shield-diff.py --fail-if-allows-loosened 0 ...
+aperion-shield --diff --fail-if-allows-loosened 0 ...
 ```
 
-**Status:** the explainer is a Python prototype (stdlib + PyYAML, no
-network) shipped today. A Rust-native `aperion-shield --diff` mode is
-planned for v0.6/v0.7 with the same output schema, so any CI you wire
-up against the Python script keeps working unchanged when the native
-mode lands.
+**Implementation:** native Rust (in-process, no subprocess) since
+v0.6.0 (2026-05-18). Reuses the same engine the proxy uses, so the
+decisions in the diff are *exactly* the decisions a live wrapped
+agent would receive against either shieldset. No Python runtime
+dependency, no external binary, no PATH lookup.
 
-> **One-time setup:** PyYAML must be installed against the same
-> Python interpreter you'll run the script with — on conda / pyenv /
-> brew-vs-system setups `pip3 install pyyaml` often lands somewhere
-> else. Use `python3 -m pip install pyyaml` and verify with
-> `python3 -c "import yaml; print(yaml.__version__)"`.
+> **Legacy:** if you have CI workflows wired against the previous
+> Python prototype (`scripts/shield-diff.py`), they continue to work
+> unchanged — the script is now a thin wrapper that delegates to
+> `aperion-shield --diff` and the `--format json` output schema is
+> source-compatible.
 
 ---
 
@@ -321,11 +320,9 @@ jobs:
         if: hashFiles('tests/corpus/team-cursor-history.jsonl') != ''
         run: |
           git show origin/main:shieldset.yaml > /tmp/main-shieldset.yaml
-          python3 -m pip install --quiet pyyaml
 
           # render text version inline on the checks tab
-          python3 scripts/shield-diff.py \
-              --shield-bin ./aperion-shield \
+          ./aperion-shield --diff \
               --rules-before /tmp/main-shieldset.yaml \
               --rules-after  shieldset.yaml \
               --corpus       tests/corpus/team-cursor-history.jsonl \
@@ -335,8 +332,7 @@ jobs:
           echo '```'                   >> $GITHUB_STEP_SUMMARY
 
           # render markdown version and post as a PR comment
-          python3 scripts/shield-diff.py \
-              --shield-bin ./aperion-shield \
+          ./aperion-shield --diff \
               --rules-before /tmp/main-shieldset.yaml \
               --rules-after  shieldset.yaml \
               --corpus       tests/corpus/team-cursor-history.jsonl \
@@ -351,8 +347,7 @@ jobs:
       - name: Block loosening without explicit reviewer signoff
         if: hashFiles('tests/corpus/team-cursor-history.jsonl') != ''
         run: |
-          python3 scripts/shield-diff.py \
-              --shield-bin ./aperion-shield \
+          ./aperion-shield --diff \
               --rules-before /tmp/main-shieldset.yaml \
               --rules-after  shieldset.yaml \
               --corpus       tests/corpus/team-cursor-history.jsonl \
@@ -430,28 +425,22 @@ the PR conversation without opening logs.
 
 ## Roadmap
 
-The current behavior-diff explainer is a Python prototype
-([`scripts/shield-diff.py`](../scripts/shield-diff.py)). It depends on
-stdlib + PyYAML and shells out to the `aperion-shield --check` binary
-twice. That's enough to ship the artifact today and let teams run it
-in CI on every PR.
+The behavior-diff explainer is **native Rust as of v0.6.0**
+(2026-05-18) — built directly into the binary as
+`aperion-shield --diff --rules-before X --rules-after Y --corpus Z`.
+Both runs reuse the same engine the proxy uses, so the decisions in
+the diff are exactly what a live wrapped agent would see against
+either shieldset.
 
-The v0.6 / v0.7 roadmap candidate is a Rust-native equivalent built
-into the binary as `aperion-shield --diff --rules-before X
---rules-after Y < corpus.jsonl`. The output schema (text / markdown /
-json) will be source-compatible, so any CI you wire up against the
-Python script today keeps working unchanged when the native mode
-lands. The native version's value adds:
+A thin `scripts/shield-diff.py` wrapper is still shipped so CI
+workflows wired against the previous Python prototype keep working
+unchanged. The `--format json` output schema is source-compatible
+between the two.
 
-- **One process** instead of two (faster on 100k+ corpora)
-- **Direct access to the parsed rule structs** (better explanations of
-  what changed in a regex without re-running the engine)
-- **A streaming diff** when the corpus is too big to hold in memory
-
-If your team has a use case that the Python prototype doesn't cover
-or that motivates one of the additions above, open an issue at
-<https://github.com/AperionAI/shield/issues> and describe the
-workflow. That's the signal to prioritise.
+If your team has a use case that the current explainer doesn't cover
+(streaming diffs for 1M+ corpora, regex-level explanations, etc.),
+open an issue at <https://github.com/AperionAI/shield/issues> and
+describe the workflow. That's the signal to prioritise.
 
 ---
 
@@ -460,6 +449,7 @@ workflow. That's the signal to prioritise.
 - [README — Mining your own Cursor history as a test corpus](../README.md#mining-your-own-cursor-history-as-a-test-corpus)
 - [README — Wide-scale testing without an IDE](../README.md#wide-scale-testing-without-an-ide)
 - [`tests/corpus/golden.jsonl`](../tests/corpus/golden.jsonl) — the shipped positive/negative cases
-- [`scripts/extract-cursor-corpus.py`](../scripts/extract-cursor-corpus.py) — the extractor
-- [`scripts/shield-diff.py`](../scripts/shield-diff.py) — the behavior-diff explainer
+- [`scripts/extract-cursor-corpus.py`](../scripts/extract-cursor-corpus.py) — the corpus extractor
+- [`aperion-shield --diff`](../src/diff/) — the native behavior-diff explainer (v0.6.0+)
+- [`scripts/shield-diff.py`](../scripts/shield-diff.py) — backward-compat wrapper around `--diff`
 - [`docs/aperion-shield-developer-onepager.html`](aperion-shield-developer-onepager.html) — printable one-pager

@@ -1,0 +1,21 @@
+shieldset:
+  policy:
+    composite_scoring:
+      enabled: false
+    workspace_probe:
+      enabled: false
+    decision_memory:
+      enabled: false
+    burst_detector:
+      enabled: false
+
+  rules:
+    # Severity = Medium (Warn) in the before-state.
+    - id: sql.alter_table_drop_column
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [execute_sql]
+        sql_matches: ['(?i)ALTER\s+TABLE\s+\w+\s+DROP\s+COLUMN']
+      reason: "ALTER TABLE ... DROP COLUMN destroys data."

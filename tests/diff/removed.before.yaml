@@ -1,0 +1,31 @@
+shieldset:
+  policy:
+    composite_scoring:
+      enabled: false
+    workspace_probe:
+      enabled: false
+    decision_memory:
+      enabled: false
+    burst_detector:
+      enabled: false
+
+  rules:
+    - id: sql.drop_database
+      severity: Critical
+      points: 6
+      where: tool_call
+      match:
+        tool: [execute_sql]
+        sql_matches: ['(?i)\bDROP\s+DATABASE\b']
+      reason: "DROP DATABASE is never auto-allowed."
+
+    # New rule added in the after-state: any UPDATE to a `prod_*`
+    # table now requires approval.
+    - id: company.no_prod_writes
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [execute_sql]
+        sql_matches: ['(?i)UPDATE\s+prod_\w+']
+      reason: "Company policy: no automated UPDATE on prod_* tables."

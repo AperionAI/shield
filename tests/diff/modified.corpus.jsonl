@@ -1,0 +1,1 @@
+{"tool": "execute_sql", "params": {"query": "ALTER TABLE users DROP COLUMN legacy_id"}}

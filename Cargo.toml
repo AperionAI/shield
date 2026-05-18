@@ -53,6 +53,12 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 # SHA-256 for decision-memory fingerprints (rule_id + normalised argv).
 sha2 = "0.10"
+# Unified text diff for the `aperion-shield --diff` mode, used to
+# emit a per-rule YAML diff inside the behavior-diff report. Lean
+# crate (~150KB), well-maintained, only used in --diff -- pulled
+# into the binary as a regular dep because it's tiny and used by a
+# first-class CLI surface.
+similar = "2"
 # Cross-platform home-directory resolution for ~/.aperion-shield/ and
 # for normalising paths in the sensitive-path matcher.
 dirs = "5"
