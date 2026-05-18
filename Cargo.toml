@@ -68,12 +68,19 @@ base64 = "0.22"
 hex = "0.4"
 url = "2"
 # Local OAuth callback server (binds to 127.0.0.1 on an OS-assigned
-# port, exposes /verify/<id> and /callback). hyper 0.14 + tokio 1.x
-# is the most stable pairing and keeps the dep tree small.
-hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
+# port, exposes /verify/<id> and /callback). hyper 1.x with
+# hyper-util for the high-level Builder/executor types; the upgrade
+# from 0.14 -> 1.x landed in v0.6.0 to close the rustls-webpki
+# advisory chain (see SECURITY.md §4.5).
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful"] }
+http-body-util = "0.1"
+bytes = "1"
 # Outbound HTTPS for ID.me /oauth/token and /userinfo. rustls so we
-# don't pick up a system OpenSSL dependency on Linux.
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+# don't pick up a system OpenSSL dependency on Linux. v0.6.0 moved
+# reqwest 0.11 -> 0.12, which transitively pulls rustls 0.23 +
+# rustls-webpki >= 0.103.13 and closes RUSTSEC-2026-0098/-0099/-0104.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Atomic write of the proof cache file.
 fs2 = "0.4"
 

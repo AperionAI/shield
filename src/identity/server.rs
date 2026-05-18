@@ -32,11 +32,21 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use hyper::server::conn::AddrIncoming;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use log::{debug, error, info, warn};
 use tokio::sync::{oneshot, RwLock};
+
+/// Type alias for the response body we produce. hyper 1.x decoupled
+/// the body type from the framework, so we pick `Full<Bytes>` for our
+/// small static HTML/text responses -- it is the simplest body that
+/// implements `http_body::Body` and works with the http1 server.
+type ResponseBody = Full<Bytes>;
 
 use super::{Challenge, IdentityProvider, Requirement};
 use crate::identity::cache::ProofCache;
@@ -118,38 +128,59 @@ impl CallbackServer {
         let state: Arc<RwLock<State>> = Arc::new(RwLock::new(State::default()));
         let providers: Arc<Vec<Arc<dyn IdentityProvider>>> = Arc::new(providers);
 
-        let state_for_handler = state.clone();
-        let providers_for_handler = providers.clone();
-        let cache_for_handler = cache.clone();
-        let signer_for_handler = signer.clone();
-
-        let make_svc = make_service_fn(move |_| {
-            let state = state_for_handler.clone();
-            let providers = providers_for_handler.clone();
-            let cache = cache_for_handler.clone();
-            let signer = signer_for_handler.clone();
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req| {
-                    let state = state.clone();
-                    let providers = providers.clone();
-                    let cache = cache.clone();
-                    let signer = signer.clone();
-                    async move { Ok::<_, Infallible>(handle(req, state, providers, cache, signer).await) }
-                }))
-            }
-        });
-
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        // hyper 0.14 wants a tokio TcpListener inside AddrIncoming.
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        // hyper 1.x is connection-oriented: we accept directly from a
+        // tokio TcpListener and serve each connection with
+        // `http1::Builder::new().serve_connection`. The per-connection
+        // service is built fresh each loop so it owns its own clones
+        // of the shared state.
         let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
-        let incoming = AddrIncoming::from_listener(tokio_listener)?;
-        let server = Server::builder(incoming).serve(make_svc);
-        let graceful = server.with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
-        });
+        let accept_state = state.clone();
+        let accept_providers = providers.clone();
+        let accept_cache = cache.clone();
+        let accept_signer = signer.clone();
         tokio::spawn(async move {
-            if let Err(e) = graceful.await {
-                error!("[shield-identity] callback server error: {}", e);
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        debug!("[shield-identity] callback server shutting down");
+                        return;
+                    }
+                    accept = tokio_listener.accept() => {
+                        let (stream, peer) = match accept {
+                            Ok(p) => p,
+                            Err(e) => {
+                                error!("[shield-identity] accept failed: {}", e);
+                                continue;
+                            }
+                        };
+                        let io = TokioIo::new(stream);
+                        let svc_state = accept_state.clone();
+                        let svc_providers = accept_providers.clone();
+                        let svc_cache = accept_cache.clone();
+                        let svc_signer = accept_signer.clone();
+                        let svc = service_fn(move |req: Request<Incoming>| {
+                            let state = svc_state.clone();
+                            let providers = svc_providers.clone();
+                            let cache = svc_cache.clone();
+                            let signer = svc_signer.clone();
+                            async move {
+                                Ok::<_, Infallible>(handle(req, state, providers, cache, signer).await)
+                            }
+                        });
+                        tokio::spawn(async move {
+                            if let Err(e) = http1::Builder::new()
+                                .serve_connection(io, svc)
+                                .await
+                            {
+                                debug!(
+                                    "[shield-identity] connection from {} ended: {}",
+                                    peer, e
+                                );
+                            }
+                        });
+                    }
+                }
             }
         });
 
@@ -172,12 +203,12 @@ impl CallbackServer {
 // ────────────────────────────────────────────────────────────────────
 
 async fn handle(
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<RwLock<State>>,
     providers: Arc<Vec<Arc<dyn IdentityProvider>>>,
     cache: Arc<ProofCache>,
     signer: Arc<ProofSigner>,
-) -> Response<Body> {
+) -> Response<ResponseBody> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     debug!("[shield-identity] {} {}", method, path);
@@ -217,7 +248,7 @@ async fn handle_verify(
     query: &str,
     state: &Arc<RwLock<State>>,
     providers: &Arc<Vec<Arc<dyn IdentityProvider>>>,
-) -> Response<Body> {
+) -> Response<ResponseBody> {
     let mock_flow = query_param(query, "mock").is_some();
     let (challenge, inflight) = {
         let g = state.read().await;
@@ -241,7 +272,7 @@ async fn handle_verify(
                 // happy-path identical between mock and real, redirect
                 // to /callback which will go through the same code.
                 let location = format!("/callback?code=synthetic-code&state={}&mock=1", challenge_id);
-                let mut resp = Response::new(Body::empty());
+                let mut resp = Response::new(empty_body());
                 *resp.status_mut() = StatusCode::FOUND;
                 resp.headers_mut().insert(
                     hyper::header::LOCATION,
@@ -256,7 +287,7 @@ async fn handle_verify(
         }
     } else {
         // Real flow: just bounce the user to the provider's verify_url.
-        let mut resp = Response::new(Body::empty());
+        let mut resp = Response::new(empty_body());
         *resp.status_mut() = StatusCode::FOUND;
         if let Ok(hv) = hyper::header::HeaderValue::from_str(&challenge.verify_url) {
             resp.headers_mut().insert(hyper::header::LOCATION, hv);
@@ -271,7 +302,7 @@ async fn handle_callback(
     providers: &Arc<Vec<Arc<dyn IdentityProvider>>>,
     cache: &Arc<ProofCache>,
     signer: &Arc<ProofSigner>,
-) -> Response<Body> {
+) -> Response<ResponseBody> {
     let code = match query_param(query, "code") {
         Some(c) => c,
         None => return html(StatusCode::BAD_REQUEST, "<h1>Missing OAuth code</h1>"),
@@ -375,8 +406,16 @@ async fn handle_callback(
 // Helpers
 // ────────────────────────────────────────────────────────────────────
 
-fn text(status: StatusCode, body: &str) -> Response<Body> {
-    let mut resp = Response::new(Body::from(body.to_string()));
+fn empty_body() -> ResponseBody {
+    Full::new(Bytes::new())
+}
+
+fn body_from_string(s: String) -> ResponseBody {
+    Full::new(Bytes::from(s))
+}
+
+fn text(status: StatusCode, body: &str) -> Response<ResponseBody> {
+    let mut resp = Response::new(body_from_string(body.to_string()));
     *resp.status_mut() = status;
     resp.headers_mut().insert(
         hyper::header::CONTENT_TYPE,
@@ -385,7 +424,7 @@ fn text(status: StatusCode, body: &str) -> Response<Body> {
     resp
 }
 
-fn html(status: StatusCode, body: &str) -> Response<Body> {
+fn html(status: StatusCode, body: &str) -> Response<ResponseBody> {
     let full = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -394,7 +433,7 @@ fn html(status: StatusCode, body: &str) -> Response<Body> {
         css = PAGE_CSS,
         body = body,
     );
-    let mut resp = Response::new(Body::from(full));
+    let mut resp = Response::new(body_from_string(full));
     *resp.status_mut() = status;
     resp.headers_mut().insert(
         hyper::header::CONTENT_TYPE,
