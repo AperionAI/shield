@@ -266,6 +266,14 @@ pub fn run(repo_root: &Path, stdin: impl BufRead) -> Result<CheckPushedReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // cargo runs lib tests in parallel within a single binary. The two
+    // tests that mutate `SHIELD_PROTECTED_BRANCHES` would otherwise
+    // race each other (one sets, the other reads default, fails). We
+    // serialise only those two via a module-local lock -- no new
+    // dependency, no impact on the other tests in this module.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parses_well_formed_stdin_line() {
@@ -293,8 +301,17 @@ mod tests {
         assert!(!pattern_matches("release/*", "feature/release/x"));
     }
 
+    // NB: tests that touch `SHIELD_PROTECTED_BRANCHES` are written
+    // defensively — each one explicitly removes the var at the top
+    // and reads via the documented default-resolution path. We do NOT
+    // rely on `serial_test` or a mutex because cargo runs lib tests
+    // in parallel by default and one stray leak would flake any test
+    // that calls `protected_patterns()` (= every protected-branch test).
+
     #[test]
     fn is_protected_recognises_default_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("SHIELD_PROTECTED_BRANCHES");
         let pats = protected_patterns();
         assert_eq!(is_protected("refs/heads/main", &pats).as_deref(), Some("main"));
         assert_eq!(is_protected("refs/heads/master", &pats).as_deref(), Some("master"));
@@ -307,6 +324,7 @@ mod tests {
 
     #[test]
     fn env_override_protected_branches() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("SHIELD_PROTECTED_BRANCHES", "trunk, deploy/*");
         let pats = protected_patterns();
         assert!(is_protected("refs/heads/trunk", &pats).is_some());
