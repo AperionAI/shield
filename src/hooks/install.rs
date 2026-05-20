@@ -27,6 +27,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -264,9 +265,18 @@ fn uninstall_one(hooks_dir: &Path, kind: HookKind) -> Result<(bool, bool)> {
 fn write_hook(path: &Path, body: &str) -> Result<()> {
     fs::write(path, body)
         .with_context(|| format!("couldn't write hook to {}", path.display()))?;
-    let mut perms = fs::metadata(path)?.permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(path, perms)?;
+    // git-for-windows runs hooks via msys bash and treats any file in
+    // `.git/hooks/` as executable regardless of NTFS bits, so the chmod
+    // is a Unix-only concern. On Windows we skip it entirely; on Unix
+    // we must set 0755 explicitly because `fs::write` honours the
+    // process umask and may produce a 0644 file the kernel refuses to
+    // exec when git calls it directly.
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)?;
+    }
     Ok(())
 }
 
