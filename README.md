@@ -36,6 +36,8 @@ the relying party — no rewrite, no re-install.
 
 ## What's new in v0.7
 
+![aperion-shield v0.7 git hooks demo — 28-second walkthrough of pre-commit + pre-push on a real GitHub remote](docs/img/v07-hooks-demo.gif)
+
 Two big additions and a breadth bump:
 
 1. **Git hooks (`--install-hooks`).** Closes the most-asked-about
