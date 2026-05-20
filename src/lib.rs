@@ -23,10 +23,12 @@ pub mod burst;
 pub mod context;
 pub mod diff;
 pub mod engine;
+pub mod hooks;
 pub mod identity;
 pub mod memory;
 pub mod orgmode;
 pub mod predicates;
+pub mod suggest;
 
 pub use burst::BurstDetector;
 pub use context::WorkspaceContext;

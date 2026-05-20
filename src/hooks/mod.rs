@@ -1,0 +1,30 @@
+//! Git-hook integration (v0.7+).
+//!
+//! Three concerns live under this module:
+//!
+//!   * `install`        -- write / remove `.git/hooks/pre-commit` and
+//!                         `.git/hooks/pre-push` (`--install-hooks`,
+//!                         `--uninstall-hooks`).
+//!   * `templates`      -- the bash sources the installer writes.
+//!   * `check_staged`   -- the engine path invoked by the pre-commit
+//!                         hook (`--check-staged`). Inspects added /
+//!                         modified lines of the staged diff and refuses
+//!                         the commit if any line trips a Block rule.
+//!   * `check_pushed`   -- the engine path invoked by the pre-push
+//!                         hook (`--check-pushed-refs`). Reads git's
+//!                         pre-push stdin and refuses force-pushes /
+//!                         deletions of protected branches.
+//!
+//! See `docs/hooks.md` for the user-facing contract (installer
+//! semantics, exit codes, env overrides, husky / pre-commit / lefthook
+//! coexistence).
+
+pub mod check_pushed;
+pub mod check_staged;
+pub mod install;
+pub mod templates;
+
+pub use install::{
+    install, resolve_hooks_dir, uninstall, HookInstallOutcome, HookKind, InstallReport,
+    UninstallReport,
+};

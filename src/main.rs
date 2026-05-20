@@ -207,6 +207,129 @@ struct Cli {
     #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
     identity_flush: bool,
 
+    // ── Git-hook integration (v0.7+) ──────────────────────────────
+    //
+    // `--install-hooks` writes `.git/hooks/{pre-commit,pre-push}` that
+    // call `--check-staged` / `--check-pushed-refs` respectively. The
+    // hooks honour `git --no-verify` and `SHIELD_HOOKS_DISABLE=1`.
+    // See `docs/hooks.md` for the full contract.
+
+    /// Install `pre-commit` and `pre-push` hooks into the git repo at
+    /// the current working directory (or `--repo PATH`). Idempotent --
+    /// re-running refreshes our hooks but never clobbers an
+    /// unrecognised hook unless `--chain-existing` is supplied.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "enroll"
+    )]
+    install_hooks: bool,
+
+    /// Remove Aperion-installed `pre-commit` / `pre-push` hooks from
+    /// the git repo at the current working directory (or `--repo
+    /// PATH`). Restores any chained-aside originals.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks"
+    )]
+    uninstall_hooks: bool,
+
+    /// Override the path to the repository being modified by
+    /// `--install-hooks` / `--uninstall-hooks` / `--check-staged` /
+    /// `--check-pushed-refs`. Default: current working directory.
+    #[arg(long, value_name = "PATH")]
+    repo: Option<PathBuf>,
+
+    /// With `--install-hooks`: if an existing hook is present that we
+    /// don't recognise, move it aside (to `<hook>.aperion-backup`) and
+    /// have our hook `exec` it as a tail chain. Compatible with husky,
+    /// pre-commit, and lefthook installations. Without this flag we
+    /// refuse to overwrite an unrecognised hook (the safe default).
+    #[arg(long, requires = "install_hooks")]
+    chain_existing: bool,
+
+    /// Run the engine against the lines this commit is about to
+    /// ADD or MODIFY. Used by the `pre-commit` hook installed by
+    /// `--install-hooks`, but also invokable manually for debugging.
+    /// Exits 0 (clean), 1 (Block-severity match), 2 (Approval-severity
+    /// match -- can't prompt in a pre-commit context, so refused).
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks"
+    )]
+    check_staged: bool,
+
+    /// Read git's standard pre-push stdin and refuse force-pushes or
+    /// branch-deletions targeting protected branches (main, master,
+    /// prod, release/*, by default). Used by the `pre-push` hook
+    /// installed by `--install-hooks`. Set `SHIELD_PROTECTED_BRANCHES`
+    /// (comma-separated) to override the default protected pattern.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks",
+        conflicts_with = "check_staged"
+    )]
+    check_pushed_refs: bool,
+
+    // ── Rule tuning (v0.7+) ───────────────────────────────────────
+    //
+    // `--suggest-rules` reads your local audit log + active shieldset
+    // and emits tuning recommendations (RULE_NEVER_FIRES,
+    // CONSISTENTLY_DEMOTED, NOISY_WARN). Default output is human text;
+    // markdown and yaml-patch are also available via --suggest-format.
+
+    /// Read an audit log (JSON-Lines stderr capture from a real run
+    /// of `aperion-shield`) and emit tuning suggestions for your
+    /// shieldset. Requires `--audit-log PATH`.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks",
+        conflicts_with = "check_staged",
+        conflicts_with = "check_pushed_refs"
+    )]
+    suggest_rules: bool,
+
+    /// Path to the JSON-Lines audit log used by `--suggest-rules`.
+    /// Capture via e.g. `aperion-shield -- ... 2>>~/.aperion-shield/audit.jsonl`.
+    #[arg(long, value_name = "PATH", requires = "suggest_rules")]
+    audit_log: Option<PathBuf>,
+
+    /// Only consider audit records in the last N days. Default: 30.
+    /// Pass 0 to consider every record in the file.
+    #[arg(long, value_name = "N", requires = "suggest_rules")]
+    suggest_window_days: Option<u32>,
+
+    /// Minimum number of fires required to trigger CONSISTENTLY_DEMOTED
+    /// or NOISY_WARN suggestions. Default: 5.
+    #[arg(long, value_name = "N", default_value_t = 5, requires = "suggest_rules")]
+    suggest_min_occurrences: usize,
+
+    /// Output format for `--suggest-rules`. Default: text.
+    #[arg(
+        long,
+        value_name = "FMT",
+        value_parser = ["text", "markdown", "md", "yaml-patch", "yaml", "patch"],
+        requires = "suggest_rules"
+    )]
+    suggest_format: Option<String>,
+
     // ── Org-mode (v0.5+) ──────────────────────────────────────────
     //
     // Enroll this Shield against a Smartflow control plane so policy,
@@ -330,6 +453,28 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.diff {
         let exit_code = run_diff_mode(&cli).await?;
+        std::process::exit(exit_code);
+    }
+
+    // ── Git-hook modes (v0.7+) ────────────────────────────────────
+    if cli.install_hooks {
+        let exit_code = run_install_hooks(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.uninstall_hooks {
+        let exit_code = run_uninstall_hooks(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.check_staged {
+        let exit_code = run_check_staged(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.check_pushed_refs {
+        let exit_code = run_check_pushed_refs(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.suggest_rules {
+        let exit_code = run_suggest_rules(&cli)?;
         std::process::exit(exit_code);
     }
 
@@ -805,6 +950,284 @@ async fn run_diff_mode(cli: &Cli) -> anyhow::Result<i32> {
         fail_if_allows_loosened: cli.fail_if_allows_loosened,
     };
     run(opts).await
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Git-hook entry points (v0.7+)
+// ─────────────────────────────────────────────────────────────────────
+
+/// `--install-hooks`. Writes `.git/hooks/pre-commit` and `.git/hooks/pre-push`.
+fn run_install_hooks(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::hooks::{install, HookInstallOutcome};
+
+    let repo = cli
+        .repo
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+    let report = install(&repo, cli.chain_existing)?;
+
+    eprintln!(
+        "[shield] hooks dir: {}",
+        report.hooks_dir.display()
+    );
+    let mut had_unknown = false;
+    for (name, outcome) in [
+        ("pre-commit", report.pre_commit),
+        ("pre-push", report.pre_push),
+    ] {
+        match outcome {
+            HookInstallOutcome::Installed => {
+                eprintln!("[shield] installed: {}", name);
+            }
+            HookInstallOutcome::Refreshed => {
+                eprintln!("[shield] refreshed (already ours): {}", name);
+            }
+            HookInstallOutcome::Chained => {
+                eprintln!(
+                    "[shield] chained over existing hook: {} \
+                     (original moved to {}.aperion-backup; \
+                     re-execed at end of our hook)",
+                    name, name,
+                );
+            }
+            HookInstallOutcome::UnknownHookPresent => {
+                had_unknown = true;
+                eprintln!(
+                    "[shield] refused: {} already exists and isn't ours. \
+                     Re-run with `--chain-existing` to keep it (husky-style chain), \
+                     or remove `.git/hooks/{}` first.",
+                    name, name,
+                );
+            }
+        }
+    }
+    if had_unknown {
+        return Ok(1);
+    }
+    eprintln!(
+        "[shield] done. Bypass any single commit with: git commit --no-verify"
+    );
+    eprintln!(
+        "[shield] bypass for an automation run: SHIELD_HOOKS_DISABLE=1 git commit ..."
+    );
+    Ok(0)
+}
+
+/// `--uninstall-hooks`. Removes only hooks we recognise; refuses to
+/// touch anything else.
+fn run_uninstall_hooks(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::hooks::uninstall;
+
+    let repo = cli
+        .repo
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+    let report = uninstall(&repo)?;
+
+    eprintln!("[shield] hooks dir: {}", report.hooks_dir.display());
+    for (name, removed, chain_restored) in [
+        (
+            "pre-commit",
+            report.pre_commit_removed,
+            report.pre_commit_chain_restored,
+        ),
+        (
+            "pre-push",
+            report.pre_push_removed,
+            report.pre_push_chain_restored,
+        ),
+    ] {
+        match (removed, chain_restored) {
+            (true, true) => eprintln!(
+                "[shield] removed: {} (restored chained-aside original)",
+                name
+            ),
+            (true, false) => eprintln!("[shield] removed: {}", name),
+            (false, _) => eprintln!("[shield] not present: {} (nothing to do)", name),
+        }
+    }
+    Ok(0)
+}
+
+/// `--check-staged`. Runs the engine against the staged-diff corpus.
+/// Exit codes: 0 clean, 1 block, 2 approval-but-cant-prompt, 3 error.
+fn run_check_staged(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::hooks::check_staged::{run, StagedFinding};
+
+    let repo = cli
+        .repo
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+    let engine = load_engine(cli.rules.as_deref())?;
+    let report = run(&repo, &engine, cli.workspace.as_deref())?;
+
+    if report.findings.is_empty() {
+        eprintln!(
+            "[shield-check-staged] OK -- inspected {} file(s), {} line(s); no destructive matches.",
+            report.files_scanned, report.lines_scanned
+        );
+        return Ok(report.exit_code() as i32);
+    }
+
+    eprintln!(
+        "[shield-check-staged] {} finding(s) across {} file(s):",
+        report.findings.len(),
+        report.files_scanned
+    );
+    eprintln!();
+    for (rule_id, findings) in report.group_by_rule() {
+        let first: &StagedFinding = findings[0];
+        eprintln!(
+            "  [{}] {} ({} match{})",
+            first.severity,
+            rule_id,
+            findings.len(),
+            if findings.len() == 1 { "" } else { "es" },
+        );
+        eprintln!("    why: {}", first.reason);
+        if let Some(s) = &first.safer_alternative {
+            eprintln!("    safer alternative: {}", s);
+        }
+        for f in findings.iter().take(5) {
+            eprintln!(
+                "      {}:{}  ({})  {}",
+                f.file,
+                f.line_no,
+                f.decision,
+                truncate(&f.line, 96)
+            );
+        }
+        if findings.len() > 5 {
+            eprintln!("      ... and {} more match(es) elided", findings.len() - 5);
+        }
+        eprintln!();
+    }
+    let code = report.exit_code();
+    match code {
+        1 => eprintln!(
+            "[shield-check-staged] commit REFUSED (Block-severity match). \
+             To override: git commit --no-verify  OR  SHIELD_HOOKS_DISABLE=1 git commit ..."
+        ),
+        2 => eprintln!(
+            "[shield-check-staged] commit REFUSED (Approval-severity match; \
+             pre-commit cannot prompt). To override: git commit --no-verify"
+        ),
+        _ => {}
+    }
+    Ok(code as i32)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max])
+    }
+}
+
+/// `--suggest-rules`. Reads an audit JSONL file, runs the analyzer,
+/// renders the requested format on stdout. Exit 0 = no suggestions,
+/// exit 1 = suggestions exist (so CI gates can react to "something
+/// to review"; doesn't necessarily mean the shieldset is broken).
+fn run_suggest_rules(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::suggest::{run, AnalyzeOptions, OutputFormat};
+
+    let audit_path = cli
+        .audit_log
+        .clone()
+        .ok_or_else(|| anyhow!("--suggest-rules requires --audit-log PATH"))?;
+    let engine = load_engine(cli.rules.as_deref())?;
+    let opts = AnalyzeOptions {
+        window_days: match cli.suggest_window_days {
+            Some(0) => None, // "0 = all" per docstring
+            Some(n) => Some(n),
+            None => Some(30),
+        },
+        min_occurrences: cli.suggest_min_occurrences,
+    };
+    let format = match cli.suggest_format.as_deref() {
+        Some(s) => OutputFormat::parse(s)?,
+        None => OutputFormat::Text,
+    };
+
+    let (body, count, skipped) = run(&engine, &audit_path, opts, format)?;
+    print!("{}", body);
+    if skipped > 0 {
+        eprintln!(
+            "[shield-suggest-rules] note: skipped {} non-shield_eval / unparseable line(s)",
+            skipped
+        );
+    }
+    eprintln!(
+        "[shield-suggest-rules] {} suggestion(s) from {} ({} days)",
+        count,
+        audit_path.display(),
+        opts.window_days
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "all".to_string()),
+    );
+    Ok(if count == 0 { 0 } else { 1 })
+}
+
+/// `--check-pushed-refs`. Reads stdin per git's pre-push protocol.
+fn run_check_pushed_refs(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::hooks::check_pushed::{run, PushVerdict};
+    use std::io::BufReader;
+
+    let repo = cli
+        .repo
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+    let stdin = BufReader::new(std::io::stdin());
+    let report = run(&repo, stdin)?;
+
+    if report.violations.is_empty() {
+        eprintln!(
+            "[shield-check-pushed-refs] OK -- inspected {} ref update(s); no destructive pushes.",
+            report.refs_inspected
+        );
+        return Ok(0);
+    }
+
+    eprintln!(
+        "[shield-check-pushed-refs] REFUSED -- {} of {} ref update(s) target a protected branch:",
+        report.violations.len(),
+        report.refs_inspected,
+    );
+    eprintln!();
+    for (upd, v) in &report.violations {
+        match v {
+            PushVerdict::Deletion { protected_branch } => {
+                eprintln!(
+                    "  - DELETE protected branch '{}' (ref: {})",
+                    protected_branch, upd.remote_ref,
+                );
+            }
+            PushVerdict::ForcePush {
+                protected_branch,
+                remote_sha,
+                local_sha,
+            } => {
+                eprintln!(
+                    "  - FORCE-PUSH to '{}' rewrites history: {} ... {}",
+                    protected_branch,
+                    &remote_sha[..7.min(remote_sha.len())],
+                    &local_sha[..7.min(local_sha.len())],
+                );
+            }
+            PushVerdict::Ok => unreachable!("Ok shouldn't be in violations"),
+        }
+    }
+    eprintln!();
+    eprintln!(
+        "[shield-check-pushed-refs] To override: git push --no-verify  OR  \
+         SHIELD_HOOKS_DISABLE=1 git push ..."
+    );
+    eprintln!(
+        "[shield-check-pushed-refs] To change the protected set: \
+         SHIELD_PROTECTED_BRANCHES='main,trunk,release/*' git push ..."
+    );
+    Ok(1)
 }
 
 fn spawn_upstream(cmd: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdout)> {

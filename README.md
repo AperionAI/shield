@@ -2,10 +2,18 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Release](https://github.com/AperionAI/shield/actions/workflows/release.yml/badge.svg)](https://github.com/AperionAI/shield/actions/workflows/release.yml)
-[![Tests](https://img.shields.io/badge/tests-133%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Tests](https://img.shields.io/badge/tests-192%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
 [![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
+
+**Works with:**
+![Cursor](https://img.shields.io/badge/Cursor-supported-success)
+![Claude Code](https://img.shields.io/badge/Claude%20Code-supported-success)
+![Cline](https://img.shields.io/badge/Cline-supported-success)
+![Continue](https://img.shields.io/badge/Continue-supported-success)
+![Windsurf](https://img.shields.io/badge/Windsurf-supported-success)
+![Zed](https://img.shields.io/badge/Zed-supported-success)
 
 `aperion-shield` is a tiny, local MCP server that sits between your AI
 coding agent (Cursor, Claude Code, …) and the **real** MCP servers your
@@ -23,6 +31,58 @@ And when you outgrow the single-machine model, the **same binary**
 enrolls into a Smartflow control plane with one command to pull
 org-wide policy, ship audit upstream, and use your existing IdP as
 the relying party — no rewrite, no re-install.
+
+---
+
+## What's new in v0.7
+
+Two big additions and a breadth bump:
+
+1. **Git hooks (`--install-hooks`).** Closes the most-asked-about
+   bypass: "what if the agent skips MCP and just commits a destructive
+   migration / shell script?" One command writes a `pre-commit` and
+   `pre-push` hook into your repo. The pre-commit hook scans staged
+   `.sql` / `.sh` / `Dockerfile` / `Makefile` / code lines and refuses
+   the commit if any line trips a Block rule, with file:line
+   attribution and a `safer_alternative` hint. The pre-push hook
+   refuses force-pushes and branch-deletions targeting protected
+   branches (`main`, `master`, `prod`, `release/*`, env-overridable).
+   Idempotent install, husky/lefthook-compatible coexistence
+   (`--chain-existing`), `--no-verify` and `SHIELD_HOOKS_DISABLE=1`
+   bypasses documented in every refusal banner.
+   ```bash
+   cd your-repo
+   aperion-shield --install-hooks
+   # next destructive commit -> refused with rule + safer alternative
+   ```
+
+2. **`--suggest-rules`: tune your shieldset from your own audit log.**
+   Point it at the JSONL audit Shield has been writing and it tells
+   you which rules never fire, which are consistently demoted by the
+   adaptive layer (the static severity is probably too high), and
+   which are stuck in noisy-warn purgatory. Three output formats:
+   `text` (the default), `markdown` (paste into a PR), and
+   `yaml-patch` (splice-ready snippets for `shieldset.yaml`).
+   ```bash
+   # capture audit while you work
+   aperion-shield -- npx @modelcontextprotocol/server-postgres ... \
+       2>>~/.aperion-shield/audit.jsonl
+   # later, ask for tuning suggestions
+   aperion-shield --suggest-rules \
+       --audit-log ~/.aperion-shield/audit.jsonl \
+       --suggest-format yaml-patch
+   ```
+
+3. **Four new IDEs supported as first-class quickstarts.** Cursor and
+   Claude Code were the launch surface in v0.5/0.6. v0.7 adds
+   **Cline**, **Continue**, **Windsurf**, and **Zed** — same drop-in
+   wrapping pattern, IDE-specific config paths in the quickstart
+   section below.
+
+4. **192 tests passing** (was 133 in v0.5, 148 in v0.6) — +44 new
+   tests covering the git-hooks integration end-to-end against real
+   tempdir-backed git repos and synthetic-audit-log fixtures for the
+   suggestion analyzer.
 
 ---
 
@@ -228,9 +288,279 @@ goes through Shield first.
 }
 ```
 
+### Cline (workspace `.vscode/cline_mcp_settings.json` or `~/.cline/mcp_settings.json`)
+
+```json
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "aperion-shield",
+      "args": [
+        "--",
+        "npx", "-y", "@modelcontextprotocol/server-postgres", "postgres://..."
+      ]
+    }
+  }
+}
+```
+
+After saving, ask Cline to "reload MCP servers" (or restart the
+VS Code window). Cline reuses the standard `mcpServers` JSON
+schema, so the wrap-with-`aperion-shield` pattern is identical to
+Cursor's.
+
+### Continue (`~/.continue/config.json`)
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "aperion-shield",
+      "args": [
+        "--",
+        "npx", "-y", "@modelcontextprotocol/server-github"
+      ]
+    }
+  ]
+}
+```
+
+Continue uses an **array** of server objects (each with a `name`
+field) rather than the keyed map Cursor/Cline use, but the
+wrap-with-`aperion-shield` pattern is otherwise identical. Tested
+against Continue v0.9+.
+
+### Windsurf (`~/.codeium/windsurf/mcp_config.json`)
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "aperion-shield",
+      "args": [
+        "--",
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"
+      ]
+    }
+  }
+}
+```
+
+Windsurf reads the same `mcpServers` schema as Cursor/Cline, so
+the wrap-with-`aperion-shield` pattern is identical. Restart
+Windsurf after editing.
+
+### Zed (`~/.config/zed/settings.json`)
+
+Zed calls these **`context_servers`** (not `mcpServers`):
+
+```json
+{
+  "context_servers": {
+    "postgres": {
+      "command": {
+        "path": "aperion-shield",
+        "args": [
+          "--",
+          "npx", "-y", "@modelcontextprotocol/server-postgres", "postgres://..."
+        ]
+      }
+    }
+  }
+}
+```
+
+Note the nested `command: { path, args }` shape — Zed's settings
+schema splits the command path from its arguments. Reload Zed
+(`Cmd-Q` and reopen) for the new wrapping to take effect.
+
 For the longer walk-through (combining multiple MCP servers under a
 single Shield, IDE-specific tips, troubleshooting), see
 [docs.aperion.ai/aperion-shield.html](https://docs.aperion.ai/aperion-shield.html).
+
+---
+
+## Git hooks (new in v0.7)
+
+`aperion-shield --install-hooks` writes `pre-commit` and `pre-push`
+hooks into your repo. The hooks call back into the binary with
+`--check-staged` / `--check-pushed-refs` and refuse commits / pushes
+that match destructive rules — closing the most-asked-about bypass
+("what if the agent just commits the destructive thing directly?").
+
+### Install
+
+```bash
+cd your-repo
+aperion-shield --install-hooks
+# [shield] hooks dir: /path/to/your-repo/.git/hooks
+# [shield] installed: pre-commit
+# [shield] installed: pre-push
+```
+
+Idempotent — running it twice just refreshes the script body. If a
+non-Aperion hook is already present, the installer refuses (safe
+default). Pass `--chain-existing` to coexist with husky / pre-commit
+/ lefthook installations: your old hook is moved to
+`<hook>.aperion-backup` and re-execed at the end of ours.
+
+### What pre-commit blocks
+
+The `pre-commit` hook scans **added or modified lines** in staged
+files. Only file types that historically generate destructive ops
+are inspected (`.sql`, `.sh`, `.bash`, `.zsh`, `Dockerfile`,
+`Makefile`, plus general code via the `llm_response` scope) — we
+deliberately don't lint every README. Findings group by rule with
+file:line context:
+
+```
+[shield-check-staged] 1 finding(s) across 1 file(s):
+
+  [Critical] sql.drop_database (1 match)
+    why: DROP DATABASE is never auto-allowed.
+    safer alternative: If you really need to remove a database, do it
+                       through your provider's console with a tested backup.
+      migrations/2026_05_20_purge.sql:2  (block)  DROP DATABASE prod;
+
+[shield-check-staged] commit REFUSED (Block-severity match).
+To override: git commit --no-verify  OR  SHIELD_HOOKS_DISABLE=1 git commit ...
+```
+
+### What pre-push blocks
+
+The `pre-push` hook reads git's standard `local_ref local_sha
+remote_ref remote_sha` stdin and refuses:
+
+- **branch deletions** of protected branches
+- **force-pushes** (where the remote sha isn't an ancestor of the
+  local sha) targeting protected branches
+
+The default protected set is `main`, `master`, `prod`, `production`,
+`release`, `release/*`, `prod/*`, `hotfix/*`. Override at any time
+with `SHIELD_PROTECTED_BRANCHES='trunk,deploy/*'`.
+
+### Bypasses
+
+Both hooks honour:
+
+- `git commit --no-verify` / `git push --no-verify` (built into git)
+- `SHIELD_HOOKS_DISABLE=1` (env override; useful for CI / automation)
+
+Both options are mentioned in every refusal banner so developers
+aren't trained to grep documentation.
+
+### Uninstall
+
+```bash
+aperion-shield --uninstall-hooks
+```
+
+Removes only Aperion-installed hooks (matched by the
+`APERION-SHIELD-HOOK` marker), refuses to touch anything else, and
+restores any `<hook>.aperion-backup` chain partner.
+
+---
+
+## `--suggest-rules`: tune your shieldset from your own audit log (new in v0.7)
+
+Shields are policy-as-code. The hard part isn't deploying one — it's
+keeping it *well-fit* over months: which rules turned out to be dead
+weight, which are noisy, which would be safe to demote. v0.7 ships an
+analyzer that reads the same JSONL audit Shield's been writing all
+along and tells you what to review.
+
+### Capture the audit
+
+In standalone mode Shield writes one JSON line per evaluation to
+stderr. Redirect that to a file:
+
+```bash
+aperion-shield -- npx @modelcontextprotocol/server-postgres ... \
+    2>>~/.aperion-shield/audit.jsonl
+```
+
+(Org-mode users already have this server-side via the Smartflow
+control plane — `--suggest-rules` is for the OSS standalone tier.)
+
+### Ask for suggestions
+
+```bash
+aperion-shield --suggest-rules \
+    --audit-log ~/.aperion-shield/audit.jsonl
+```
+
+Default output (text):
+
+```
+[shield-suggest-rules] 3 suggestion(s):
+
+  [CONSISTENTLY_DEMOTED] sql.grant_all
+    Fired 27 time(s); the adaptive layer demoted EVERY observation
+    from `Critical` down to `Low`.
+    Suggestion: bump the static `severity:` from Critical to Low (or remove
+    `severity:` entirely and let the adaptive layer decide).
+
+  [NOISY_WARN] fs.write_etc
+    Fired 14 time(s); every observation resolved to `warn` (never
+    escalated). This rule is eating composite-score headroom for
+    higher-stakes rules without ever blocking the call.
+    Suggestion: consider dropping severity to `Low` so it stops
+    contributing composite points OR add an exclude rule for the
+    specific call shape that's spamming it.
+
+  [RULE_NEVER_FIRES] supply.npm_install_evil_registry
+    Did not fire over the last 30 day(s) of audit log.
+    Suggestion: review whether this rule is still needed for your
+                environment. Do NOT remove blindly — "never fired"
+                can mean "nobody's tried this destructive thing yet,"
+                which is exactly the case Shield exists for.
+```
+
+### Output formats
+
+| Format | Use for |
+|---|---|
+| `text` (default) | reading in your terminal |
+| `markdown` (`--suggest-format markdown`) | pasting into a PR description or RFC |
+| `yaml-patch` (`--suggest-format yaml-patch`) | splice-ready snippets you can drop into `shieldset.yaml` |
+
+The YAML-patch output for the example above:
+
+```yaml
+# CONSISTENTLY_DEMOTED: sql.grant_all
+#   rationale: 27 fires; every one demoted from Critical to Low.
+- id: sql.grant_all
+  severity: Low
+
+# NOISY_WARN: fs.write_etc
+#   rationale: 14 fires, all resolving to `warn`. Never escalated.
+- id: fs.write_etc
+  severity: Low
+
+# RULE_NEVER_FIRES: supply.npm_install_evil_registry
+#   rationale: 0 audit rows in the last 30 day(s).
+#   action: REVIEW. We do not auto-suggest removal.
+```
+
+### What the three suggestion classes mean
+
+| Class | Trigger | Risk if you act on it |
+|---|---|---|
+| `RULE_NEVER_FIRES` | Rule loaded but produced 0 audit rows over the window | **HIGH** — "never fired" often means "nobody's tried this destructive thing *yet*." We surface for review and explicitly recommend against blind removal. |
+| `CONSISTENTLY_DEMOTED` | Static severity has been higher than the adaptive layer's final severity on **every** fire (≥ `--suggest-min-occurrences`, default 5). | **LOW** — the adaptive layer is doing the work the static severity wishes it could. Lowering matches reality. |
+| `NOISY_WARN` | Rule fires ≥ threshold times and **every** observation resolved to `warn` (never escalated). | **MEDIUM** — confirm you actually want this rule informational-only, then drop it to `Low`. |
+
+### Knobs
+
+- `--audit-log PATH` (required) — JSONL file to analyze.
+- `--suggest-window-days N` — analysis window. Default: 30. Pass 0 for all.
+- `--suggest-min-occurrences N` — threshold for the two count-based classes. Default: 5.
+- `--suggest-format FMT` — `text` (default) / `markdown` / `yaml-patch`.
+- `--rules PATH` — explicit shieldset (so we know the *full* rule list for `RULE_NEVER_FIRES`). Defaults to bundled.
+
+Exit codes: `0` = no suggestions (nothing to tune). `1` = at least one
+suggestion (useful for CI policy gates that want a heads-up).
 
 ---
 
