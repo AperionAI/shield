@@ -23,8 +23,9 @@ If you only read one section, read **§4 — Open advisories** below.
 
 | Version | Status | Receives fixes |
 |---|---|---|
-| `0.6.x` | current stable | yes |
-| `0.5.x` | previous       | no — superseded by v0.6.0 on 2026-05-18 |
+| `0.7.x` | current stable | yes |
+| `0.6.x` | previous       | security-only — superseded by v0.7.0 on 2026-05-20 |
+| `0.5.x` | superseded     | no — superseded by v0.6.0 on 2026-05-18 |
 | `< 0.5` | superseded     | no |
 
 We do **not** backport fixes to pre-1.0 minor lines. Stay on the
@@ -289,3 +290,4 @@ If you operate Shield as part of an enterprise deployment:
 |---|---|
 | 2026-05-15 | Initial policy. Documents the three open Dependabot advisories surfaced by Shield's first public release and the v0.6.0 fix plan. |
 | 2026-05-18 | v0.6.0 shipped. RUSTSEC-2026-0098 / -0099 / -0104 closed by `rustls-webpki 0.103.13` (transitively via the `reqwest 0.12` / `rustls 0.23` / `hyper 1.x` upgrade). `.cargo/audit.toml` ignore list trimmed back to `[]`. Supported-versions table updated. |
+| 2026-05-20 | v0.7.0 shipped. No new advisories or fix-required changes; this is a feature-only release. `cargo audit` clean against `Cargo.lock` at the v0.7.0 commit. New surfaces (`--install-hooks`, `--check-staged`, `--check-pushed-refs`, `--suggest-rules`) all stay within the standalone process model — no new network endpoints, no new on-disk persistence beyond `.git/hooks/` (Shield itself) and the operator-redirected audit log. Supported-versions table updated; v0.6.x dropped to security-only. |
