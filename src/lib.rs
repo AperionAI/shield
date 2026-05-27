@@ -23,6 +23,7 @@ pub mod burst;
 pub mod context;
 pub mod diff;
 pub mod engine;
+pub mod explain;
 pub mod hooks;
 pub mod identity;
 pub mod memory;

@@ -429,6 +429,73 @@ struct Cli {
     )]
     check_cmd: bool,
 
+    // ── Decision transparency (v0.8+) ─────────────────────────────
+    //
+    // `--explain` takes a JSON tool-call descriptor on stdin or via
+    // --input and prints a full decision walkthrough: which rules
+    // matched, what signals were applied, how severity tiers chained,
+    // and the safer alternative if anything was gated.
+
+    /// Print a full decision walkthrough for a single tool-call
+    /// descriptor read from `--input` (or stdin via `--input -`).
+    /// Output is text by default; `--explain-format markdown` is
+    /// PR-comment-friendly and `--explain-format json` is a stable
+    /// schema for piping into other tooling.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks",
+        conflicts_with = "check_staged",
+        conflicts_with = "check_pushed_refs",
+        conflicts_with = "suggest_rules",
+        conflicts_with = "install_shims",
+        conflicts_with = "uninstall_shims",
+        conflicts_with = "list_shims",
+        conflicts_with = "check_cmd"
+    )]
+    explain: bool,
+
+    /// JSON tool-call descriptor for `--explain`. Path `-` reads from
+    /// stdin. The descriptor is the MCP-style `{"name": "...",
+    /// "arguments": {...}}` payload (also accepts legacy
+    /// `{"tool": "...", "params": {...}}`).
+    #[arg(long, value_name = "PATH", requires = "explain")]
+    input: Option<PathBuf>,
+
+    /// Output format for `--explain`. Default: text.
+    #[arg(
+        long,
+        value_name = "FMT",
+        value_parser = ["text", "txt", "markdown", "md", "json"],
+        requires = "explain"
+    )]
+    explain_format: Option<String>,
+
+    /// Force `workspace_is_prod = true` in the `--explain` adjustment
+    /// signals. Useful for "what would this call decide if it landed
+    /// in a prod workspace?" walk-throughs.
+    #[arg(long, requires = "explain")]
+    explain_force_prod: bool,
+
+    /// Force `burst_in_progress = true` in the `--explain` adjustment
+    /// signals. Reproduces decisions captured during a high-traffic
+    /// window without needing to recreate the actual burst.
+    #[arg(long, requires = "explain")]
+    explain_force_burst: bool,
+
+    /// Force `fingerprint_repeatedly_approved = true` -- demonstrates
+    /// what the decision-memory demotion would do for this call.
+    #[arg(long, requires = "explain")]
+    explain_force_repeatedly_approved: bool,
+
+    /// Force `fingerprint_recently_denied = true` -- demonstrates what
+    /// the decision-memory escalation would do for this call.
+    #[arg(long, requires = "explain")]
+    explain_force_recently_denied: bool,
+
     // ── Org-mode (v0.5+) ──────────────────────────────────────────
     //
     // Enroll this Shield against a Smartflow control plane so policy,
@@ -592,6 +659,10 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.check_cmd {
         let exit_code = run_check_cmd(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.explain {
+        let exit_code = run_explain(&cli)?;
         std::process::exit(exit_code);
     }
 
@@ -1464,6 +1535,44 @@ fn run_list_shims(cli: &Cli) -> anyhow::Result<i32> {
         eprintln!("  [{}] {}", label, name);
     }
     Ok(0)
+}
+
+/// `--explain --input call.json [--explain-format text|markdown|json]`.
+///
+/// Prints a full decision walkthrough -- rules matched, adjustment
+/// signals applied, severity ladder, decision + safer alternative.
+/// Exit code mirrors `--check-cmd` so the same CI plumbing works.
+fn run_explain(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::explain::{
+        explain, read_descriptor_from, render::{render, ExplainFormat}, ExplainOptions,
+    };
+
+    let input = cli
+        .input
+        .as_ref()
+        .ok_or_else(|| anyhow!("--explain requires --input <PATH | -> (use `-` for stdin)"))?;
+    let path_str = input.to_string_lossy().to_string();
+    let descriptor = read_descriptor_from(&path_str)?;
+
+    let engine = load_engine(cli.rules.as_deref())?;
+
+    let mut opts = ExplainOptions::default();
+    if cli.explain_force_prod {
+        opts.force_workspace_prod = Some(true);
+    }
+    if cli.explain_force_burst {
+        opts.force_burst = Some(true);
+    }
+    opts.force_repeatedly_approved = cli.explain_force_repeatedly_approved;
+    opts.force_recently_denied = cli.explain_force_recently_denied;
+
+    let report = explain(&engine, &descriptor, &opts)?;
+    let format = match cli.explain_format.as_deref() {
+        Some(s) => ExplainFormat::parse(s)?,
+        None => ExplainFormat::Text,
+    };
+    print!("{}", render(&report, format));
+    Ok(report.exit_code() as i32)
 }
 
 /// `--check-cmd -- <command> [args...]`. Invoked by installed shims.
