@@ -330,6 +330,105 @@ struct Cli {
     )]
     suggest_format: Option<String>,
 
+    // ── Shell shims (v0.8+) ───────────────────────────────────────
+    //
+    // The shims close the "agent reaches around MCP and runs a
+    // destructive command directly" surface. `--install-shims` writes
+    // tiny wrappers to `~/.aperion-shield/bin/` for the supported
+    // commands (`aws`, `kubectl`, `terraform`, `rm`, ...); the user
+    // puts that dir first on `$PATH` and every invocation goes
+    // through `--check-cmd` before reaching the real binary.
+
+    /// Install per-command shell shims in `--shim-dir` (default
+    /// `$HOME/.aperion-shield/bin`). Wrappers route every invocation
+    /// of `aws`, `kubectl`, `terraform`, etc. through the active
+    /// shieldset. Mirrors `--install-hooks` -- same bypass semantics
+    /// via `SHIELD_SHIMS_DISABLE=1`.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks",
+        conflicts_with = "check_staged",
+        conflicts_with = "check_pushed_refs",
+        conflicts_with = "suggest_rules"
+    )]
+    install_shims: bool,
+
+    /// Remove every Shield-managed shim from `--shim-dir`. Files
+    /// without the Aperion marker are left alone (operator-authored).
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks",
+        conflicts_with = "check_staged",
+        conflicts_with = "check_pushed_refs",
+        conflicts_with = "suggest_rules",
+        conflicts_with = "install_shims"
+    )]
+    uninstall_shims: bool,
+
+    /// List shims currently present in `--shim-dir`, separated into
+    /// Shield-managed vs foreign (operator-authored). Useful as a
+    /// pre-install dry run.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks",
+        conflicts_with = "check_staged",
+        conflicts_with = "check_pushed_refs",
+        conflicts_with = "suggest_rules",
+        conflicts_with = "install_shims",
+        conflicts_with = "uninstall_shims"
+    )]
+    list_shims: bool,
+
+    /// Comma-separated subset of commands to shim (e.g.
+    /// `--for aws,kubectl,terraform`). When omitted, installs the
+    /// full Shield-supported list. See `templates::DEFAULT_SHIMMED_COMMANDS`.
+    #[arg(
+        long = "for",
+        value_name = "CMD,CMD,...",
+        requires = "install_shims"
+    )]
+    shim_for: Option<String>,
+
+    /// Override the shim directory (default
+    /// `$HOME/.aperion-shield/bin`). Used by `--install-shims`,
+    /// `--uninstall-shims`, and `--list-shims`.
+    #[arg(long, value_name = "PATH")]
+    shim_dir: Option<PathBuf>,
+
+    /// Evaluate a reconstructed shell command line and exit with the
+    /// engine's verdict. Invoked by the installed shims; rarely run
+    /// directly. Usage: `aperion-shield --check-cmd -- aws s3 rm ...`.
+    /// NOTE: this mode reads its argv from the trailing `--` args, the
+    /// same slot the upstream-MCP-server invocation uses. It is the
+    /// only one of these subcommand-style modes that does NOT conflict
+    /// with `upstream`, by design.
+    #[arg(
+        long,
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks",
+        conflicts_with = "check_staged",
+        conflicts_with = "check_pushed_refs",
+        conflicts_with = "suggest_rules",
+        conflicts_with = "install_shims",
+        conflicts_with = "uninstall_shims",
+        conflicts_with = "list_shims"
+    )]
+    check_cmd: bool,
+
     // ── Org-mode (v0.5+) ──────────────────────────────────────────
     //
     // Enroll this Shield against a Smartflow control plane so policy,
@@ -475,6 +574,24 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.suggest_rules {
         let exit_code = run_suggest_rules(&cli)?;
+        std::process::exit(exit_code);
+    }
+
+    // ── Shell-shim modes (v0.8+) ──────────────────────────────────
+    if cli.install_shims {
+        let exit_code = run_install_shims(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.uninstall_shims {
+        let exit_code = run_uninstall_shims(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.list_shims {
+        let exit_code = run_list_shims(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.check_cmd {
+        let exit_code = run_check_cmd(&cli)?;
         std::process::exit(exit_code);
     }
 
@@ -1228,6 +1345,160 @@ fn run_check_pushed_refs(cli: &Cli) -> anyhow::Result<i32> {
          SHIELD_PROTECTED_BRANCHES='main,trunk,release/*' git push ..."
     );
     Ok(1)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// v0.8 shell-shim dispatchers
+// ─────────────────────────────────────────────────────────────────────
+
+/// `--install-shims [--for ...] [--shim-dir PATH]`
+fn run_install_shims(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::shims::install::{
+        install, parse_for_arg, resolve_shim_dir, ShimInstallOutcome,
+    };
+
+    let shim_dir = resolve_shim_dir(cli.shim_dir.as_deref())?;
+    let commands = match cli.shim_for.as_deref() {
+        Some(raw) => parse_for_arg(raw)?,
+        None => Vec::new(), // empty => DEFAULT_SHIMMED_COMMANDS
+    };
+
+    let report = install(&shim_dir, &commands)?;
+
+    eprintln!(
+        "[shield-install-shims] shim dir: {}",
+        report.shim_dir.display()
+    );
+    for e in &report.entries {
+        let label = match e.outcome {
+            ShimInstallOutcome::Installed => "INSTALLED ",
+            ShimInstallOutcome::Refreshed => "REFRESHED ",
+            ShimInstallOutcome::ForeignPresent => "SKIPPED   ",
+            ShimInstallOutcome::UpstreamBinaryNotFound => "NO-UPSTREAM",
+        };
+        let detail = match &e.resolved_path {
+            Some(p) => format!("-> {}", p.display()),
+            None => match e.outcome {
+                ShimInstallOutcome::ForeignPresent => {
+                    "existing file at target is not Shield-managed; refusing to overwrite".to_string()
+                }
+                ShimInstallOutcome::UpstreamBinaryNotFound => {
+                    "real binary not found on $PATH; skipped".to_string()
+                }
+                _ => String::new(),
+            },
+        };
+        eprintln!("  {} {:<14} {}", label, e.command, detail);
+    }
+
+    eprintln!();
+    eprintln!(
+        "[shield-install-shims] {} shim(s) installed / refreshed.",
+        report.successful()
+    );
+    eprintln!();
+    eprintln!("Next step: put this directory FIRST on your $PATH so shims win lookup.");
+    eprintln!("  zsh   : echo 'export PATH=\"{}:$PATH\"' >> ~/.zshrc", report.shim_dir.display());
+    eprintln!("  bash  : echo 'export PATH=\"{}:$PATH\"' >> ~/.bashrc", report.shim_dir.display());
+    eprintln!("  fish  : fish_add_path -p '{}'", report.shim_dir.display());
+    eprintln!();
+    eprintln!("Bypass for a single invocation:  SHIELD_SHIMS_DISABLE=1 <command> ...");
+    eprintln!("Uninstall later:                 aperion-shield --uninstall-shims");
+
+    // Exit 0 iff at least one shim was installed AND there were no
+    // foreign-file collisions. Foreign collisions surface as exit 1 so
+    // CI scripts can detect mis-configurations.
+    if report.any_foreign() {
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+/// `--uninstall-shims [--shim-dir PATH]`
+fn run_uninstall_shims(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::shims::install::{resolve_shim_dir, uninstall, ShimUninstallOutcome};
+
+    let shim_dir = resolve_shim_dir(cli.shim_dir.as_deref())?;
+    let report = uninstall(&shim_dir)?;
+
+    eprintln!(
+        "[shield-uninstall-shims] shim dir: {}",
+        report.shim_dir.display()
+    );
+    if report.entries.is_empty() {
+        eprintln!("  (nothing to remove)");
+        return Ok(0);
+    }
+    for e in &report.entries {
+        let label = match e.outcome {
+            ShimUninstallOutcome::Removed => "REMOVED ",
+            ShimUninstallOutcome::ForeignPresent => "KEPT    ",
+            ShimUninstallOutcome::AbsentNoop => "ABSENT  ",
+        };
+        let detail = match e.outcome {
+            ShimUninstallOutcome::ForeignPresent => "(no Aperion marker; left alone)",
+            _ => "",
+        };
+        eprintln!("  {} {:<14} {}", label, e.command, detail);
+    }
+    Ok(0)
+}
+
+/// `--list-shims [--shim-dir PATH]`
+fn run_list_shims(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::shims::install::{list, resolve_shim_dir};
+
+    let shim_dir = resolve_shim_dir(cli.shim_dir.as_deref())?;
+    let entries = list(&shim_dir)?;
+
+    if entries.is_empty() {
+        eprintln!(
+            "[shield-list-shims] {}: (none installed)",
+            shim_dir.display()
+        );
+        return Ok(0);
+    }
+    eprintln!("[shield-list-shims] {}:", shim_dir.display());
+    for (name, ours) in entries {
+        let label = if ours { "shield " } else { "foreign" };
+        eprintln!("  [{}] {}", label, name);
+    }
+    Ok(0)
+}
+
+/// `--check-cmd -- <command> [args...]`. Invoked by installed shims.
+fn run_check_cmd(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::shims::check_cmd::{refusal_banner, run};
+
+    if cli.upstream.is_empty() {
+        eprintln!(
+            "[shield-check-cmd] usage: aperion-shield --check-cmd -- <command> [args...]"
+        );
+        return Ok(3);
+    }
+
+    let engine = load_engine(cli.rules.as_deref())?;
+    let report = run(&engine, &cli.upstream)?;
+
+    // Always print the audit JSON line to stderr -- mirrors the shape
+    // emitted by the MCP path so `--suggest-rules` keeps working over
+    // the merged log.
+    let audit_record = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": "shield_eval",
+        "source": "check-cmd",
+        "tool": "shell",
+        "command": report.command_line,
+        "decision": report.decision.label(),
+        "rule_id": report.primary.as_ref().map(|p| p.rule_id.as_str()),
+        "severity": report.primary.as_ref().map(|p| p.severity.as_str()),
+    });
+    eprintln!("{}", audit_record);
+
+    if report.exit_code() != 0 {
+        eprint!("{}", refusal_banner(&report));
+    }
+    Ok(report.exit_code() as i32)
 }
 
 fn spawn_upstream(cmd: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdout)> {

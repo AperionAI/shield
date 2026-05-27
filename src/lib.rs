@@ -28,6 +28,7 @@ pub mod identity;
 pub mod memory;
 pub mod orgmode;
 pub mod predicates;
+pub mod shims;
 pub mod suggest;
 
 pub use burst::BurstDetector;
