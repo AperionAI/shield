@@ -454,10 +454,27 @@ mod tests {
     /// Set PATH for the duration of a test, restoring on drop.
     /// Holding the module-local `ENV_LOCK` for the whole call serialises
     /// against every other test that reads or writes PATH.
-    fn with_path<R>(new_path: &Path, f: impl FnOnce() -> R) -> R {
+    ///
+    /// We deliberately PREPEND the test's fixture directory rather than
+    /// REPLACING $PATH, so unrelated tests that shell out to
+    /// `hostname`, `git`, etc. (e.g. `orgmode::state::fingerprint_is_stable`)
+    /// keep working while we hold the lock. The fixture binary always
+    /// resolves first because our directory is at the front of the
+    /// joined path.
+    fn with_path<R>(new_path_prefix: &Path, f: impl FnOnce() -> R) -> R {
         let _guard = ENV_LOCK.lock().unwrap();
         let prev = std::env::var_os("PATH");
-        std::env::set_var("PATH", new_path);
+        let joined = match &prev {
+            Some(existing) => {
+                let mut s = std::ffi::OsString::new();
+                s.push(new_path_prefix);
+                s.push(":");
+                s.push(existing);
+                s
+            }
+            None => new_path_prefix.as_os_str().to_owned(),
+        };
+        std::env::set_var("PATH", &joined);
         let r = f();
         match prev {
             Some(p) => std::env::set_var("PATH", p),
@@ -518,19 +535,24 @@ mod tests {
 
     #[test]
     fn install_skips_when_upstream_binary_not_on_path() {
-        // Point PATH at an empty tempdir so the lookup of `helm` fails.
+        // Use a command name guaranteed not to exist on any sane $PATH
+        // so this assertion is independent of the host system. Picking
+        // a real name like `helm` would make the test pass or fail
+        // based on whether helm happens to be installed on the dev /
+        // CI machine.
         let empty = TempDir::new().unwrap();
         let shim_dir = TempDir::new().unwrap();
 
+        let cmd_name = "aperion-test-fake-binary-zzz999".to_string();
         let report = with_path(empty.path(), || {
-            install(shim_dir.path(), &["helm".to_string()]).expect("install")
+            install(shim_dir.path(), &[cmd_name.clone()]).expect("install")
         });
 
         assert_eq!(
             report.entries[0].outcome,
             ShimInstallOutcome::UpstreamBinaryNotFound
         );
-        assert!(!shim_dir.path().join("helm").exists());
+        assert!(!shim_dir.path().join(&cmd_name).exists());
     }
 
     #[test]

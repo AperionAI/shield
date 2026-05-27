@@ -2,7 +2,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Release](https://github.com/AperionAI/shield/actions/workflows/release.yml/badge.svg)](https://github.com/AperionAI/shield/actions/workflows/release.yml)
-[![Tests](https://img.shields.io/badge/tests-192%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Tests](https://img.shields.io/badge/tests-243%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
 [![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
@@ -31,6 +31,86 @@ And when you outgrow the single-machine model, the **same binary**
 enrolls into a Smartflow control plane with one command to pull
 org-wide policy, ship audit upstream, and use your existing IdP as
 the relying party — no rewrite, no re-install.
+
+---
+
+## What's new in v0.8
+
+Two strong additions that build directly on the v0.7 bypass-closing
+story:
+
+1. **Shell shims (`--install-shims`) — closes the non-git command
+   bypass.** v0.7 closed the "agent reaches around MCP and lets a
+   destructive change land in a commit" bypass with git hooks. v0.8
+   closes the parallel "agent reaches around MCP and runs a
+   destructive shell command directly" bypass. One command installs
+   tiny `/bin/sh` wrappers in `~/.aperion-shield/bin/` for **10
+   high-blast-radius CLIs** (`aws`, `gcloud`, `az`, `kubectl`, `helm`,
+   `terraform`, `psql`, `mongosh`, `redis-cli`, `rm`). The user puts
+   that dir first on `$PATH` and every invocation routes through the
+   active shieldset before reaching the real binary. Same engine, same
+   YAML rules, same audit JSONL stream — the shim path reuses the
+   `shell` tool-call scope that MCP and `--check-staged` already use,
+   so adding a rule for one surface covers all three.
+   ```bash
+   aperion-shield --install-shims --for aws,kubectl,terraform
+   # next destructive call -> refused with rule + safer alternative
+   #   $ aws s3 rm --recursive s3://prod-bucket
+   #   [aperion-shield/check-cmd] APPROVAL-REQUIRED -- `aws s3 rm --recursive s3://prod-bucket`
+   #     rule    : cloud.aws_s3_recursive_delete  (severity=High)
+   #     reason  : Bulk S3 delete -- irreversible if versioning is off.
+   #     suggest : Enable versioning, then use lifecycle rules to expire ...
+   ```
+   Bypass for a single invocation: `SHIELD_SHIMS_DISABLE=1 aws ...`
+   (env override, parity with `--no-verify` for hooks). Foreign-file
+   collisions (you wrote your own `~/.aperion-shield/bin/aws`
+   wrapper) are NEVER overwritten — Shield refuses the install with a
+   non-zero exit and tells you what to do.
+
+2. **`--explain`: first-class decision transparency.** Take any
+   tool-call descriptor and get a complete decision walkthrough:
+   every rule that matched, every adjustment signal applied
+   (workspace probe, decision memory, burst detector), the full
+   severity ladder (raw → composite + points → final), the resolved
+   decision, and the `safer_alternative`. Three output formats —
+   `text` for terminals, `markdown` for PR review comments, `json`
+   with a stable schema for piping into other tooling. The
+   `--explain-force-prod` / `--explain-force-burst` flags let you
+   answer "what would this same call decide in a different context?"
+   without rebuilding the environment.
+   ```bash
+   echo '{"name":"shell","arguments":{"command":"rm -rf /"}}' \
+       | aperion-shield --explain --input -
+   # ----------------------------------------------------------
+   # shield --explain
+   # ────────────────
+   # tool   : shell
+   # call   : {"command":"rm -rf /"}
+   #
+   # rules matched ............................. 1
+   #   fs.recursive_delete_root         Critical   pts=8
+   # ...
+   # decision .................................. BLOCK
+   #   rule_id  : fs.recursive_delete_root
+   #   severity : Critical
+   #   reason   : rm -rf on filesystem root is forbidden.
+   #   suggest  : Scope to a specific subdirectory, ...
+   ```
+
+3. **243 tests passing** (was 192 in v0.7, 148 in v0.6, 133 in v0.5)
+   — +51 new tests: 22 in-module + 7 end-to-end for shims (real
+   `/bin/sh` execution against a fake real binary, foreign-file
+   collision, bypass env, fall-through when Shield isn't on `$PATH`,
+   `--list-shims` separation); 15 in-module + 7 end-to-end for
+   `--explain` (text / markdown / JSON stable-schema format
+   round-trips, force flags, legacy `tool/params` descriptor shape,
+   missing-tool refusal).
+
+> **Heads up: HTTP/SSE MCP transport is the v0.9 headline.** The
+> Streamable HTTP transport (POST + SSE relay with backpressure) is a
+> meaty piece of work that deserves to be the lead feature of its own
+> release, not a half-finished breadth bump here. v0.8 is the
+> "bypass-closing" release; v0.9 will be the "any-transport" release.
 
 ---
 
@@ -622,6 +702,269 @@ Memory lives at `.aperion-shield/decisions.jsonl` in your project root.
 It never leaves your machine; the standalone is offline-only.
 
 You can layer your own rules on top via `--rules my.yaml`.
+
+---
+
+## Shell shims (new in v0.8)
+
+`aperion-shield --install-shims` writes tiny `/bin/sh` wrappers that
+route every invocation of selected CLIs through Shield's engine
+before the call reaches the real binary. This closes the parallel
+bypass surface to v0.7's git hooks: where the hooks catch destructive
+code landing in a commit, the shims catch destructive commands the
+agent runs *directly from a shell*.
+
+### Install
+
+```bash
+# install shims for every supported command (10 by default)
+aperion-shield --install-shims
+
+# OR pick a subset
+aperion-shield --install-shims --for aws,kubectl,terraform
+
+# OR install into a different directory (default: ~/.aperion-shield/bin/)
+aperion-shield --install-shims --shim-dir ~/bin/aperion
+```
+
+Shield prints exactly what to add to your shell rc so the shim dir
+wins lookup against the system binaries:
+
+```bash
+zsh   : echo 'export PATH="$HOME/.aperion-shield/bin:$PATH"' >> ~/.zshrc
+bash  : echo 'export PATH="$HOME/.aperion-shield/bin:$PATH"' >> ~/.bashrc
+fish  : fish_add_path -p '$HOME/.aperion-shield/bin'
+```
+
+### Supported commands (out of the box)
+
+| Surface | Commands |
+|---|---|
+| AWS / GCP / Azure | `aws`, `gcloud`, `az` |
+| Kubernetes | `kubectl`, `helm` |
+| Infra-as-Code | `terraform` |
+| Databases | `psql`, `mongosh`, `redis-cli` |
+| Filesystem | `rm` |
+
+(You can also shim arbitrary commands — the shieldset is the source
+of truth for what counts as destructive. Default list just bounds
+what `--install-shims` instruments without a `--for` filter.)
+
+### What happens on a refused call
+
+```text
+$ aws s3 rm --recursive s3://prod-bucket
+[aperion-shield/check-cmd] APPROVAL-REQUIRED -- `aws s3 rm --recursive s3://prod-bucket`
+  rule    : cloud.aws_s3_recursive_delete  (severity=High)
+  reason  : Bulk S3 delete -- irreversible if versioning is off.
+  suggest : Enable versioning, then use lifecycle rules to expire -- never `--recursive --force`.
+  note    : approvals require an MCP-mediated invocation (this shim cannot prompt)
+
+bypass options for a single invocation:
+  SHIELD_SHIMS_DISABLE=1 <command> ...   (env override, one-shot)
+  aperion-shield --uninstall-shims        (remove all shims)
+```
+
+The real `aws` binary is **never exec'd** when Shield refuses. The
+exit code propagates so CI scripts notice the refusal.
+
+### Bypass / disable
+
+| Knob | Effect |
+|---|---|
+| `SHIELD_SHIMS_DISABLE=1 <cmd>` | one-shot bypass; shim execs the real binary directly |
+| `aperion-shield --uninstall-shims` | remove every Shield-managed shim from the dir |
+| `aperion-shield missing on $PATH` | shim fails open and execs the real binary (so teammates without Shield don't have their tooling broken — fail-open by design) |
+
+### Exit codes (`--check-cmd`)
+
+Same table as `--check-staged` so operators only memorise one set:
+
+| Code | Meaning |
+|---|---|
+| 0 | engine returned Allow (or shadow) → shim execs the real binary |
+| 1 | Block decision → shim refuses, banner on stderr |
+| 2 | Approval / IdentityVerification → can't prompt at shim time (no MCP inbox loop), refused with a note pointing the user at MCP-mediated invocation |
+| 3 | operational error (couldn't load shieldset, argv empty, ...) |
+
+### Coexistence with existing wrappers
+
+If you've hand-rolled a wrapper at `~/.aperion-shield/bin/aws` (or
+wherever your shim dir is) before installing Shield, `--install-shims`
+**refuses to overwrite it** — exits 1, leaves your file alone, and
+tells you what it found. Pick a different `--shim-dir`, or delete
+your file yourself first.
+
+### List / inspect
+
+```bash
+aperion-shield --list-shims
+# /Users/me/.aperion-shield/bin/:
+#   [shield ] aws
+#   [shield ] kubectl
+#   [shield ] terraform
+#   [foreign] my-custom-wrapper       <- not Shield-managed
+```
+
+### Uninstall
+
+```bash
+aperion-shield --uninstall-shims
+# REMOVED  aws
+# REMOVED  kubectl
+# REMOVED  terraform
+# KEPT     my-custom-wrapper           (no Aperion marker; left alone)
+```
+
+---
+
+## `--explain`: walk through any decision (new in v0.8)
+
+Shield's adaptive scoring is one of its strengths and one of the
+most common sources of "wait, why did *that* call get gated?"
+operator confusion. `--explain` answers the question in one shot —
+which rules tripped, which adjustment signals fired, where the
+severity tiers actually chained, and what the safer alternative is.
+
+### Run it
+
+```bash
+# from a file
+aperion-shield --explain --input call.json
+
+# from stdin
+echo '{"name":"shell","arguments":{"command":"rm -rf /"}}' \
+    | aperion-shield --explain --input -
+
+# from a heredoc
+aperion-shield --explain --input - <<'EOF'
+{"name": "execute_sql", "arguments": {"query": "UPDATE users SET email_verified=TRUE WHERE email_verified=FALSE"}}
+EOF
+```
+
+Accepts either descriptor shape:
+
+| Shape | Source |
+|---|---|
+| `{"name": ..., "arguments": ...}` | MCP-canonical (Cursor / Claude Code / etc.) |
+| `{"tool": ..., "params": ...}` | legacy / some custom tooling — still accepted |
+
+### Output formats
+
+```bash
+aperion-shield --explain --input call.json                          # text (default)
+aperion-shield --explain --input call.json --explain-format markdown # PR-comment friendly
+aperion-shield --explain --input call.json --explain-format json    # stable schema
+```
+
+#### text (default)
+
+```text
+shield --explain
+────────────────
+tool   : shell
+call   : {"command":"rm -rf /"}
+
+rules matched ............................. 1
+  fs.recursive_delete_root         Critical   pts=8
+
+adjustments applied ....................... 0
+  (none)
+
+severities
+  raw       : Critical
+  composite : High  (composite_points=8)
+  final     : Critical
+
+decision .................................. BLOCK
+  rule_id  : fs.recursive_delete_root
+  severity : Critical
+  reason   : rm -rf on filesystem root is forbidden.
+  suggest  : Scope to a specific subdirectory, e.g. `rm -rf ./build/`.
+```
+
+#### markdown — drops cleanly into a PR review comment
+
+```markdown
+### `aperion-shield --explain`
+
+| field | value |
+|---|---|
+| tool | `shell` |
+| call | `{"command":"rm -rf /"}` |
+| decision | **BLOCK** |
+| final severity | `Critical` |
+
+**Rules matched (1):**
+
+| rule | severity | points | reason |
+|---|---|---|---|
+| `fs.recursive_delete_root` | `Critical` | 8 | rm -rf on filesystem root is forbidden. |
+
+...
+```
+
+#### json — stable schema for tooling
+
+```json
+{
+  "tool": "shell",
+  "arguments": {"command": "rm -rf /"},
+  "rules_matched": [
+    {
+      "rule_id": "fs.recursive_delete_root",
+      "severity": "Critical",
+      "points": 8,
+      "reason": "rm -rf on filesystem root is forbidden.",
+      "safer_alternative": "Scope to a specific subdirectory, ..."
+    }
+  ],
+  "adjustment_signals": {
+    "workspace_is_prod": false,
+    "burst_in_progress": false,
+    "fingerprint_repeatedly_approved": false,
+    "fingerprint_recently_denied": false
+  },
+  "severity_raw": "Critical",
+  "severity_composite": "High",
+  "severity_final": "Critical",
+  "composite_points": 8,
+  "decision": {
+    "kind": "block",
+    "rule_id": "fs.recursive_delete_root",
+    "severity": "Critical",
+    "reason": "rm -rf on filesystem root is forbidden.",
+    "safer_alternative": "...",
+    "contributing_rules": []
+  }
+}
+```
+
+### What-if exploration
+
+The four `--explain-force-*` flags let you ask "what would the same
+call decide in a different context?" without rebuilding the actual
+environment:
+
+| Flag | What it does |
+|---|---|
+| `--explain-force-prod` | pretend the workspace probe said *prod* |
+| `--explain-force-burst` | pretend the burst detector is firing |
+| `--explain-force-repeatedly-approved` | demonstrate the decision-memory **demotion** path |
+| `--explain-force-recently-denied` | demonstrate the decision-memory **escalation** path |
+
+Use the JSON output + `--explain-force-prod` together to drive a
+"would this break in prod?" status check on a PR.
+
+### Exit codes (`--explain`)
+
+Mirror `--check-cmd` so the same CI plumbing works:
+
+| Code | Meaning |
+|---|---|
+| 0 | Allow or Warn |
+| 1 | Block |
+| 2 | Approval / IdentityVerification |
 
 ---
 

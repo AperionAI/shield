@@ -1,6 +1,6 @@
 [package]
 name = "aperion-shield"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Aperion Shield -- a local MCP guardrail for AI coding agents with optional biometric identity gates (ID.me). Standalone, free, open source."
 license = "Apache-2.0"
