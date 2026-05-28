@@ -1,7 +1,6 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Release](https://github.com/AperionAI/shield/actions/workflows/release.yml/badge.svg)](https://github.com/AperionAI/shield/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/badge/tests-243%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
