@@ -49,6 +49,9 @@ LABEL org.opencontainers.image.description="Local MCP guardrail for AI coding ag
 LABEL org.opencontainers.image.source="https://github.com/AperionAI/shield"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.vendor="Aperion"
+# Required by the official MCP Registry's OCI ownership check -- the
+# value must exactly match the `name` field in server.json.
+LABEL io.modelcontextprotocol.server.name="io.github.AperionAI/shield"
 
 COPY --from=build /src/target/release/aperion-shield /usr/local/bin/aperion-shield
 

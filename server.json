@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.aperionai/shield",
+  "name": "io.github.AperionAI/shield",
   "title": "Aperion Shield",
   "description": "Local guardrail proxy that blocks destructive MCP tool calls, rug pulls, and tool poisoning",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "websiteUrl": "https://docs.aperion.ai/aperion-shield.html",
   "repository": {
     "url": "https://github.com/AperionAI/shield",
@@ -11,9 +11,9 @@
   },
   "packages": [
     {
-      "registryType": "cargo",
-      "identifier": "aperion-shield",
-      "version": "0.9.0",
+      "registryType": "oci",
+      "identifier": "ghcr.io/aperionai/shield:shield-v0.9.1",
+      "version": "0.9.1",
       "transport": {
         "type": "stdio"
       }

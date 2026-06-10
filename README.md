@@ -1666,7 +1666,7 @@ stylesheet at load time.
 ## Links
 
 - Docs: <https://docs.aperion.ai/aperion-shield.html>
-- MCP Registry name: `mcp-name: io.github.aperionai/shield`
+- MCP Registry name: `mcp-name: io.github.AperionAI/shield`
 
 ## License
 
