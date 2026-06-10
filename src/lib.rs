@@ -31,6 +31,8 @@ pub mod orgmode;
 pub mod predicates;
 pub mod shims;
 pub mod suggest;
+pub mod supply;
+pub mod transport;
 
 pub use burst::BurstDetector;
 pub use context::WorkspaceContext;

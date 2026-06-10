@@ -221,7 +221,39 @@ pub struct Policy {
     pub burst_detector: BurstDetectorCfg,
     #[serde(default)]
     pub composite_scoring: CompositeScoringCfg,
+    #[serde(default)]
+    pub supply_chain: SupplyChainCfg,
 }
+
+/// v0.9 MCP supply-chain protection. Controls TOFU pinning of the
+/// upstream's tool catalog and what happens when a pinned tool's
+/// definition changes underneath the user (a "rug pull").
+#[derive(Debug, Deserialize, Clone)]
+pub struct SupplyChainCfg {
+    /// Master switch for catalog pinning. When false, `tools/list`
+    /// results pass through unpinned (description-scan rules still run).
+    #[serde(default = "default_true")]
+    pub pinning: bool,
+    /// Action when a pinned tool's (description, schema) hash changes:
+    /// `block` (default) | `warn` | `allow`.
+    #[serde(default = "default_on_changed")]
+    pub on_changed_tool: String,
+    /// Action when a server adds a tool after first pin: `warn`
+    /// (default, and the tool is pinned) | `block` | `allow`.
+    #[serde(default = "default_on_new")]
+    pub on_new_tool: String,
+}
+impl Default for SupplyChainCfg {
+    fn default() -> Self {
+        Self {
+            pinning: true,
+            on_changed_tool: default_on_changed(),
+            on_new_tool: default_on_new(),
+        }
+    }
+}
+fn default_on_changed() -> String { "block".into() }
+fn default_on_new() -> String { "warn".into() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorkspaceProbeCfg {
@@ -378,7 +410,18 @@ pub struct YamlMatch {
 // ─────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope { ToolCall, LlmResponse }
+pub enum Scope {
+    ToolCall,
+    LlmResponse,
+    /// v0.9: matches against tool descriptions in a `tools/list` result
+    /// (the MCP supply-chain seam -- catches tool-poisoning, where a
+    /// malicious server hides instructions for the model inside a tool's
+    /// description text).
+    ToolDescription,
+    /// v0.9: matches against the text content of a `tools/call` result
+    /// (catches prompt-injection payloads coming back from the tool).
+    ToolResult,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum SqlPredicate { UnscopedUpdate, UnscopedDelete }
@@ -489,6 +532,13 @@ impl CompiledRule {
         }
         false
     }
+
+    /// The rule's `tool:` whitelist, if any. Used by the scoped-text
+    /// evaluator so `tool_description` / `tool_result` rules can target
+    /// specific tools.
+    pub fn tool_whitelist(&self) -> Option<&HashSet<String>> {
+        self.matcher.as_ref().and_then(|m| m.tool_whitelist.as_ref())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -536,6 +586,8 @@ impl Engine {
             let scope = match y.where_.as_str() {
                 "tool_call" => Scope::ToolCall,
                 "llm_response" => Scope::LlmResponse,
+                "tool_description" => Scope::ToolDescription,
+                "tool_result" => Scope::ToolResult,
                 other => anyhow::bail!("rule '{}' has unknown where '{}'", y.id, other),
             };
             let matcher = if let Some(m) = y.r#match {
@@ -619,9 +671,28 @@ impl Engine {
 
     /// Evaluate an LLM response body.
     pub fn evaluate_text(&self, text: &str, adj: Adjustments) -> Evaluation {
+        self.evaluate_scoped_text(Scope::LlmResponse, None, text, adj)
+    }
+
+    /// Evaluate free text against the rules of one scope. `tool` is the
+    /// tool the text belongs to (the described tool for
+    /// `Scope::ToolDescription`, the called tool for `Scope::ToolResult`);
+    /// rules with a `tool:` whitelist only fire when it matches.
+    pub fn evaluate_scoped_text(
+        &self,
+        scope: Scope,
+        tool: Option<&str>,
+        text: &str,
+        adj: Adjustments,
+    ) -> Evaluation {
         let mut matches = Vec::new();
         let mut composite_points = 0u32;
-        for r in self.rules.iter().filter(|r| r.scope == Scope::LlmResponse) {
+        for r in self.rules.iter().filter(|r| r.scope == scope) {
+            if let (Some(t), Some(allow)) = (tool, r.tool_whitelist()) {
+                if !allow.contains(t) {
+                    continue;
+                }
+            }
             if r.matches_text(text) {
                 composite_points = composite_points.saturating_add(r.points);
                 matches.push(MatchInfo {

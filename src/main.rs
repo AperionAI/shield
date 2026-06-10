@@ -35,12 +35,11 @@ use anyhow::{anyhow, Context};
 use clap::Parser;
 use log::{debug, error, info, warn};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
@@ -49,10 +48,13 @@ use aperion_shield::{
     Engine, IdMeProvider, IdentityConfig, IdentityGate, IdentityProvider, MockProvider, Outcome,
     ProviderKind, WorkspaceContext,
 };
+use aperion_shield::engine::{Scope, Severity};
 use aperion_shield::orgmode::{
     smartflow_provider::ResolveOutcome, AuditEvent, AuditSink, EnrolledHandles, OrgApi, OrgState,
     SmartflowProvider,
 };
+use aperion_shield::supply;
+use aperion_shield::transport;
 
 /// Aperion Shield -- local MCP guardrail.
 ///
@@ -548,6 +550,48 @@ struct Cli {
     #[arg(long, value_name = "EMAIL", requires = "enroll")]
     enroll_email: Option<String>,
 
+    // ── Transports (v0.9+) ────────────────────────────────────────
+    //
+    // Until v0.8 Shield spoke stdio on both sides. v0.9 adds the MCP
+    // Streamable HTTP transport on either seam: `--upstream-url` points
+    // Shield at a REMOTE MCP server (closing the hosted-server bypass),
+    // and `--http-listen` makes Shield itself listen as a Streamable
+    // HTTP server for hosts that don't speak stdio.
+
+    /// Connect to a remote MCP server over Streamable HTTP (JSON-RPC
+    /// over POST + SSE response streams) instead of spawning a local
+    /// stdio child. Example:
+    /// `aperion-shield --upstream-url https://mcp.example.com/mcp`
+    #[arg(long, value_name = "URL", conflicts_with = "check")]
+    upstream_url: Option<String>,
+
+    /// Extra request header for `--upstream-url`, as 'Name: value'.
+    /// Repeatable. Typically `--upstream-header 'Authorization: Bearer ...'`.
+    #[arg(long, value_name = "HEADER", requires = "upstream_url")]
+    upstream_header: Vec<String>,
+
+    /// Listen as a Streamable HTTP MCP server on this address (e.g.
+    /// `127.0.0.1:8848`) instead of speaking stdio to the IDE. POST
+    /// JSON-RPC to it; GET with `Accept: text/event-stream` opens the
+    /// server-initiated stream.
+    #[arg(long, value_name = "ADDR")]
+    http_listen: Option<std::net::SocketAddr>,
+
+    // ── MCP supply-chain protection (v0.9+) ───────────────────────
+
+    /// Disable TOFU tool-catalog pinning (`policy.supply_chain.pinning`
+    /// stays authoritative when this flag is absent). Description /
+    /// result scanning rules still run.
+    #[arg(long)]
+    no_pin: bool,
+
+    /// Clear the stored tool-catalog pins for this upstream before
+    /// starting, then re-pin from its next `tools/list`. Run once after
+    /// a human has reviewed a legitimate tool change that Shield
+    /// flagged as a rug pull.
+    #[arg(long)]
+    repin: bool,
+
     /// Trailing args after `--` are the upstream MCP server command.
     /// Example: `aperion-shield -- npx @modelcontextprotocol/server-postgres ...`
     #[arg(trailing_var_arg = true, num_args = 0..)]
@@ -579,6 +623,31 @@ struct Shield {
     /// Smartflow-mediated identity provider. Built once at startup
     /// when org-mode is active; cheap to clone.
     smartflow_identity: Option<Arc<SmartflowProvider>>,
+    /// v0.9 supply-chain state: pin key, quarantine set, and the
+    /// request-id bookkeeping that lets the response pump know which
+    /// upstream frames are `tools/list` / `tools/call` results.
+    supply: SupplyState,
+}
+
+/// What a forwarded request id corresponds to, so the response pump can
+/// dissect the matching result frame.
+#[derive(Debug, Clone)]
+enum PendingKind {
+    ToolsList,
+    ToolCall { tool: String },
+}
+
+struct SupplyState {
+    /// Pin key + log label for the upstream (command line or URL).
+    upstream_label: String,
+    /// Effective pinning switch: CLI `--no-pin` AND policy combined.
+    pinning: bool,
+    /// Forwarded request ids we want to intercept the responses of.
+    pending: Mutex<HashMap<String, PendingKind>>,
+    /// Tools flagged as rug-pulled / poisoned. `tools/call` against a
+    /// quarantined tool is blocked at the request seam, so a host that
+    /// cached the old catalog still can't reach the swapped tool.
+    quarantined: Mutex<HashSet<String>>,
 }
 
 impl Shield {
@@ -689,10 +758,17 @@ async fn main() -> anyhow::Result<()> {
         return orgmode::run_disenroll(cli.revoke).await;
     }
 
-    if cli.upstream.is_empty() {
+    if cli.upstream.is_empty() && cli.upstream_url.is_none() {
         return Err(anyhow!(
-            "no upstream MCP server command given. Usage: aperion-shield [--rules PATH] [--shadow] -- <upstream-mcp> [args...]\n\
+            "no upstream MCP server given. Usage:\n  \
+             aperion-shield [--rules PATH] [--shadow] -- <upstream-mcp> [args...]      (stdio upstream)\n  \
+             aperion-shield [--rules PATH] --upstream-url https://host/mcp            (remote Streamable HTTP upstream)\n\
              (For one-shot rule testing without MCP, use `aperion-shield --check`.)"
+        ));
+    }
+    if !cli.upstream.is_empty() && cli.upstream_url.is_some() {
+        return Err(anyhow!(
+            "--upstream-url conflicts with a trailing stdio upstream command -- pick one"
         ));
     }
 
@@ -715,20 +791,24 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Startup banner -- make the adaptive surface visible ────────
     let mode_label = if cli.shadow { "SHADOW (warn only)" } else { "ENFORCE" };
+    let upstream_label_banner = match &cli.upstream_url {
+        Some(url) => url.clone(),
+        None => cli.upstream.join(" "),
+    };
     warn!(
-        "[shield] === aperion-shield v{} starting === mode={} rules={} upstream='{} {}'",
+        "[shield] === aperion-shield v{} starting === mode={} rules={} upstream='{}'",
         env!("CARGO_PKG_VERSION"),
         mode_label,
         engine.rules.len(),
-        cli.upstream[0],
-        cli.upstream[1..].join(" ")
+        upstream_label_banner,
     );
     warn!(
-        "[shield] composite_scoring={} workspace_probe={} decision_memory={} burst_detector={}",
+        "[shield] composite_scoring={} workspace_probe={} decision_memory={} burst_detector={} catalog_pinning={}",
         engine.policy.composite_scoring.enabled,
         engine.policy.workspace_probe.enabled,
         memory.enabled(),
         engine.policy.burst_detector.enabled,
+        engine.policy.supply_chain.pinning && !cli.no_pin,
     );
     if workspace.is_prod {
         warn!(
@@ -792,7 +872,38 @@ async fn main() -> anyhow::Result<()> {
         info!("[shield] running in STANDALONE mode (no orgmode.json)");
     }
 
-    let (mut child, mut child_in, child_out) = spawn_upstream(&cli.upstream)?;
+    // ── Upstream transport (v0.9: stdio child OR remote HTTP) ─────
+    let upstream = match &cli.upstream_url {
+        Some(url) => {
+            let mut headers = Vec::new();
+            for raw in &cli.upstream_header {
+                headers.push(transport::http_upstream::parse_header(raw)?);
+            }
+            warn!("[shield] upstream transport: Streamable HTTP -> {}", url);
+            transport::http_upstream::spawn_http_upstream(url, headers)?
+        }
+        None => transport::spawn_stdio_upstream(&cli.upstream)?,
+    };
+    let upstream_label = upstream.label.clone();
+    let mut child = upstream.child;
+    let to_upstream = upstream.tx;
+    let mut from_upstream = upstream.rx;
+
+    // ── Supply-chain bootstrap ────────────────────────────────────
+    let pinning_enabled = {
+        let policy_pinning = engine_rx.borrow().policy.supply_chain.pinning;
+        policy_pinning && !cli.no_pin
+    };
+    if cli.repin {
+        match supply::clear_pins(&upstream_label) {
+            Ok(true) => warn!(
+                "[shield] --repin: cleared stored tool-catalog pins for this upstream; \
+                 the next tools/list will be re-pinned (TOFU)"
+            ),
+            Ok(false) => info!("[shield] --repin: no pins stored for this upstream"),
+            Err(e) => error!("[shield] --repin failed: {}", e),
+        }
+    }
 
     let shield = Arc::new(Shield {
         engine_rx,
@@ -804,72 +915,103 @@ async fn main() -> anyhow::Result<()> {
         identity_gate,
         orgmode: orgmode_handles,
         smartflow_identity,
+        supply: SupplyState {
+            upstream_label,
+            pinning: pinning_enabled,
+            pending: Mutex::new(HashMap::new()),
+            quarantined: Mutex::new(HashSet::new()),
+        },
     });
 
-    let stdin = tokio::io::stdin();
-    let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+    // ── Downstream: HTTP server or classic stdio ─────────────────
+    if let Some(addr) = cli.http_listen {
+        // HTTP downstream: hyper server feeds requests through the same
+        // gate; the response pump routes intercepted upstream frames to
+        // the waiting POST or the GET SSE broadcast.
+        let http_state = transport::http_server::HttpDownstream::new();
 
-    // Pump 1: client -> child, with rule evaluation.
-    let stdout_clone = stdout.clone();
-    let shield_clone = shield.clone();
-    let to_child_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdin);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => { debug!("[shield] client EOF"); break; }
-                Ok(_) => {}
-                Err(e) => { error!("[shield] client read error: {}", e); break; }
+        let pump_state = http_state.clone();
+        let pump_shield = shield.clone();
+        let from_upstream_handle = tokio::spawn(async move {
+            while let Some(frame) = from_upstream.recv().await {
+                let frame = intercept_upstream_frame(frame, &pump_shield).await;
+                pump_state.route_upstream_frame(frame).await;
             }
-            let frame = line.trim_end();
-            if frame.is_empty() { continue; }
-            debug!("[shield] client -> {}", frame);
+            debug!("[shield] upstream channel closed");
+        });
 
-            let parsed: Option<Value> = serde_json::from_str(frame).ok();
-            if let Some(req) = parsed.as_ref() {
-                if let Some(decision_resp) = evaluate_request(req, &shield_clone).await {
-                    let mut out = stdout_clone.lock().await;
-                    let _ = out.write_all(decision_resp.to_string().as_bytes()).await;
-                    let _ = out.write_all(b"\n").await;
-                    let _ = out.flush().await;
-                    continue;
+        let gate: Arc<dyn transport::http_server::RequestGate> =
+            Arc::new(ShieldGate(shield.clone()));
+        let serve_result =
+            transport::http_server::serve(addr, gate, to_upstream, http_state).await;
+        let _ = from_upstream_handle.await;
+        if let Err(e) = serve_result {
+            error!("[shield] http downstream server error: {}", e);
+        }
+    } else {
+        let stdin = tokio::io::stdin();
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+        // Pump 1: client -> upstream, with rule evaluation.
+        let stdout_clone = stdout.clone();
+        let shield_clone = shield.clone();
+        let to_upstream_handle = tokio::spawn(async move {
+            let mut reader = BufReader::new(stdin);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => { debug!("[shield] client EOF"); break; }
+                    Ok(_) => {}
+                    Err(e) => { error!("[shield] client read error: {}", e); break; }
+                }
+                let frame = line.trim_end();
+                if frame.is_empty() { continue; }
+                debug!("[shield] client -> {}", frame);
+
+                let parsed: Option<Value> = serde_json::from_str(frame).ok();
+                if let Some(req) = parsed.as_ref() {
+                    if let Some(decision_resp) = process_client_frame(req, &shield_clone).await {
+                        let mut out = stdout_clone.lock().await;
+                        let _ = out.write_all(decision_resp.to_string().as_bytes()).await;
+                        let _ = out.write_all(b"\n").await;
+                        let _ = out.flush().await;
+                        continue;
+                    }
+                }
+
+                if to_upstream.send(frame.to_string()).await.is_err() {
+                    error!("[shield] upstream channel closed");
+                    break;
                 }
             }
+        });
 
-            if let Err(e) = child_in.write_all(line.as_bytes()).await {
-                error!("[shield] child stdin write error: {}", e);
-                break;
+        // Pump 2: upstream -> client, with v0.9 supply-chain
+        // interception (tools/list pinning + description scan,
+        // tools/call result scan).
+        let stdout_clone2 = stdout.clone();
+        let shield_clone2 = shield.clone();
+        let from_upstream_handle = tokio::spawn(async move {
+            while let Some(frame) = from_upstream.recv().await {
+                debug!("[shield] upstream -> {}", frame);
+                let frame = intercept_upstream_frame(frame, &shield_clone2).await;
+                let mut out = stdout_clone2.lock().await;
+                if out.write_all(frame.as_bytes()).await.is_err() { break; }
+                if out.write_all(b"\n").await.is_err() { break; }
+                let _ = out.flush().await;
             }
-            let _ = child_in.flush().await;
-        }
-        let _ = child_in.shutdown().await;
-    });
+            debug!("[shield] upstream channel closed");
+        });
 
-    // Pump 2: child -> client (no inspection on this path in the
-    // standalone -- the LLM-response seam is enterprise-only).
-    let stdout_clone2 = stdout.clone();
-    let from_child_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(child_out);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => { debug!("[shield] child EOF"); break; }
-                Ok(_) => {}
-                Err(e) => { error!("[shield] child read error: {}", e); break; }
-            }
-            debug!("[shield] child -> {}", line.trim_end());
-            let mut out = stdout_clone2.lock().await;
-            if out.write_all(line.as_bytes()).await.is_err() { break; }
-            let _ = out.flush().await;
-        }
-    });
+        let _ = to_upstream_handle.await;
+        let _ = from_upstream_handle.await;
+    }
 
-    let _ = to_child_handle.await;
-    let _ = from_child_handle.await;
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    if let Some(child) = child.as_mut() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
 
     // Best-effort: give the org-mode audit sink one last chance to ship
     // any buffered events before the process exits. Capped at 6 s so
@@ -1610,19 +1752,466 @@ fn run_check_cmd(cli: &Cli) -> anyhow::Result<i32> {
     Ok(report.exit_code() as i32)
 }
 
-fn spawn_upstream(cmd: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdout)> {
-    let (program, args) = cmd.split_first().expect("non-empty by caller");
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("failed to spawn upstream '{}'", program))?;
-    let stdin = child.stdin.take().ok_or_else(|| anyhow!("missing child stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("missing child stdout"))?;
-    Ok((child, stdin, stdout))
+/// The single choke point both downstreams (stdio + HTTP) run client
+/// frames through. Wraps [`evaluate_request`] with the v0.9 supply-chain
+/// bookkeeping:
+///
+///   1. `tools/call` against a quarantined (rug-pulled / poisoned) tool
+///      is blocked here, so a host that cached the old catalog still
+///      can't reach the swapped tool.
+///   2. Forwarded `tools/list` and `tools/call` request ids are recorded
+///      so the response pump knows which upstream frames to dissect.
+async fn process_client_frame(req: &Value, shield: &Arc<Shield>) -> Option<Value> {
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+
+    if method == "tools/call" {
+        let tool_name = req
+            .pointer("/params/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if shield.supply.quarantined.lock().await.contains(tool_name) {
+            if shield.shadow {
+                warn!(
+                    "[shield][shadow] would have BLOCKED quarantined tool '{}' (rug-pull / poisoned description)",
+                    tool_name
+                );
+            } else {
+                error!(
+                    "[shield] BLOCK tools/call '{}' -- tool is quarantined (its definition changed \
+                     or its description matched poisoning rules). Review with `aperion-shield --repin` \
+                     after verifying the change is legitimate.",
+                    tool_name
+                );
+                audit_supply_event(
+                    shield,
+                    "quarantine_block",
+                    tool_name,
+                    "supply.quarantined",
+                    "block",
+                    Severity::Critical,
+                    json!({ "tool": tool_name }),
+                )
+                .await;
+                return Some(jsonrpc_error(
+                    id,
+                    -32096,
+                    "shield_supply_chain_blocked",
+                    json!({
+                        "rule_id": "supply.quarantined",
+                        "severity": "critical",
+                        "reason": format!(
+                            "Tool '{}' is quarantined: its pinned definition changed underneath you \
+                             (possible rug pull) or its description matched tool-poisoning rules.",
+                            tool_name
+                        ),
+                        "safer_alternative": "Inspect the server's tools/list diff, then run `aperion-shield --repin` if the change is legitimate.",
+                        "tool": tool_name,
+                    }),
+                ));
+            }
+        }
+    }
+
+    if let Some(resp) = evaluate_request(req, shield).await {
+        return Some(resp);
+    }
+
+    // Frame is being forwarded -- record what its response will be.
+    if !id.is_null() {
+        let kind = match method {
+            "tools/list" => Some(PendingKind::ToolsList),
+            "tools/call" => req
+                .pointer("/params/name")
+                .and_then(|v| v.as_str())
+                .map(|t| PendingKind::ToolCall { tool: t.to_string() }),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            shield
+                .supply
+                .pending
+                .lock()
+                .await
+                .insert(transport::http_server::canonical_id(&id), kind);
+        }
+    }
+    None
+}
+
+/// Adapter letting the HTTP downstream run requests through the same
+/// gate as the stdio pump.
+struct ShieldGate(Arc<Shield>);
+
+#[async_trait::async_trait]
+impl transport::http_server::RequestGate for ShieldGate {
+    async fn intercept(&self, req: &Value) -> Option<Value> {
+        process_client_frame(req, &self.0).await
+    }
+}
+
+/// v0.9 supply-chain seam: inspect upstream -> client frames. Returns
+/// the frame to forward (possibly rewritten). Only responses to
+/// previously-forwarded `tools/list` / `tools/call` requests are
+/// touched; everything else passes through byte-identical.
+async fn intercept_upstream_frame(frame: String, shield: &Arc<Shield>) -> String {
+    let parsed: Value = match serde_json::from_str(&frame) {
+        Ok(v) => v,
+        Err(_) => return frame,
+    };
+    // Responses carry an id and no method.
+    let id = match parsed.get("id") {
+        Some(id) if !id.is_null() && parsed.get("method").is_none() => id.clone(),
+        _ => return frame,
+    };
+    let kind = shield
+        .supply
+        .pending
+        .lock()
+        .await
+        .remove(&transport::http_server::canonical_id(&id));
+    match kind {
+        Some(PendingKind::ToolsList) => inspect_tools_list_response(frame, parsed, shield).await,
+        Some(PendingKind::ToolCall { tool }) => {
+            inspect_tool_call_response(frame, parsed, &tool, shield).await
+        }
+        None => frame,
+    }
+}
+
+/// Inspect a `tools/list` result: scan descriptions against
+/// `where: tool_description` rules, then run TOFU catalog pinning.
+/// Flagged tools are stripped from the list the host sees AND
+/// quarantined so direct calls fail too.
+async fn inspect_tools_list_response(
+    frame: String,
+    mut parsed: Value,
+    shield: &Arc<Shield>,
+) -> String {
+    let result = match parsed.get("result") {
+        Some(r) => r,
+        None => return frame, // error response -- nothing to inspect
+    };
+    let catalog = match supply::extract_catalog(result) {
+        Some(c) => c,
+        None => return frame,
+    };
+
+    let engine = shield.current_engine();
+    let adj = Adjustments {
+        workspace_is_prod: shield.workspace.is_prod,
+        burst_in_progress: shield.burst.in_burst(),
+        ..Default::default()
+    };
+
+    // Tool name -> why it's being stripped.
+    let mut strip: HashMap<String, String> = HashMap::new();
+
+    // 1. Description scanning (tool-poisoning).
+    for tool in &catalog {
+        if tool.description.is_empty() {
+            continue;
+        }
+        let eval = engine.evaluate_scoped_text(
+            Scope::ToolDescription,
+            Some(&tool.name),
+            &tool.description,
+            adj,
+        );
+        if eval.matches.is_empty() {
+            continue;
+        }
+        let decision = decide(&eval);
+        let primary = eval
+            .matches
+            .iter()
+            .max_by(|a, b| a.severity.cmp(&b.severity).then(a.points.cmp(&b.points)))
+            .map(|m| m.rule_id.clone())
+            .unwrap_or_default();
+        audit_supply_event(
+            shield,
+            "tool_description_scan",
+            &tool.name,
+            &primary,
+            decision.label(),
+            eval.final_severity,
+            json!({
+                "matched_rules": eval.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>(),
+            }),
+        )
+        .await;
+        match &decision {
+            d if d.is_blocking() => {
+                error!(
+                    "[shield] TOOL POISONING: description of '{}' matched rule {} ({}) -- {}",
+                    tool.name,
+                    primary,
+                    eval.final_severity.as_str(),
+                    if shield.shadow { "shadow: forwarding anyway" } else { "stripping tool from catalog" }
+                );
+                strip.insert(tool.name.clone(), format!("description matched rule {}", primary));
+            }
+            Decision::Warn { .. } => {
+                warn!(
+                    "[shield] WARN: description of '{}' matched rule {} ({})",
+                    tool.name, primary, eval.final_severity.as_str()
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // 2. TOFU catalog pinning (rug-pull detection).
+    if shield.supply.pinning {
+        let policy = engine.policy.supply_chain.clone();
+        let pin_new = policy.on_new_tool != "block";
+        match supply::check_catalog(&shield.supply.upstream_label, &catalog, pin_new) {
+            Ok(check) => {
+                if check.first_contact {
+                    warn!(
+                        "[shield] first contact with this upstream -- pinned {} tool definition(s) \
+                         to ~/.aperion-shield/pins/ (TOFU)",
+                        catalog.len()
+                    );
+                }
+                for name in check.changed() {
+                    audit_supply_event(
+                        shield,
+                        "rug_pull",
+                        name,
+                        "supply.pin_changed",
+                        &policy.on_changed_tool,
+                        Severity::Critical,
+                        json!({ "action": policy.on_changed_tool }),
+                    )
+                    .await;
+                    match policy.on_changed_tool.as_str() {
+                        "allow" => {}
+                        "warn" => warn!(
+                            "[shield] RUG PULL (warn-only by policy): tool '{}' changed since it was pinned",
+                            name
+                        ),
+                        _ => {
+                            error!(
+                                "[shield] RUG PULL: tool '{}' changed since it was pinned -- {}. \
+                                 Review the change, then `aperion-shield --repin` to accept it.",
+                                name,
+                                if shield.shadow { "shadow: forwarding anyway" } else { "stripping + quarantining" }
+                            );
+                            strip.insert(
+                                name.to_string(),
+                                "pinned definition changed (rug pull)".to_string(),
+                            );
+                        }
+                    }
+                }
+                for name in check.new_tools() {
+                    match policy.on_new_tool.as_str() {
+                        "allow" => {}
+                        "block" => {
+                            error!(
+                                "[shield] NEW TOOL '{}' appeared after first pin -- blocked by \
+                                 policy (supply_chain.on_new_tool: block)",
+                                name
+                            );
+                            strip.insert(name.to_string(), "new tool blocked by policy".to_string());
+                        }
+                        _ => warn!(
+                            "[shield] new tool '{}' appeared after first pin -- pinned and allowed \
+                             (supply_chain.on_new_tool: warn)",
+                            name
+                        ),
+                    }
+                }
+                for name in &check.removed {
+                    info!("[shield] pinned tool '{}' no longer offered by the upstream", name);
+                }
+            }
+            Err(e) => error!("[shield] catalog pin check failed: {}", e),
+        }
+    }
+
+    // Refresh the quarantine set: flagged tools go in, clean tools come
+    // out (covers the post-`--repin` run).
+    {
+        let mut q = shield.supply.quarantined.lock().await;
+        for tool in &catalog {
+            if strip.contains_key(&tool.name) {
+                q.insert(tool.name.clone());
+            } else {
+                q.remove(&tool.name);
+            }
+        }
+    }
+
+    if strip.is_empty() || shield.shadow {
+        return frame;
+    }
+
+    // Rewrite the result: drop the flagged tools.
+    if let Some(tools) = parsed
+        .pointer_mut("/result/tools")
+        .and_then(|t| t.as_array_mut())
+    {
+        tools.retain(|t| {
+            t.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| !strip.contains_key(n))
+                .unwrap_or(true)
+        });
+    }
+    parsed.to_string()
+}
+
+/// Inspect a `tools/call` result: run `where: tool_result` rules over
+/// every text block the tool returned (prompt-injection-via-result
+/// defense). Blocking matches replace the result with a JSON-RPC error.
+async fn inspect_tool_call_response(
+    frame: String,
+    parsed: Value,
+    tool: &str,
+    shield: &Arc<Shield>,
+) -> String {
+    let result = match parsed.get("result") {
+        Some(r) => r,
+        None => return frame,
+    };
+    let texts = supply::extract_result_text(result);
+    if texts.is_empty() {
+        return frame;
+    }
+
+    let engine = shield.current_engine();
+    let adj = Adjustments {
+        workspace_is_prod: shield.workspace.is_prod,
+        burst_in_progress: shield.burst.in_burst(),
+        ..Default::default()
+    };
+
+    let mut worst: Option<(aperion_shield::Evaluation, String)> = None;
+    for text in &texts {
+        let eval = engine.evaluate_scoped_text(Scope::ToolResult, Some(tool), text, adj);
+        if eval.matches.is_empty() {
+            continue;
+        }
+        let replace = match &worst {
+            Some((w, _)) => eval.final_severity > w.final_severity,
+            None => true,
+        };
+        if replace {
+            let snippet: String = text.chars().take(160).collect();
+            worst = Some((eval, snippet));
+        }
+    }
+    let (eval, snippet) = match worst {
+        Some(w) => w,
+        None => return frame,
+    };
+
+    let decision = decide(&eval);
+    let primary = eval
+        .matches
+        .iter()
+        .max_by(|a, b| a.severity.cmp(&b.severity).then(a.points.cmp(&b.points)))
+        .map(|m| m.rule_id.clone())
+        .unwrap_or_default();
+    audit_supply_event(
+        shield,
+        "tool_result_scan",
+        tool,
+        &primary,
+        decision.label(),
+        eval.final_severity,
+        json!({
+            "matched_rules": eval.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>(),
+            "snippet": snippet,
+        }),
+    )
+    .await;
+
+    match decision {
+        d if d.is_blocking() => {
+            if shield.shadow {
+                warn!(
+                    "[shield][shadow] would have BLOCKED result of '{}' -- rule {} ({})",
+                    tool, primary, eval.final_severity.as_str()
+                );
+                return frame;
+            }
+            error!(
+                "[shield] BLOCKED tool result from '{}' -- rule {} ({}): suspected prompt \
+                 injection in returned content",
+                tool, primary, eval.final_severity.as_str()
+            );
+            let id = parsed.get("id").cloned().unwrap_or(Value::Null);
+            jsonrpc_error(
+                id,
+                -32095,
+                "shield_blocked_tool_result",
+                json!({
+                    "rule_id": primary,
+                    "severity": eval.final_severity.as_str(),
+                    "reason": format!(
+                        "The result returned by tool '{}' matched Shield's tool_result rules \
+                         (suspected prompt injection). The content was withheld from the agent.",
+                        tool
+                    ),
+                    "matched_rules": eval.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>(),
+                    "tool": tool,
+                }),
+            )
+            .to_string()
+        }
+        Decision::Warn { .. } => {
+            warn!(
+                "[shield] WARN: result of '{}' matched rule {} ({}) -- forwarded",
+                tool, primary, eval.final_severity.as_str()
+            );
+            frame
+        }
+        _ => frame,
+    }
+}
+
+/// Emit one supply-chain audit event: JSON line to stderr (same
+/// `shield_eval` envelope as the request seam, with
+/// `"source": "supply_chain"`) plus the org-mode sink when enrolled.
+async fn audit_supply_event(
+    shield: &Arc<Shield>,
+    event: &str,
+    tool: &str,
+    rule_id: &str,
+    decision: &str,
+    severity: Severity,
+    extra: Value,
+) {
+    let audit = json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": "shield_eval",
+        "source": "supply_chain",
+        "event": event,
+        "tool": tool,
+        "primary_rule_id": rule_id,
+        "decision": decision,
+        "final_severity": severity.as_str(),
+        "detail": extra,
+    });
+    eprintln!("{}", audit);
+    if let Some(handles) = shield.orgmode.as_ref() {
+        handles
+            .audit
+            .record(AuditEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: chrono::Utc::now(),
+                rule_id: rule_id.to_string(),
+                decision: decision.to_string(),
+                severity: severity.as_str().to_string(),
+                tool: tool.to_string(),
+                fingerprint: String::new(),
+                context: audit.clone(),
+            })
+            .await;
+    }
 }
 
 /// Evaluate a JSON-RPC request. Returns `Some(response)` if Shield is

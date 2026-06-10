@@ -1,6 +1,6 @@
 [package]
 name = "aperion-shield"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Aperion Shield -- a local MCP guardrail for AI coding agents with optional biometric identity gates (ID.me). Standalone, free, open source."
 license = "Apache-2.0"
@@ -86,7 +86,11 @@ bytes = "1"
 # don't pick up a system OpenSSL dependency on Linux. v0.6.0 moved
 # reqwest 0.11 -> 0.12, which transitively pulls rustls 0.23 +
 # rustls-webpki >= 0.103.13 and closes RUSTSEC-2026-0098/-0099/-0104.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# Stream combinators for the v0.9 Streamable HTTP transports (SSE
+# parsing on the upstream relay, SSE response bodies on the downstream
+# server). Already in the tree transitively via reqwest/hyper.
+futures-util = { version = "0.3", default-features = false }
 # Atomic write of the proof cache file.
 fs2 = "0.4"
 
