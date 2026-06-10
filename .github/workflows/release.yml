@@ -163,6 +163,13 @@ jobs:
   # ────────────────────────────────────────────────────────────────────
   # 4. Update the Homebrew tap
   # ────────────────────────────────────────────────────────────────────
+  #
+  # We do NOT use `brew bump-formula-pr` / dawidd6/action-homebrew-bump-
+  # formula here: our formula is a multi-platform layout (on_macos /
+  # on_linux with per-arch `url` + `sha256` stanzas, no single top-level
+  # `url`), and `bump-formula-pr` fails on it with "Could not find 'url'
+  # stanza!". Instead we template the whole formula from the release
+  # checksums -- exactly the steps a maintainer ran by hand before this.
   homebrew:
     name: homebrew tap bump
     needs: release
@@ -184,11 +191,96 @@ jobs:
             echo "::notice::HOMEBREW_TAP_TOKEN secret not set -- skipping tap bump."
           fi
 
-      - name: Bump Homebrew formula
+      - name: Check out the Homebrew tap
         if: steps.check.outputs.has_token == 'true'
-        uses: dawidd6/action-homebrew-bump-formula@v3
+        uses: actions/checkout@v4
         with:
+          repository: AperionAI/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          tap:   AperionAI/homebrew-tap
-          formula: aperion-shield
-          tag:     ${{ github.ref_name }}
+          path: tap
+
+      - name: Render & bump aperion-shield formula
+        if: steps.check.outputs.has_token == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#shield-v}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+
+          # Pull the per-target sha256 for one release archive. Homebrew
+          # only needs the macOS + Linux targets.
+          sha_for() {
+            local t="$1"
+            local f="aperion-shield-${TAG}-${t}.tar.gz.sha256"
+            gh release download "${TAG}" -R "${GITHUB_REPOSITORY}" -p "${f}" -O "${f}" >&2
+            cut -d' ' -f1 "${f}"
+          }
+          SHA_MAC_ARM="$(sha_for aarch64-apple-darwin)"
+          SHA_MAC_X86="$(sha_for x86_64-apple-darwin)"
+          SHA_LIN_ARM="$(sha_for aarch64-unknown-linux-gnu)"
+          SHA_LIN_X86="$(sha_for x86_64-unknown-linux-gnu)"
+
+          mkdir -p tap/Formula
+          cat > tap/Formula/aperion-shield.rb <<EOF
+          class AperionShield < Formula
+            desc "Local MCP guardrail for AI coding agents (Cursor, Claude Code, ...)"
+            homepage "https://github.com/AperionAI/shield"
+            version "${VERSION}"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "${BASE}/aperion-shield-${TAG}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_ARM}"
+              end
+              on_intel do
+                url "${BASE}/aperion-shield-${TAG}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_X86}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${BASE}/aperion-shield-${TAG}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LIN_ARM}"
+              end
+              on_intel do
+                url "${BASE}/aperion-shield-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LIN_X86}"
+              end
+            end
+
+            def install
+              bin.install "aperion-shield"
+              (etc/"aperion-shield").install "shield.example.yaml" if File.exist?("shield.example.yaml")
+              doc.install "README.md" if File.exist?("README.md")
+              doc.install "LICENSE" if File.exist?("LICENSE")
+            end
+
+            test do
+              assert_match "Aperion Shield", shell_output("#{bin}/aperion-shield --help 2>&1")
+              assert_match version.to_s, shell_output("#{bin}/aperion-shield --version 2>&1")
+              pipe_output("#{bin}/aperion-shield --check", "", 0)
+            end
+          end
+          EOF
+
+          # Fail loudly if the rendered formula is malformed Ruby.
+          ruby -c tap/Formula/aperion-shield.rb
+
+      - name: Commit & push the bump
+        if: steps.check.outputs.has_token == 'true'
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name  "aperion-release-bot"
+          git config user.email "release-bot@aperion.ai"
+          if git diff --quiet -- Formula/aperion-shield.rb; then
+            echo "::notice::formula already current for ${GITHUB_REF_NAME} -- nothing to push."
+            exit 0
+          fi
+          git add Formula/aperion-shield.rb
+          git commit -m "aperion-shield ${GITHUB_REF_NAME}"
+          git push
