@@ -215,7 +215,7 @@ pub fn wrap_command(cmd: &[String], cfg: &SandboxConfig) -> anyhow::Result<(Vec<
                  strict confinement was requested"
             ),
             _ => {
-                tracing::warn!(
+                log::warn!(
                     "[shield] --sandbox {:?} requested but no sandbox backend \
                      exists on this platform yet -- upstream runs UNCONFINED",
                     cfg.level
