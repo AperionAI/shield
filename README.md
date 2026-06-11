@@ -1375,6 +1375,36 @@ If 60 seconds pass with no decision, the call is denied.
 
 ---
 
+## Rule packs
+
+Beyond the bundled defaults, additional rule packs can be merged at
+startup with `--rules-extra` (repeatable). Packs contribute rules
+only; the `policy:` block of a pack is ignored and duplicate rule ids
+are rejected.
+
+Shield ships one optional pack:
+
+- **ATR community pack**
+  ([`config/shieldset-atr.yaml`](config/shieldset-atr.yaml)) — a
+  curated, machine-translated subset of the MIT-licensed
+  [Agent Threat Rules](https://github.com/Agent-Threat-Rule/agent-threat-rules)
+  corpus: 40 rules / 270 patterns covering tool-output instruction
+  injection, context exfiltration, agent manipulation, privilege
+  escalation, and skill compromise. Selection criteria: regex-only
+  detections that map onto Shield's `tool_result` / `llm_response`
+  scopes, upstream confidence ≥ 75, and zero observed wild
+  false-positive rate. Each rule keeps its upstream ATR id (with
+  OWASP / MITRE ATLAS / NIST AI RMF / EU AI Act mappings documented
+  in the upstream corpus). The upstream true-positive/true-negative
+  corpus (443 cases) runs in our test suite.
+
+```bash
+aperion-shield --rules-extra config/shieldset-atr.yaml -- npx -y @modelcontextprotocol/server-postgres postgres://...
+```
+
+Regenerate the pack from a fresh upstream clone with
+`scripts/atr-import.py`.
+
 ## Custom rules
 
 The full schema lives in

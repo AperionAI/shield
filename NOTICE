@@ -1,0 +1,17 @@
+Aperion Shield
+Copyright 2026 Aperion AI
+
+This product includes a curated, machine-translated subset of the
+Agent Threat Rules (ATR) corpus in `config/shieldset-atr.yaml`:
+
+    Agent Threat Rules
+    https://github.com/Agent-Threat-Rule/agent-threat-rules
+    Copyright ATR Community
+    Licensed under the MIT License
+
+The translation (field-to-scope mapping, regex normalization for the
+Rust `regex` crate, and shieldset packaging) is performed by
+`scripts/atr-import.py`. Upstream rule identifiers are preserved in
+rule ids (`atr.<category>.<number>`) and per-rule comments so findings
+remain traceable to the original corpus, including its OWASP / MITRE
+ATLAS / NIST AI RMF / ISO 42001 / EU AI Act reference mappings.

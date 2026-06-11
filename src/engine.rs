@@ -581,8 +581,30 @@ impl Engine {
     pub fn from_yaml(raw: &str) -> anyhow::Result<Self> {
         let root: Root = serde_yaml::from_str(raw)?;
         let policy = root.shieldset.policy.clone();
-        let mut rules = Vec::with_capacity(root.shieldset.rules.len());
-        for y in root.shieldset.rules {
+        let rules = Self::compile_yaml_rules(root.shieldset.rules)?;
+        Ok(Engine { rules, policy })
+    }
+
+    /// Merge an additional rule pack (e.g. the optional ATR community
+    /// pack) into an already-loaded engine. The pack's `policy:` block,
+    /// if any, is IGNORED -- policy always comes from the primary
+    /// shieldset. Duplicate rule ids across packs are an error: silent
+    /// shadowing would make composite scoring double-count.
+    pub fn extend_from_yaml(&mut self, raw: &str) -> anyhow::Result<()> {
+        let root: Root = serde_yaml::from_str(raw)?;
+        let extra = Self::compile_yaml_rules(root.shieldset.rules)?;
+        for r in &extra {
+            if self.rules.iter().any(|e| e.id == r.id) {
+                anyhow::bail!("rule pack defines duplicate rule id '{}'", r.id);
+            }
+        }
+        self.rules.extend(extra);
+        Ok(())
+    }
+
+    fn compile_yaml_rules(yaml_rules: Vec<YamlRule>) -> anyhow::Result<Vec<CompiledRule>> {
+        let mut rules = Vec::with_capacity(yaml_rules.len());
+        for y in yaml_rules {
             let scope = match y.where_.as_str() {
                 "tool_call" => Scope::ToolCall,
                 "llm_response" => Scope::LlmResponse,
@@ -637,7 +659,7 @@ impl Engine {
                 matcher,
             });
         }
-        Ok(Engine { rules, policy })
+        Ok(rules)
     }
 
     /// Bundled defaults -- the same YAML used by the enterprise build,

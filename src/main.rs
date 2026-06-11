@@ -67,6 +67,13 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     rules: Option<PathBuf>,
 
+    /// Additional rule pack(s) merged on top of the primary shieldset
+    /// (repeatable). Packs contribute rules only -- the `policy:` block
+    /// of a pack is ignored. Duplicate rule ids across packs are an
+    /// error. Example: `--rules-extra config/shieldset-atr.yaml`.
+    #[arg(long = "rules-extra", value_name = "PATH")]
+    rules_extra: Vec<PathBuf>,
+
     /// Run in shadow mode: never block; just warn + log. Mirrors the
     /// enterprise `SHIELD_MODE=shadow` behaviour. Default: enforce.
     #[arg(long)]
@@ -772,7 +779,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    let engine = load_engine(cli.rules.as_deref())?;
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
 
     // ── Adaptive layer initialisation ─────────────────────────────
     let workspace = if cli.no_workspace_probe {
@@ -1028,15 +1035,29 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn load_engine(path: Option<&std::path::Path>) -> anyhow::Result<Engine> {
-    match path {
+/// Load the primary shieldset (custom or bundled default), then merge
+/// any additional rule packs on top. Pack `policy:` blocks are ignored;
+/// duplicate rule ids are an error (see `Engine::extend_from_yaml`).
+fn load_engine_with_packs(
+    path: Option<&std::path::Path>,
+    extra: &[PathBuf],
+) -> anyhow::Result<Engine> {
+    let mut engine = match path {
         Some(p) => {
             let raw = std::fs::read_to_string(p)
                 .with_context(|| format!("reading shieldset from {}", p.display()))?;
-            Engine::from_yaml(&raw)
+            Engine::from_yaml(&raw)?
         }
-        None => Ok(Engine::builtin_default()),
+        None => Engine::builtin_default(),
+    };
+    for p in extra {
+        let raw = std::fs::read_to_string(p)
+            .with_context(|| format!("reading rule pack from {}", p.display()))?;
+        engine
+            .extend_from_yaml(&raw)
+            .with_context(|| format!("merging rule pack {}", p.display()))?;
     }
+    Ok(engine)
 }
 
 /// One-shot batch evaluation. Reads JSON-Lines from stdin, prints one
@@ -1047,7 +1068,7 @@ fn load_engine(path: Option<&std::path::Path>) -> anyhow::Result<Engine> {
 /// red-team exploration -- the same code path the MCP proxy uses, but
 /// without MCP / IDE / upstream-process plumbing.
 async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
-    let engine = load_engine(cli.rules.as_deref())?;
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
 
     let workspace = {
         let mut policy = engine.policy.clone();
@@ -1388,7 +1409,7 @@ fn run_check_staged(cli: &Cli) -> anyhow::Result<i32> {
         .repo
         .clone()
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
-    let engine = load_engine(cli.rules.as_deref())?;
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
     let report = run(&repo, &engine, cli.workspace.as_deref())?;
 
     if report.findings.is_empty() {
@@ -1466,7 +1487,7 @@ fn run_suggest_rules(cli: &Cli) -> anyhow::Result<i32> {
         .audit_log
         .clone()
         .ok_or_else(|| anyhow!("--suggest-rules requires --audit-log PATH"))?;
-    let engine = load_engine(cli.rules.as_deref())?;
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
     let opts = AnalyzeOptions {
         window_days: match cli.suggest_window_days {
             Some(0) => None, // "0 = all" per docstring
@@ -1696,7 +1717,7 @@ fn run_explain(cli: &Cli) -> anyhow::Result<i32> {
     let path_str = input.to_string_lossy().to_string();
     let descriptor = read_descriptor_from(&path_str)?;
 
-    let engine = load_engine(cli.rules.as_deref())?;
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
 
     let mut opts = ExplainOptions::default();
     if cli.explain_force_prod {
@@ -1728,7 +1749,7 @@ fn run_check_cmd(cli: &Cli) -> anyhow::Result<i32> {
         return Ok(3);
     }
 
-    let engine = load_engine(cli.rules.as_deref())?;
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
     let report = run(&engine, &cli.upstream)?;
 
     // Always print the audit JSON line to stderr -- mirrors the shape
