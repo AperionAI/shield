@@ -1,7 +1,7 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-280%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Tests](https://img.shields.io/badge/tests-307%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
 [![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
@@ -18,14 +18,18 @@
 AI coding agent (Cursor, Claude Code, …) and the **real** MCP servers
 your agent talks to (postgres, github, shell, filesystem, …) — local
 stdio servers *and*, since v0.9, remote Streamable HTTP ones. On every
-`tools/call` it evaluates **50+ adaptive safety rules** across eight
-destructive surfaces — SQL, git, filesystem, secrets exfiltration,
-supply-chain RCE, reverse shells, sudo / privilege escalation, cloud
-(AWS/GCP/Azure), Kubernetes, and Docker — and either blocks the call,
-prompts you for approval, or lets it through with a warning banner.
-And since v0.9 it watches the **other direction** too: tool catalogs
-are TOFU-pinned against rug pulls, descriptions are scanned for tool
-poisoning, and tool results are scanned for prompt injection.
+`tools/call` it evaluates **50+ adaptive safety rules** (plus an
+optional 40-rule community pack) across eight destructive surfaces —
+SQL, git, filesystem, secrets exfiltration, supply-chain RCE, reverse
+shells, sudo / privilege escalation, cloud (AWS/GCP/Azure),
+Kubernetes, and Docker — and either blocks the call, prompts you for
+approval, or lets it through with a warning banner. And since v0.9 it
+watches the **other direction** too: tool catalogs are TOFU-pinned
+against rug pulls, descriptions are scanned for tool poisoning, and
+tool results are scanned for prompt injection. v1.0 completes the
+story **before install and below the protocol**: `--scan` audits an
+MCP server before you ever wire it in, and `--sandbox` confines the
+server *process* at the OS level.
 
 Plus, when you need to prove **who** approved a destructive call —
 not just that *someone* did — Shield can gate selected rules behind
@@ -34,6 +38,49 @@ And when you outgrow the single-machine model, the **same binary**
 enrolls into a Smartflow control plane with one command to pull
 org-wide policy, ship audit upstream, and use your existing IdP as
 the relying party — no rewrite, no re-install.
+
+---
+
+## What's new in v1.0
+
+The major release: coverage now spans the **entire lifecycle** of an
+MCP server — install-time audit, runtime enforcement, and OS-level
+process confinement, in one local binary with no cloud dependency.
+
+1. **`--scan` — pre-install audit.** Audit a server *before* it is
+   ever wired into your IDE: `aperion-shield --scan <local-path |
+   github-url | npm-package>`. Three passes: static source
+   signatures (credential reads, env exfiltration, dynamic exec,
+   obfuscation, install hooks), npm registry metadata + OSV.dev known
+   vulnerabilities, and an opt-in **live catalog audit** that launches
+   the server sandboxed, pulls `tools/list`, and runs the
+   tool-poisoning rules over the catalog without it ever reaching an
+   agent. Exit codes 0/1/2 for CI gates. See
+   [Pre-install audit](#pre-install-audit---scan-v10).
+
+2. **`--sandbox` — upstream process confinement.** Shield spawns the
+   upstream server, so it now confines it at the OS level (macOS
+   Seatbelt; no daemon, no privileges): `secrets` denies reads/writes
+   of credential material (~/.ssh, ~/.aws, ~/.gnupg, kube/gcloud/azure
+   configs, …), `strict` adds deny-by-default writes and no network
+   unless granted. Protocol filtering and process confinement become
+   layered defenses. See
+   [Sandboxing the upstream](#sandboxing-the-upstream-v10).
+
+3. **ATR community rule pack.** A curated, machine-translated subset
+   of the MIT-licensed [Agent Threat Rules](https://github.com/Agent-Threat-Rule/agent-threat-rules)
+   corpus ships as an optional pack: 40 rules / 270 patterns, loaded
+   with `--rules-extra config/shieldset-atr.yaml`. All 443 of the
+   upstream corpus's own true-positive/true-negative cases pass
+   through Shield's engine as labelled. Defaults are untouched. See
+   [Rule packs](#rule-packs).
+
+4. **307 tests passing** (was 280 in v0.9) — +27 new: ATR pack
+   parse/merge/policy-isolation plus the 443-case corpus run, live
+   Seatbelt integration tests (real processes under the rendered
+   profiles: ssh-key reads denied, exemptions, write confinement,
+   socket blocking), scan unit + integration tests (malicious fixture
+   verdicts, benign controls, live poisoned-catalog audit).
 
 ---
 
