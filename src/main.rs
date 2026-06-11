@@ -53,6 +53,7 @@ use aperion_shield::orgmode::{
     smartflow_provider::ResolveOutcome, AuditEvent, AuditSink, EnrolledHandles, OrgApi, OrgState,
     SmartflowProvider,
 };
+use aperion_shield::sandbox;
 use aperion_shield::supply;
 use aperion_shield::transport;
 
@@ -73,6 +74,26 @@ struct Cli {
     /// error. Example: `--rules-extra config/shieldset-atr.yaml`.
     #[arg(long = "rules-extra", value_name = "PATH")]
     rules_extra: Vec<PathBuf>,
+
+    /// v1.0: OS-level confinement for the stdio upstream process.
+    /// `off` (default) = no confinement; `secrets` = allow-by-default
+    /// but deny reads/writes of credential material (~/.ssh, ~/.aws,
+    /// ~/.gnupg, kube/gcloud/azure configs, ~/.netrc, Docker creds);
+    /// `strict` = deny-by-default (working dir + system runtime only;
+    /// network needs --sandbox-allow-network). macOS Seatbelt today;
+    /// other platforms warn and run unconfined (strict refuses).
+    #[arg(long, value_name = "LEVEL", default_value = "off")]
+    sandbox: String,
+
+    /// Exempt a path from the sandbox denials (repeatable). In
+    /// `secrets` mode this re-allows e.g. ~/.ssh for a git MCP server
+    /// you trust; in `strict` mode it grants read+write on the path.
+    #[arg(long = "sandbox-allow", value_name = "PATH")]
+    sandbox_allow: Vec<PathBuf>,
+
+    /// `strict` sandbox only: allow the upstream network access.
+    #[arg(long)]
+    sandbox_allow_network: bool,
 
     /// Run in shadow mode: never block; just warn + log. Mirrors the
     /// enterprise `SHIELD_MODE=shadow` behaviour. Default: enforce.
@@ -889,7 +910,23 @@ async fn main() -> anyhow::Result<()> {
             warn!("[shield] upstream transport: Streamable HTTP -> {}", url);
             transport::http_upstream::spawn_http_upstream(url, headers)?
         }
-        None => transport::spawn_stdio_upstream(&cli.upstream)?,
+        None => {
+            // v1.0: wrap the upstream in OS-level confinement when
+            // requested. HTTP upstreams are remote processes -- there
+            // is nothing local to confine, so this only applies to
+            // the stdio child path.
+            let sandbox_cfg = sandbox::SandboxConfig {
+                level: sandbox::SandboxLevel::parse(&cli.sandbox)?,
+                allow_paths: cli.sandbox_allow.clone(),
+                allow_network: cli.sandbox_allow_network,
+                home: None,
+            };
+            let (wrapped, confinement) = sandbox::wrap_command(&cli.upstream, &sandbox_cfg)?;
+            if confinement != sandbox::Confinement::None {
+                warn!("[shield] upstream confinement: {}", confinement);
+            }
+            transport::spawn_stdio_upstream(&wrapped)?
+        }
     };
     let upstream_label = upstream.label.clone();
     let mut child = upstream.child;

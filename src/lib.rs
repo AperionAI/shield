@@ -29,6 +29,7 @@ pub mod identity;
 pub mod memory;
 pub mod orgmode;
 pub mod predicates;
+pub mod sandbox;
 pub mod shims;
 pub mod suggest;
 pub mod supply;

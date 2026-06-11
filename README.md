@@ -1375,6 +1375,39 @@ If 60 seconds pass with no decision, the call is denied.
 
 ---
 
+## Sandboxing the upstream (v1.0)
+
+Shield spawns the upstream MCP server, which makes it the natural
+place to confine that process at the OS level. Protocol filtering and
+process confinement are layered defenses: the rule engine stops
+malicious *messages*, the sandbox limits what the server *process*
+can touch outside the MCP channel entirely.
+
+```bash
+# deny the upstream access to credential material (~/.ssh, ~/.aws,
+# ~/.gnupg, kube/gcloud/azure configs, ~/.netrc, Docker creds):
+aperion-shield --sandbox secrets -- npx -y some-mcp-server
+
+# everything `secrets` does, plus: writes only inside the working
+# directory and /tmp, and no network unless explicitly granted:
+aperion-shield --sandbox strict --sandbox-allow-network -- npx -y some-mcp-server
+
+# a git MCP server you trust legitimately needs ~/.ssh -- exempt it:
+aperion-shield --sandbox secrets --sandbox-allow ~/.ssh -- npx -y git-mcp-server
+```
+
+Levels: `off` (default) | `secrets` | `strict`. Backend: macOS
+Seatbelt (`sandbox-exec`) today — no daemon, no privileges, nothing to
+install. Linux (Landlock/seccomp) is on the roadmap; on platforms
+without a backend, `secrets` warns loudly and runs unconfined, while
+`strict` refuses to start rather than silently lie about confinement.
+Only applies to stdio upstreams — an HTTP upstream is a remote
+process with nothing local to confine.
+
+The integration tests run real processes under the rendered profiles
+and assert ssh-key reads fail, exemptions work, stray writes fail,
+and sockets are blocked until granted.
+
 ## Rule packs
 
 Beyond the bundled defaults, additional rule packs can be merged at
