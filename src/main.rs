@@ -95,6 +95,40 @@ struct Cli {
     #[arg(long)]
     sandbox_allow_network: bool,
 
+    // ── Pre-install audit (v1.0) ──────────────────────────────────
+    //
+    // `--scan` audits an MCP server BEFORE it is wired into the IDE:
+    // (a) static source signatures (exfil, dynamic exec, obfuscation),
+    // (b) npm registry metadata + OSV.dev known vulns, (c) optional
+    // live catalog audit -- append `-- <cmd...>` and the server is
+    // launched (under `--sandbox`, if set), sent `tools/list`, and
+    // its catalog is run through the `tool_description` rules without
+    // ever reaching an agent.
+
+    /// Pre-install audit of an MCP server: a local path, a GitHub
+    /// URL, or an npm package name (optionally `npm:` prefixed).
+    /// Exit code: 0 = pass, 1 = caution, 2 = fail.
+    #[arg(
+        long,
+        value_name = "TARGET",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "uninstall_hooks",
+        conflicts_with = "check_staged",
+        conflicts_with = "check_pushed_refs",
+        conflicts_with = "suggest_rules"
+    )]
+    scan: Option<String>,
+
+    /// Output format for `--scan`. Default: text.
+    #[arg(long, value_name = "FMT", value_parser = ["text", "json"], requires = "scan")]
+    scan_format: Option<String>,
+
+    /// Skip the network passes of `--scan` (registry metadata, OSV).
+    #[arg(long, requires = "scan")]
+    scan_offline: bool,
+
     /// Run in shadow mode: never block; just warn + log. Mirrors the
     /// enterprise `SHIELD_MODE=shadow` behaviour. Default: enforce.
     #[arg(long)]
@@ -741,6 +775,12 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
 
+    // ── Pre-install audit (v1.0) ──────────────────────────────────
+    if cli.scan.is_some() {
+        let exit_code = run_scan_mode(&cli).await?;
+        std::process::exit(exit_code);
+    }
+
     // ── Shell-shim modes (v0.8+) ──────────────────────────────────
     if cli.install_shims {
         let exit_code = run_install_shims(&cli)?;
@@ -1095,6 +1135,44 @@ fn load_engine_with_packs(
             .with_context(|| format!("merging rule pack {}", p.display()))?;
     }
     Ok(engine)
+}
+
+/// Pre-install audit (`--scan`, v1.0). Static signatures + registry
+/// metadata + optional live catalog audit. The launch command (the
+/// trailing `-- <cmd...>` args) is sandbox-wrapped with the same
+/// `--sandbox` machinery the proxy uses, so even the audit launch of
+/// an untrusted server can be confined.
+async fn run_scan_mode(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::scan::{run_scan, ScanOptions};
+
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
+    let launch = if cli.upstream.is_empty() {
+        Vec::new()
+    } else {
+        let sandbox_cfg = sandbox::SandboxConfig {
+            level: sandbox::SandboxLevel::parse(&cli.sandbox)?,
+            allow_paths: cli.sandbox_allow.clone(),
+            allow_network: cli.sandbox_allow_network,
+            home: None,
+        };
+        let (wrapped, confinement) = sandbox::wrap_command(&cli.upstream, &sandbox_cfg)?;
+        if confinement != sandbox::Confinement::None {
+            warn!("[shield] scan launch confinement: {}", confinement);
+        }
+        wrapped
+    };
+
+    let opts = ScanOptions {
+        target: cli.scan.clone().expect("checked by caller"),
+        launch,
+        offline: cli.scan_offline,
+    };
+    let report = run_scan(&opts, &engine).await?;
+    match cli.scan_format.as_deref() {
+        Some("json") => println!("{}", serde_json::to_string_pretty(&report)?),
+        _ => print!("{}", report.render_text()),
+    }
+    Ok(report.exit_code())
 }
 
 /// One-shot batch evaluation. Reads JSON-Lines from stdin, prints one

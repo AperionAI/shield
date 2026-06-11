@@ -46,6 +46,7 @@ log = "0.4"
 env_logger = "0.11"
 # Error handling.
 anyhow = "1"
+tempfile = "3"
 thiserror = "1"
 # UUIDs for ticket ids.
 uuid = { version = "1", features = ["v4"] }

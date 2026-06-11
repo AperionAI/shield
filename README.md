@@ -1375,6 +1375,47 @@ If 60 seconds pass with no decision, the call is denied.
 
 ---
 
+## Pre-install audit: `--scan` (v1.0)
+
+Audit an MCP server BEFORE it is ever wired into your IDE. Scan
+complements runtime enforcement: it catches a bad server at install
+time, TOFU pinning catches the rug pull three weeks later, and the
+engine blocks whatever slips through at call time.
+
+```bash
+# a local checkout, a GitHub URL, or an npm package name:
+aperion-shield --scan ./some-mcp-server
+aperion-shield --scan https://github.com/owner/mcp-server
+aperion-shield --scan npm:some-mcp-package
+
+# add `-- <cmd...>` to also run the LIVE catalog audit: the server is
+# launched (under --sandbox if set), sent tools/list, and its catalog
+# is run through the tool_description rules -- without the catalog
+# ever reaching an agent:
+aperion-shield --scan ./srv --sandbox secrets -- node ./srv/index.js
+
+# machine-readable output:
+aperion-shield --scan npm:some-mcp-package --scan-format json
+```
+
+Three passes:
+
+1. **Static source signatures** — credential reads (`~/.ssh`, cloud
+   creds, browser stores), environment exfiltration, dynamic
+   execution (`eval`, `child_process`, computed `require`),
+   obfuscation (runtime base64/hex decode, charcode assembly),
+   npm install-time hooks. Fetching never executes anything:
+   `npm pack` for packages, shallow clone for GitHub.
+2. **Supply-chain metadata** (npm targets) — package age, maintainer
+   count, weekly downloads, and known vulnerabilities from OSV.dev.
+   Skipped with `--scan-offline`.
+3. **Live catalog audit** (opt-in via trailing `-- <cmd...>`) — the
+   same tool-poisoning rules the proxy enforces at runtime, applied
+   point-in-time, with the launch confined by `--sandbox`.
+
+Exit codes: `0` pass, `1` caution (Medium findings), `2` fail
+(High/Critical findings) — CI-friendly.
+
 ## Sandboxing the upstream (v1.0)
 
 Shield spawns the upstream MCP server, which makes it the natural
