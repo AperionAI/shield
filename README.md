@@ -1818,6 +1818,7 @@ stylesheet at load time.
 
 - Docs: <https://docs.aperion.ai/aperion-shield.html>
 - MCP Registry name: `mcp-name: io.github.AperionAI/shield`
+- Langflow integration: <https://github.com/AperionAI/shield-langflow> — drop-in Langflow component that runs your agent's MCP tool calls through Shield, with a live allowed/blocked readout on the canvas.
 
 ## License
 
