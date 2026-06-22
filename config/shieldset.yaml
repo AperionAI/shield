@@ -556,6 +556,241 @@ shieldset:
       safer_alternative: "Stop the container first; rm without `-v`; remove volumes by name only when you're sure."
 
     # ═════════════════════════════════════════════════════════════════
+    # v1.1 -- IAM / privilege escalation
+    # ═════════════════════════════════════════════════════════════════
+    - id: iam.cloud_grant_admin
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli, gcloud.run, az.run]
+        any_param_matches:
+          - '(?i)\baws\s+iam\s+attach-(user|role|group)-policy\b.*AdministratorAccess'
+          - '(?i)\baws\s+iam\s+put-(user|role|group)-policy\b.*"Action"\s*:\s*"\*"'
+          - '(?i)\bgcloud\s+\S+\s+add-iam-policy-binding\b.*roles/(owner|editor)\b'
+      reason: "Granting cloud admin/owner privileges to a principal -- privilege escalation."
+      safer_alternative: "Grant the minimum specific role needed, scoped to one resource, and have a second human review IAM changes."
+
+    - id: iam.create_credentials_for_principal
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli]
+        any_param_matches:
+          - '(?i)\baws\s+iam\s+(create-access-key|create-login-profile|update-login-profile)\b'
+      reason: "Minting new credentials or console logins for an IAM principal -- common persistence/escalation step."
+      safer_alternative: "Use short-lived credentials (aws sts assume-role) and rotate them; avoid creating long-lived access keys."
+
+    - id: iam.add_authorized_ssh_key
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(>>?\s*|tee\s+(-a\s+)?)\S*\.ssh/authorized_keys'
+      reason: "Writing to ~/.ssh/authorized_keys installs a persistent login key -- backdoor pattern."
+      safer_alternative: "Manage authorized keys through your provisioning system or a reviewed `ssh-copy-id`, not an inline append."
+
+    - id: iam.grant_local_sudo
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\busermod\s+.*-a?G\s+\S*(sudo|wheel|admin)\b'
+          - '\bgpasswd\s+-a\s+\S+\s+(sudo|wheel)\b'
+          - '(>>?\s*|tee\s+(-a\s+)?)\S*/etc/sudoers'
+      reason: "Granting a user admin/sudo rights -- privilege escalation."
+      safer_alternative: "Add a narrow, reviewed sudoers entry for the specific command needed, not blanket sudo-group membership."
+
+    # ═════════════════════════════════════════════════════════════════
+    # v1.1 -- Anti-forensics / log + audit tampering
+    # ═════════════════════════════════════════════════════════════════
+    - id: audit.disable_cloud_audit_log
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli, gcloud.run, az.run]
+        any_param_matches:
+          - '(?i)\baws\s+cloudtrail\s+(stop-logging|delete-trail)\b'
+          - '(?i)\baws\s+configservice\s+(stop-configuration-recorder|delete-configuration-recorder)\b'
+          - '(?i)\bgcloud\s+logging\s+sinks\s+delete\b'
+      reason: "Disabling or deleting the cloud audit trail -- anti-forensics."
+      safer_alternative: "Never disable audit logging from an automated session. Change a trail manually with a change record and a second approver."
+
+    - id: audit.clear_system_logs
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\brm\s+-[rfRF]+\s+/var/log\b'
+          - '\btruncate\s+-s\s*0\s+/var/log'
+          - '(^|[\s;&|])>\s*/var/log/'
+          - '\bjournalctl\s+--vacuum'
+          - '(?i)\bwevtutil\s+cl\b'
+      reason: "Clearing or truncating system logs -- destroys the forensic record."
+      safer_alternative: "Rotate logs with logrotate instead of deleting them; ship logs off-box so they cannot be erased locally."
+
+    - id: audit.clear_shell_history
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(?i)\bhistory\s+-c\b'
+          - '(>\s*|tee\s+)\S*\.bash_history'
+          - '\bunset\s+HISTFILE\b'
+          - '\bexport\s+HISTFILE=/dev/null\b'
+      reason: "Wiping shell history -- low-tech anti-forensics, worth recording."
+      safer_alternative: "If you need a clean shell, open a new session rather than erasing the audit trail of the current one."
+
+    # ═════════════════════════════════════════════════════════════════
+    # v1.1 -- Disabling host security controls
+    # ═════════════════════════════════════════════════════════════════
+    - id: security.disable_host_protection
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bsetenforce\s+0\b'
+          - '\bsystemctl\s+(stop|disable|mask)\s+(firewalld|apparmor|auditd)\b'
+          - '\bufw\s+disable\b'
+          - '\biptables\s+-F\b'
+          - '\bcsrutil\s+disable\b'
+          - '\bspctl\s+--master-disable\b'
+      reason: "Disabling a host firewall, MAC layer, or OS integrity protection."
+      safer_alternative: "Add a narrowly scoped allow rule instead of disabling the whole control, and re-enable it immediately after."
+
+    - id: security.disable_endpoint_defense
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '(?i)Set-MpPreference\b.*-DisableRealtimeMonitoring\s+\$true'
+          - '(?i)\bDefender\b.*-DisableRealtimeMonitoring'
+      reason: "Disabling endpoint malware protection (Microsoft Defender real-time monitoring)."
+      safer_alternative: "Add a path exclusion for the specific false positive instead of turning off real-time protection."
+
+    # ═════════════════════════════════════════════════════════════════
+    # v1.1 -- NoSQL / cache / search destructive operations
+    # ═════════════════════════════════════════════════════════════════
+    - id: nosql.mongo_destructive
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, mongodb.query, mongo.command]
+        any_param_matches:
+          - '\.dropDatabase\s*\('
+          - '\.drop\s*\(\s*\)'
+          - '\.deleteMany\s*\(\s*\{\s*\}\s*\)'
+          - '\.remove\s*\(\s*\{\s*\}\s*\)'
+      reason: "Unscoped MongoDB drop/delete -- removes a whole collection or database."
+      safer_alternative: "Scope deleteMany with a filter, or rename/snapshot the collection before dropping it."
+
+    - id: cache.redis_flush
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, redis.command]
+        any_param_matches:
+          - '(?i)\b(FLUSHALL|FLUSHDB)\b'
+      reason: "Redis FLUSHALL/FLUSHDB wipes the entire cache or database."
+      safer_alternative: "Delete specific keys (SCAN + DEL by pattern) instead of flushing everything."
+
+    - id: search.es_delete_index
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(?i)-X\s*DELETE\b[^\n]*/(\*|_all)\b'
+          - '(?i)\bDELETE\b\s+\S*/(\*|_all)(\s|$|"|'')'
+      reason: "Elasticsearch/OpenSearch delete against _all or a wildcard removes every index."
+      safer_alternative: "Target a specific index by name; never DELETE /* or /_all."
+
+    - id: db.drop_keyspace
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [execute_sql, cassandra.query, cql.query]
+        sql_matches:
+          - '(?i)\bDROP\s+KEYSPACE\b'
+      reason: "Dropping a Cassandra/CQL keyspace deletes every table inside it."
+      safer_alternative: "Export or snapshot the keyspace first; drop individual tables after verification."
+
+    # ═════════════════════════════════════════════════════════════════
+    # v1.1 -- Windows / PowerShell destructive
+    # ═════════════════════════════════════════════════════════════════
+    - id: win.recursive_remove_or_format
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '(?i)\bRemove-Item\b[^\n]*-Recurse\b[^\n]*-Force\b'
+          - '(?i)\bFormat-Volume\b'
+          - '(?i)\bcipher\s+/w'
+          - '(?i)\breg\s+delete\b[^\n]*\b(HKLM|HKEY_LOCAL_MACHINE)\b'
+      reason: "Recursive force-delete, volume format, secure-wipe, or registry deletion on Windows."
+      safer_alternative: "Scope Remove-Item to a specific path without -Recurse -Force; back up a registry key before deleting it."
+
+    - id: win.fetch_pipe_iex
+      severity: Critical
+      points: 6
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '(?i)\b(Invoke-WebRequest|iwr|curl|wget|Invoke-RestMethod|irm)\b[^\n]*\|\s*(iex|Invoke-Expression)\b'
+          - '(?i)\b(iex|Invoke-Expression)\s*\(\s*(New-Object\s+Net\.WebClient|Invoke-WebRequest|iwr|irm)\b'
+      reason: "PowerShell download-and-execute (fetch piped to Invoke-Expression) -- the Windows curl|sh."
+      safer_alternative: "Download the script to disk, inspect it or verify a published hash, then run it explicitly."
+
+    # ═════════════════════════════════════════════════════════════════
+    # v1.1 -- CI/CD and package-publish tampering
+    # ═════════════════════════════════════════════════════════════════
+    - id: cicd.set_repo_secret
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, gh.run]
+        any_param_matches:
+          - '(?i)\bgh\s+secret\s+set\b'
+          - '(?i)\bgh\s+variable\s+set\b'
+      reason: "Setting CI/CD repository or org secrets -- recorded for review."
+      safer_alternative: "Set secrets through the provider UI with audit logging, and confirm the value is not being exfiltrated first."
+
+    - id: supply.package_publish
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bnpm\s+publish\b'
+          - '\b(cargo|gem)\s+publish\b'
+          - '\btwine\s+upload\b'
+      reason: "Publishing a package to a public registry -- verify before release."
+      safer_alternative: "Publish from a reviewed CI pipeline with provenance, not ad hoc from an agent session."
+
+    # ═════════════════════════════════════════════════════════════════
     # Anomaly -- burst
     # ═════════════════════════════════════════════════════════════════
     - id: anomaly.destructive_burst

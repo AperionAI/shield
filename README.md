@@ -18,11 +18,14 @@
 AI coding agent (Cursor, Claude Code, …) and the **real** MCP servers
 your agent talks to (postgres, github, shell, filesystem, …) — local
 stdio servers *and*, since v0.9, remote Streamable HTTP ones. On every
-`tools/call` it evaluates **50+ adaptive safety rules** (plus an
-optional 40-rule community pack) across eight destructive surfaces —
+`tools/call` it evaluates **65+ adaptive safety rules** (plus an
+optional 40-rule community pack) across destructive surfaces —
 SQL, git, filesystem, secrets exfiltration, supply-chain RCE, reverse
 shells, sudo / privilege escalation, cloud (AWS/GCP/Azure),
-Kubernetes, and Docker — and either blocks the call, prompts you for
+Kubernetes, Docker, IAM / cloud privilege escalation, anti-forensics
+(audit & log tampering), NoSQL / cache / search (Mongo, Redis,
+Elasticsearch, Cassandra), disabling host security controls, and
+Windows / PowerShell — and either blocks the call, prompts you for
 approval, or lets it through with a warning banner. And since v0.9 it
 watches the **other direction** too: tool catalogs are TOFU-pinned
 against rug pulls, descriptions are scanned for tool poisoning, and
