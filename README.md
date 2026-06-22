@@ -1823,3 +1823,5 @@ stylesheet at load time.
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
+
+<!-- ci: trigger codeql re-run after billing fix (2026-06-22) -->
