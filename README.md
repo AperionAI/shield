@@ -1,7 +1,7 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-307%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Tests](https://img.shields.io/badge/tests-324%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
 [![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
@@ -43,6 +43,44 @@ org-wide policy, ship audit upstream, and use your existing IdP as
 the relying party — no rewrite, no re-install.
 
 ---
+
+## What's new in v1.1
+
+Seventeen new runtime rules, growing the default shieldset from **51 to
+68 rules** across six new destructive surfaces. Every rule ships with an
+integration test and a `safer_alternative`, and all patterns are
+lookahead-free (validated by the same `regex` crate the proxy uses at
+runtime).
+
+1. **IAM / cloud privilege escalation.** `iam.cloud_grant_admin`
+   (granting `AdministratorAccess` / `roles/owner`), credential minting
+   (`create-access-key`, login profiles), `~/.ssh/authorized_keys`
+   backdoors, and local sudo grants (`usermod -aG sudo`, `/etc/sudoers`
+   appends).
+
+2. **Anti-forensics / audit & log tampering.** Disabling or deleting the
+   cloud audit trail (`cloudtrail stop-logging`, config-recorder, GCP log
+   sinks), clearing system logs (`rm -rf /var/log`, `journalctl
+   --vacuum`, `wevtutil cl`), and wiping shell history.
+
+3. **Disabling host security controls.** Firewall / SELinux / SIP /
+   Gatekeeper teardown (`setenforce 0`, `ufw disable`, `iptables -F`,
+   `csrutil disable`, `spctl --master-disable`) and Microsoft Defender
+   real-time monitoring.
+
+4. **NoSQL / cache / search.** Unscoped Mongo `dropDatabase` /
+   `deleteMany({})`, Redis `FLUSHALL`/`FLUSHDB`, Elasticsearch `DELETE
+   /_all`, and Cassandra `DROP KEYSPACE`.
+
+5. **Windows / PowerShell.** Recursive force-delete / `Format-Volume` /
+   `reg delete HKLM`, and `win.fetch_pipe_iex` — the Windows `curl|sh`
+   (fetch piped into `Invoke-Expression`), tier **Critical**.
+
+6. **CI/CD & package publish.** `gh secret set`, and package publishes
+   (`npm publish`, `cargo publish`, `twine upload`).
+
+**324 tests passing** (was 307 in v1.0) — +17 rule integration tests, one
+per new rule.
 
 ## What's new in v1.0
 
