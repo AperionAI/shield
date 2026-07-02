@@ -99,11 +99,12 @@ struct Cli {
     //
     // `--scan` audits an MCP server BEFORE it is wired into the IDE:
     // (a) static source signatures (exfil, dynamic exec, obfuscation),
-    // (b) npm registry metadata + OSV.dev known vulns, (c) optional
-    // live catalog audit -- append `-- <cmd...>` and the server is
-    // launched (under `--sandbox`, if set), sent `tools/list`, and
-    // its catalog is run through the `tool_description` rules without
-    // ever reaching an agent.
+    // (b) typosquat name-similarity against well-known MCP servers
+    // (npm targets, offline-safe), (c) npm registry metadata + OSV.dev
+    // known vulns, (d) optional live catalog audit -- append
+    // `-- <cmd...>` and the server is launched (under `--sandbox`, if
+    // set), sent `tools/list`, and its catalog is run through the
+    // `tool_description` rules without ever reaching an agent.
 
     /// Pre-install audit of an MCP server: a local path, a GitHub
     /// URL, or an npm package name (optionally `npm:` prefixed).
@@ -654,6 +655,18 @@ struct Cli {
     #[arg(long)]
     repin: bool,
 
+    /// v1.1: how often (seconds) to proactively re-fingerprint the
+    /// live upstream catalog while a session is open, so a rug pull
+    /// is caught mid-session instead of only at the next real
+    /// `tools/list`. Requires pinning to be enabled (see `--no-pin`).
+    #[arg(long, default_value_t = 300)]
+    drift_check_interval_secs: u64,
+
+    /// Disable proactive mid-session catalog drift checks. TOFU
+    /// pinning still runs reactively on every real `tools/list`.
+    #[arg(long)]
+    no_drift_check: bool,
+
     /// Trailing args after `--` are the upstream MCP server command.
     /// Example: `aperion-shield -- npx @modelcontextprotocol/server-postgres ...`
     #[arg(trailing_var_arg = true, num_args = 0..)]
@@ -697,6 +710,11 @@ struct Shield {
 enum PendingKind {
     ToolsList,
     ToolCall { tool: String },
+    /// v1.1: a `tools/list` Shield sent itself, on a timer, to catch a
+    /// mid-session rug pull. The response runs through the exact same
+    /// detection + quarantine logic as a real `tools/list`, but is
+    /// never forwarded downstream -- the client never asked for it.
+    DriftCheck,
 }
 
 struct SupplyState {
@@ -710,6 +728,12 @@ struct SupplyState {
     /// quarantined tool is blocked at the request seam, so a host that
     /// cached the old catalog still can't reach the swapped tool.
     quarantined: Mutex<HashSet<String>>,
+    /// v1.1: set once a REAL `tools/list` has been seen (and, if
+    /// pinning is on, the catalog is pinned). The drift-check timer
+    /// waits for this before sending its first synthetic poll, so it
+    /// can never race the client's own first `tools/list` and pin an
+    /// unreviewed catalog first.
+    primed: std::sync::atomic::AtomicBool,
 }
 
 impl Shield {
@@ -1004,8 +1028,59 @@ async fn main() -> anyhow::Result<()> {
             pinning: pinning_enabled,
             pending: Mutex::new(HashMap::new()),
             quarantined: Mutex::new(HashSet::new()),
+            primed: std::sync::atomic::AtomicBool::new(false),
         },
     });
+
+    // ── v1.1: continuous MCP catalog drift monitoring ──────────────
+    // TOFU pinning (v0.9) only re-checks the catalog when a REAL
+    // `tools/list` happens -- in a long-running agent session that can
+    // be hours away. This proactively re-fingerprints the live catalog
+    // on an interval so a rug pull is caught (and the tool quarantined)
+    // mid-session. Gated on `primed` so the timer can never fire before
+    // the client's own first `tools/list` establishes the baseline pin.
+    if pinning_enabled && !cli.no_drift_check && cli.drift_check_interval_secs > 0 {
+        let drift_shield = shield.clone();
+        let drift_to_upstream = to_upstream.clone();
+        let interval = std::time::Duration::from_secs(cli.drift_check_interval_secs);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await; // the first tick fires immediately; skip it
+            loop {
+                ticker.tick().await;
+                if !drift_shield.supply.primed.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue; // no baseline pinned yet -- nothing to diff against
+                }
+                let synthetic_id = Value::String(format!(
+                    "__shield_drift_{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                let key = transport::http_server::canonical_id(&synthetic_id);
+                drift_shield
+                    .supply
+                    .pending
+                    .lock()
+                    .await
+                    .insert(key.clone(), PendingKind::DriftCheck);
+                let req = json!({
+                    "jsonrpc": "2.0", "id": synthetic_id, "method": "tools/list"
+                })
+                .to_string();
+                if drift_to_upstream.send(req).await.is_err() {
+                    debug!("[shield] drift-check: upstream channel closed, stopping");
+                    break;
+                }
+                // Bound the pending entry's lifetime: if the upstream
+                // never answers (hung / wedged), don't leak it forever.
+                let cleanup_shield = drift_shield.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    cleanup_shield.supply.pending.lock().await.remove(&key);
+                });
+            }
+        });
+    }
 
     // ── Downstream: HTTP server or classic stdio ─────────────────
     if let Some(addr) = cli.http_listen {
@@ -1018,7 +1093,9 @@ async fn main() -> anyhow::Result<()> {
         let pump_shield = shield.clone();
         let from_upstream_handle = tokio::spawn(async move {
             while let Some(frame) = from_upstream.recv().await {
-                let frame = intercept_upstream_frame(frame, &pump_shield).await;
+                let Some(frame) = intercept_upstream_frame(frame, &pump_shield).await else {
+                    continue; // swallowed: a v1.1 drift-check response, not for the client
+                };
                 pump_state.route_upstream_frame(frame).await;
             }
             debug!("[shield] upstream channel closed");
@@ -1079,7 +1156,9 @@ async fn main() -> anyhow::Result<()> {
         let from_upstream_handle = tokio::spawn(async move {
             while let Some(frame) = from_upstream.recv().await {
                 debug!("[shield] upstream -> {}", frame);
-                let frame = intercept_upstream_frame(frame, &shield_clone2).await;
+                let Some(frame) = intercept_upstream_frame(frame, &shield_clone2).await else {
+                    continue; // swallowed: a v1.1 drift-check response, not for the client
+                };
                 let mut out = stdout_clone2.lock().await;
                 if out.write_all(frame.as_bytes()).await.is_err() { break; }
                 if out.write_all(b"\n").await.is_err() { break; }
@@ -1987,18 +2066,21 @@ impl transport::http_server::RequestGate for ShieldGate {
 }
 
 /// v0.9 supply-chain seam: inspect upstream -> client frames. Returns
-/// the frame to forward (possibly rewritten). Only responses to
-/// previously-forwarded `tools/list` / `tools/call` requests are
-/// touched; everything else passes through byte-identical.
-async fn intercept_upstream_frame(frame: String, shield: &Arc<Shield>) -> String {
+/// `Some(frame)` to forward (possibly rewritten), or `None` to swallow
+/// the frame entirely -- used for v1.1 drift-check responses, which
+/// the client never asked for and must never see. Only responses to
+/// previously-forwarded `tools/list` / `tools/call` requests (or a
+/// Shield-initiated drift-check poll) are touched; everything else
+/// passes through byte-identical.
+async fn intercept_upstream_frame(frame: String, shield: &Arc<Shield>) -> Option<String> {
     let parsed: Value = match serde_json::from_str(&frame) {
         Ok(v) => v,
-        Err(_) => return frame,
+        Err(_) => return Some(frame),
     };
     // Responses carry an id and no method.
     let id = match parsed.get("id") {
         Some(id) if !id.is_null() && parsed.get("method").is_none() => id.clone(),
-        _ => return frame,
+        _ => return Some(frame),
     };
     let kind = shield
         .supply
@@ -2007,11 +2089,18 @@ async fn intercept_upstream_frame(frame: String, shield: &Arc<Shield>) -> String
         .await
         .remove(&transport::http_server::canonical_id(&id));
     match kind {
-        Some(PendingKind::ToolsList) => inspect_tools_list_response(frame, parsed, shield).await,
+        Some(PendingKind::ToolsList) => Some(inspect_tools_list_response(frame, parsed, shield).await),
         Some(PendingKind::ToolCall { tool }) => {
-            inspect_tool_call_response(frame, parsed, &tool, shield).await
+            Some(inspect_tool_call_response(frame, parsed, &tool, shield).await)
         }
-        None => frame,
+        Some(PendingKind::DriftCheck) => {
+            // Run the exact same detection + quarantine side effects
+            // as a real tools/list; discard the (possibly rewritten)
+            // frame -- there is no client waiting on this id.
+            let _ = inspect_tools_list_response(frame, parsed, shield).await;
+            None
+        }
+        None => Some(frame),
     }
 }
 
@@ -2162,6 +2251,10 @@ async fn inspect_tools_list_response(
                 for name in &check.removed {
                     info!("[shield] pinned tool '{}' no longer offered by the upstream", name);
                 }
+                // A catalog has now been pinned (first contact or not)
+                // -- safe for the v1.1 drift-check timer to start
+                // sending its own proactive tools/list polls.
+                shield.supply.primed.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Err(e) => error!("[shield] catalog pin check failed: {}", e),
         }

@@ -1,7 +1,7 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-324%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Tests](https://img.shields.io/badge/tests-336%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
 [![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
@@ -43,6 +43,35 @@ org-wide policy, ship audit upstream, and use your existing IdP as
 the relying party — no rewrite, no re-install.
 
 ---
+
+## What's new in v1.2
+
+Two additions sourced from a competitive review of Microsoft's
+`agent-governance-toolkit`, both extensions of an existing v1.0/v0.9
+feature rather than new surface area:
+
+1. **Typosquat name-similarity in `--scan`.** A new pass compares the
+   target npm package name against a curated list of well-known MCP
+   servers, flagging separator/case variants that are visually
+   indistinguishable (`mcp_shield` vs. the real `mcp-shield`) and
+   small edit-distance typos (homoglyph-style single-character
+   swaps). Pure string comparison, no network — it's the one `--scan`
+   pass that runs even under `--scan-offline` *and* survives a fetch
+   failure, which matters because a genuinely typosquatted (often
+   unpublished) package name is exactly the case where `npm pack`
+   fails.
+2. **Continuous MCP catalog drift monitoring.** TOFU pinning (v0.9)
+   only re-checks the catalog on the next real `tools/list` — in a
+   long-running agent session that can be hours away. Shield now
+   proactively re-fingerprints the live catalog on a timer
+   (`--drift-check-interval-secs`, default 300s; `--no-drift-check`
+   to disable), using a Shield-initiated request the client never
+   sees, and quarantines a rug-pulled tool the moment it's caught —
+   without waiting for the host to refresh its own catalog.
+
+**336 tests passing** (was 324 in v1.1) — +6 typosquat unit tests, +1
+end-to-end drift-check integration test spawning the real binary
+against a mock MCP server that rug-pulls mid-session.
 
 ## What's new in v1.1
 
@@ -90,13 +119,14 @@ process confinement, in one local binary with no cloud dependency.
 
 1. **`--scan` — pre-install audit.** Audit a server *before* it is
    ever wired into your IDE: `aperion-shield --scan <local-path |
-   github-url | npm-package>`. Three passes: static source
-   signatures (credential reads, env exfiltration, dynamic exec,
-   obfuscation, install hooks), npm registry metadata + OSV.dev known
-   vulnerabilities, and an opt-in **live catalog audit** that launches
-   the server sandboxed, pulls `tools/list`, and runs the
-   tool-poisoning rules over the catalog without it ever reaching an
-   agent. Exit codes 0/1/2 for CI gates. See
+   github-url | npm-package>`. Four passes: static source signatures
+   (credential reads, env exfiltration, dynamic exec, obfuscation,
+   install hooks), typosquat name-similarity against well-known MCP
+   servers, npm registry metadata + OSV.dev known vulnerabilities, and
+   an opt-in **live catalog audit** that launches the server
+   sandboxed, pulls `tools/list`, and runs the tool-poisoning rules
+   over the catalog without it ever reaching an agent. Exit codes
+   0/1/2 for CI gates. See
    [Pre-install audit](#pre-install-audit---scan-v10).
 
 2. **`--sandbox` — upstream process confinement.** Shield spawns the
@@ -168,6 +198,18 @@ protection against the **MCP server attacking the agent**.
      `aperion-shield --repin`. Policy-controlled
      (`policy.supply_chain`: `on_changed_tool`, `on_new_tool`,
      `pinning`), CLI-overridable (`--no-pin`).
+   - **Continuous drift monitoring (v1.2).** Reactive pinning only
+     re-checks the catalog on the *next* real `tools/list` — in a
+     long-running agent session that can be hours away. Shield now
+     proactively re-fingerprints the live catalog on a timer
+     (`--drift-check-interval-secs`, default 300s) using a
+     Shield-initiated `tools/list` the client never sees, running it
+     through the exact same pinning + tool-poisoning checks. A
+     mid-session rug pull gets caught — and the tool quarantined —
+     without waiting for the host to refresh its own catalog. Disable
+     with `--no-drift-check`; it only runs once pinning itself has
+     established a baseline, so it can never race the very first real
+     `tools/list`.
    - **Two new rule scopes.** `where: tool_description` rules scan
      every description in a `tools/list` result for **tool poisoning**
      — hidden instructions aimed at the model ("before using this
@@ -1486,7 +1528,7 @@ aperion-shield --scan ./srv --sandbox secrets -- node ./srv/index.js
 aperion-shield --scan npm:some-mcp-package --scan-format json
 ```
 
-Three passes:
+Four passes:
 
 1. **Static source signatures** — credential reads (`~/.ssh`, cloud
    creds, browser stores), environment exfiltration, dynamic
@@ -1494,10 +1536,16 @@ Three passes:
    obfuscation (runtime base64/hex decode, charcode assembly),
    npm install-time hooks. Fetching never executes anything:
    `npm pack` for packages, shallow clone for GitHub.
-2. **Supply-chain metadata** (npm targets) — package age, maintainer
+2. **Typosquat name-similarity** (npm targets) — compares the target
+   package name against a curated list of well-known MCP servers,
+   flagging separator/case variants (`mcp_shield` vs. the real
+   `mcp-shield` — visually indistinguishable) and small edit-distance
+   typos (homoglyph-style single-character swaps). Pure string
+   comparison, no network — runs even under `--scan-offline`.
+3. **Supply-chain metadata** (npm targets) — package age, maintainer
    count, weekly downloads, and known vulnerabilities from OSV.dev.
    Skipped with `--scan-offline`.
-3. **Live catalog audit** (opt-in via trailing `-- <cmd...>`) — the
+4. **Live catalog audit** (opt-in via trailing `-- <cmd...>`) — the
    same tool-poisoning rules the proxy enforces at runtime, applied
    point-in-time, with the launch confined by `--sandbox`.
 

@@ -6,15 +6,24 @@
 //! three weeks later, and the engine blocks whatever slips through at
 //! call time.
 //!
-//! Three passes:
-//!   (a) static source signatures -- exfiltration (credential reads,
+//! Four passes, run in this order:
+//!   (a) typosquat name-similarity -- compares the target package
+//!       name against a curated seed list of well-known MCP servers,
+//!       flagging separator/case variants (`mcp_shield` vs. the real
+//!       `mcp-shield` -- visually indistinguishable) and small
+//!       edit-distance typos (homoglyph-style single-char swaps).
+//!       Pure string comparison against the name alone -- no fetch,
+//!       no network -- so it runs first, even under `--scan-offline`
+//!       and even if the package can't be fetched; npm targets only
+//!       today;
+//!   (b) static source signatures -- exfiltration (credential reads,
 //!       env harvesting near network calls), dynamic execution
 //!       (eval/exec/child_process), obfuscation (runtime base64/hex
 //!       decoding, charcode assembly);
-//!   (b) supply-chain metadata -- npm registry age / maintainers /
+//!   (c) supply-chain metadata -- npm registry age / maintainers /
 //!       weekly downloads, plus known vulnerabilities from OSV.dev
 //!       (best-effort, skipped when offline);
-//!   (c) live catalog audit -- launch the server (under the v1.0
+//!   (d) live catalog audit -- launch the server (under the v1.0
 //!       sandbox), issue `initialize` + `tools/list`, and run the
 //!       engine's `tool_description` rules against the catalog
 //!       without ever exposing it to an agent.
@@ -71,7 +80,7 @@ impl Target {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
-    pub pass: &'static str, // "static" | "metadata" | "catalog"
+    pub pass: &'static str, // "static" | "typosquat" | "metadata" | "catalog"
     pub id: String,
     pub severity: Severity,
     pub detail: String,
@@ -155,7 +164,7 @@ impl Report {
     }
 }
 
-// ─────────────────────── pass (a): static scan ─────────────────────
+// ─────────────────────── pass (b): static scan ─────────────────────
 
 struct StaticSig {
     id: &'static str,
@@ -295,7 +304,152 @@ pub fn static_scan(root: &Path) -> Vec<Finding> {
     findings
 }
 
-// ───────────────────── pass (b): supply metadata ────────────────────
+// ─────────────────── pass (a): typosquat detection ──────────────────
+
+/// A curated seed list of well-known MCP server package names (npm).
+/// Not meant to be exhaustive or a registry -- the goal is to catch a
+/// typosquat riding on the coattails of a widely-installed server.
+/// Extend as new servers become de-facto standards; low maintenance
+/// cost, no network dependency, no registry API to keep in sync with.
+const KNOWN_MCP_PACKAGES: &[&str] = &[
+    "@modelcontextprotocol/server-filesystem",
+    "@modelcontextprotocol/server-github",
+    "@modelcontextprotocol/server-gitlab",
+    "@modelcontextprotocol/server-git",
+    "@modelcontextprotocol/server-google-maps",
+    "@modelcontextprotocol/server-slack",
+    "@modelcontextprotocol/server-postgres",
+    "@modelcontextprotocol/server-sqlite",
+    "@modelcontextprotocol/server-redis",
+    "@modelcontextprotocol/server-puppeteer",
+    "@modelcontextprotocol/server-brave-search",
+    "@modelcontextprotocol/server-fetch",
+    "@modelcontextprotocol/server-memory",
+    "@modelcontextprotocol/server-sequential-thinking",
+    "@modelcontextprotocol/server-everything",
+    "@modelcontextprotocol/server-everart",
+    "@modelcontextprotocol/server-gdrive",
+    "@modelcontextprotocol/server-time",
+    "@modelcontextprotocol/server-aws-kb-retrieval",
+    "@modelcontextprotocol/inspector",
+    "@modelcontextprotocol/sdk",
+    "@playwright/mcp",
+    "@upstash/context7-mcp",
+    "@notionhq/notion-mcp-server",
+    "@supabase/mcp-server-supabase",
+    "@cloudflare/mcp-server-cloudflare",
+    "@sentry/mcp-server",
+    "@browserbasehq/mcp-server-browserbase",
+    "mcp-server-git",
+    "mcp-shield",
+    "firecrawl-mcp",
+];
+
+/// Lowercase and strip everything but alphanumerics, so `mcp-shield`,
+/// `mcp_shield`, `mcpshield`, and `MCP.Shield` all normalize
+/// identically -- exactly the class of typosquat that's invisible to
+/// a human skimming a package name before installing.
+fn normalize_pkg_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Classic Levenshtein edit distance, O(n*m). Package names are short
+/// (a few dozen chars at most), so this is effectively instant and
+/// doesn't warrant pulling in a crate for it.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (n, m) = (a.len(), b.len());
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut cur = vec![0usize; m + 1];
+    for i in 1..=n {
+        cur[0] = i;
+        for j in 1..=m {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
+/// Pure, local, offline: compares the target package name against the
+/// seed list above. Two distinct signals, reported at different
+/// severities because they mean different things:
+///   - `name_collision` (High): normalized forms are IDENTICAL but the
+///     literal spelling differs (hyphen/underscore/dot/case games) --
+///     e.g. `mcp_shield` vs. the real `mcp-shield`. Visually
+///     indistinguishable in a terminal or package.json diff; the
+///     strongest and least-ambiguous signal this pass produces.
+///   - `similar_name` (Medium): small normalized edit distance (1 for
+///     short names, 2 otherwise) -- catches homoglyph-style
+///     single-character swaps (`0`/`o`, `1`/`l`, `rn`/`m`) and classic
+///     typos, at the cost of being a heuristic rather than a proof.
+///
+/// An exact literal match to a known-good package produces no finding
+/// (it just *is* the real thing).
+pub fn typosquat_scan(pkg: &str) -> Vec<Finding> {
+    let target_norm = normalize_pkg_name(pkg);
+    if target_norm.is_empty() {
+        return Vec::new();
+    }
+
+    let mut best: Option<(&str, usize)> = None;
+    for known in KNOWN_MCP_PACKAGES {
+        if *known == pkg {
+            // It IS the well-known package -- not a typosquat.
+            return Vec::new();
+        }
+        let known_norm = normalize_pkg_name(known);
+        if known_norm == target_norm {
+            return vec![Finding {
+                pass: "typosquat",
+                id: "scan.typo.name_collision".into(),
+                severity: Severity::High,
+                detail: format!(
+                    "'{pkg}' is a separator/case variant of the well-known package '{known}' \
+                     -- visually indistinguishable, classic typosquat pattern"
+                ),
+                location: None,
+            }];
+        }
+        let dist = edit_distance(&target_norm, &known_norm);
+        if best.map(|(_, d)| dist < d).unwrap_or(true) {
+            best = Some((known, dist));
+        }
+    }
+
+    match best {
+        Some((known, dist)) if dist > 0 => {
+            let threshold = if target_norm.len() <= 6 { 1 } else { 2 };
+            if dist <= threshold {
+                return vec![Finding {
+                    pass: "typosquat",
+                    id: "scan.typo.similar_name".into(),
+                    severity: Severity::Medium,
+                    detail: format!(
+                        "'{pkg}' is within edit distance {dist} of well-known package '{known}' \
+                         -- verify this isn't a typosquat before installing"
+                    ),
+                    location: None,
+                }];
+            }
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
+// ───────────────────── pass (c): supply metadata ────────────────────
 
 const YOUNG_PACKAGE_DAYS: i64 = 30;
 const LOW_DOWNLOADS_WEEKLY: u64 = 50;
@@ -420,7 +574,7 @@ fn chrono_lite_days_since(rfc3339: &str) -> Option<i64> {
     Some(now_days - civil(y, m, d))
 }
 
-// ───────────────────── pass (c): catalog audit ──────────────────────
+// ───────────────────── pass (d): catalog audit ──────────────────────
 
 /// Launch the server (caller passes the argv, already sandbox-wrapped
 /// if requested), issue `initialize` + `tools/list`, and run the
@@ -523,7 +677,7 @@ pub async fn catalog_audit(launch: &[String], engine: &Engine) -> anyhow::Result
 
 pub struct ScanOptions {
     pub target: String,
-    /// argv to launch the server for the live catalog pass (pass (c)
+    /// argv to launch the server for the live catalog pass (pass (d)
     /// is skipped when empty). The caller sandbox-wraps it first.
     pub launch: Vec<String>,
     pub offline: bool,
@@ -583,14 +737,36 @@ pub async fn run_scan(opts: &ScanOptions, engine: &Engine) -> anyhow::Result<Rep
         verdict: Verdict::Pass,
     };
 
+    // (a) typosquat name-similarity -- pure string comparison against
+    // the target name alone, no fetch and no network required. Run
+    // this FIRST, before we ever try to pull the package down: a
+    // typosquat is often an unpublished or since-yanked name, and we
+    // don't want a fetch failure to hide the one signal that doesn't
+    // depend on the fetch succeeding.
+    if let Target::Npm(pkg) = &target {
+        report.findings.extend(typosquat_scan(pkg));
+        report.passes_run.push("typosquat");
+    } else {
+        report.passes_skipped.push((
+            "typosquat",
+            "name-similarity check only applies to a registry package name".into(),
+        ));
+    }
+
     let tmp = tempfile::tempdir().context("creating scan workdir")?;
-    let root = fetch_target(&target, tmp.path())?;
 
-    // (a) static
-    report.findings.extend(static_scan(&root));
-    report.passes_run.push("static");
+    // (b) static -- needs the fetched source, so a fetch failure only
+    // takes this pass down, not the whole scan (metadata and catalog
+    // below don't depend on `root` at all).
+    match fetch_target(&target, tmp.path()) {
+        Ok(root) => {
+            report.findings.extend(static_scan(&root));
+            report.passes_run.push("static");
+        }
+        Err(e) => report.passes_skipped.push(("static", format!("{e:#}"))),
+    }
 
-    // (b) metadata
+    // (c) metadata
     if opts.offline {
         report.passes_skipped.push(("metadata", "--scan-offline".into()));
     } else if let Target::Npm(pkg) = &target {
@@ -607,7 +783,7 @@ pub async fn run_scan(opts: &ScanOptions, engine: &Engine) -> anyhow::Result<Rep
             .push(("metadata", "only npm targets have registry metadata today".into()));
     }
 
-    // (c) live catalog
+    // (d) live catalog
     if opts.launch.is_empty() {
         report.passes_skipped.push((
             "catalog",
@@ -694,6 +870,60 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 "#,
         );
         assert!(ids.is_empty(), "{ids:?}");
+    }
+
+    #[test]
+    fn typosquat_flags_separator_collision() {
+        let ids: Vec<String> = typosquat_scan("mcp_shield").into_iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"scan.typo.name_collision".to_string()), "{ids:?}");
+
+        let ids: Vec<String> = typosquat_scan("mcpshield").into_iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"scan.typo.name_collision".to_string()), "{ids:?}");
+
+        let ids: Vec<String> = typosquat_scan("MCP.Shield").into_iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"scan.typo.name_collision".to_string()), "{ids:?}");
+    }
+
+    #[test]
+    fn typosquat_flags_small_edit_distance() {
+        // homoglyph-ish: 'l' -> '1' against the known "mcp-shield".
+        let ids: Vec<String> = typosquat_scan("mcp-shie1d").into_iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"scan.typo.similar_name".to_string()), "{ids:?}");
+
+        // classic typo (dropped letter) against a longer known name.
+        let ids: Vec<String> =
+            typosquat_scan("@modelcontextprotocol/server-githb").into_iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"scan.typo.similar_name".to_string()), "{ids:?}");
+    }
+
+    #[test]
+    fn typosquat_no_finding_on_known_good_package() {
+        let findings = typosquat_scan("@modelcontextprotocol/server-github");
+        assert!(findings.is_empty(), "{findings:?}");
+        let findings = typosquat_scan("mcp-shield");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn typosquat_no_finding_on_unrelated_name() {
+        let findings = typosquat_scan("my-companys-internal-widget-formatter-tool");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn edit_distance_basic_cases() {
+        assert_eq!(edit_distance("", ""), 0);
+        assert_eq!(edit_distance("abc", "abc"), 0);
+        assert_eq!(edit_distance("abc", "abd"), 1);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn normalize_strips_separators_and_case() {
+        assert_eq!(normalize_pkg_name("mcp-shield"), "mcpshield");
+        assert_eq!(normalize_pkg_name("mcp_shield"), "mcpshield");
+        assert_eq!(normalize_pkg_name("MCP.Shield"), "mcpshield");
+        assert_eq!(normalize_pkg_name("@scope/mcp-shield"), "scopemcpshield");
     }
 
     #[test]

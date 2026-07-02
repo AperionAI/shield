@@ -84,8 +84,9 @@ async fn full_scan_offline_verdicts() {
     assert_eq!(report.verdict, Verdict::Fail);
     assert_eq!(report.exit_code(), 2);
     assert!(report.passes_run.contains(&"static"));
-    // metadata + catalog skipped, with reasons
-    assert_eq!(report.passes_skipped.len(), 2);
+    // typosquat (local-path target, not a registry package name) +
+    // metadata + catalog skipped, with reasons.
+    assert_eq!(report.passes_skipped.len(), 3);
 }
 
 #[tokio::test]
