@@ -237,6 +237,140 @@ async fn allowlist_restricts_which_subjects_can_satisfy() {
     assert!(gate.cached_proof_for(&req).is_none());
 }
 
+/// The identity-gated rule templates shipped (commented) in
+/// `config/shieldset.yaml` for IAM changes, production deploys, and
+/// financial transfers. Kept in sync here (uncommented, provider unchanged)
+/// so we prove their regexes compile and they emit `IdentityVerification`
+/// on representative payloads.
+const TEMPLATES_YAML: &str = r#"
+shieldset:
+  version: 2
+  rules:
+    - id: iam.privilege_change_requires_identity
+      severity: Critical
+      points: 5
+      where: tool_call
+      match:
+        tool: ["run_terminal", "shell", "Bash", "terminal", "execute_command", "exec"]
+        any_param_matches:
+          - '(?i)\baws\s+iam\s+(attach|put|create|update|delete)-(user|role|group|policy)'
+          - '(?i)\baws\s+iam\s+(add-user-to|remove-user-from)-group\b'
+          - '(?i)\bgcloud\s+\S+\s+(add|remove)-iam-policy-binding\b'
+          - '(?i)\baz\s+role\s+assignment\s+(create|delete)\b'
+          - '(?i)\bkubectl\s+(create|apply)\b.{0,80}(clusterrolebinding|rolebinding)'
+      identity:
+        provider: id_me
+        scope: iam.privilege_change
+        allowed_subjects: ["*"]
+        max_proof_age_seconds: 300
+        loa: 3
+      reason: "IAM privilege change requires biometric verification."
+    - id: deploy.production_requires_identity
+      severity: Critical
+      points: 5
+      where: tool_call
+      match:
+        tool: ["run_terminal", "shell", "Bash", "terminal", "execute_command", "exec"]
+        any_param_matches:
+          - '(?i)\bkubectl\s+(apply|rollout\s+restart|set\s+image)\b.{0,80}(prod|production)'
+          - '(?i)\bhelm\s+(upgrade|install)\b.{0,80}(prod|production)'
+          - '(?i)\baws\s+(lambda\s+update-function-code|ecs\s+update-service)\b.{0,80}(prod|production)'
+          - '(?i)\b(serverless|sls)\s+deploy\b.{0,80}(prod|production)'
+      identity:
+        provider: id_me
+        scope: deploy.production
+        allowed_subjects: ["*"]
+        max_proof_age_seconds: 600
+        loa: 2
+      reason: "Production deploy requires biometric verification."
+    - id: finance.transfer_requires_identity
+      severity: Critical
+      points: 5
+      where: tool_call
+      match:
+        tool: ["run_terminal", "shell", "Bash", "terminal", "http_request", "execute_command", "exec"]
+        any_param_matches:
+          - '(?i)\b(wire|ach|payout|disbursement)\b.{0,40}\b(transfer|send|initiate|create)\b'
+          - '(?i)/v1/(transfers|payouts)\b'
+          - '(?i)\bstripe\b.{0,40}(transfers|payouts).{0,20}\bcreate\b'
+          - '(?i)\b(eth_sendtransaction|sendtransaction|transferfrom)\b'
+          - '(?i)\b(move|send|wire)\s+funds\b'
+      identity:
+        provider: id_me
+        scope: finance.transfer
+        allowed_subjects: ["*"]
+        max_proof_age_seconds: 120
+        loa: 3
+      reason: "Money movement requires biometric verification."
+"#;
+
+fn assert_identity_gate(command: &str, want_rule: &str, want_scope: &str, want_loa: u8) {
+    let engine = Engine::from_yaml(TEMPLATES_YAML).expect("templates must parse");
+    let params = serde_json::json!({
+        "name": "run_terminal",
+        "arguments": { "command": command }
+    });
+    let eval = engine.evaluate("run_terminal", &params, Adjustments::default());
+    assert!(!eval.matches.is_empty(), "rule should match command: {command}");
+    match decide(&eval) {
+        Decision::IdentityVerification { rule_id, requirement, .. } => {
+            assert_eq!(rule_id, want_rule, "command: {command}");
+            assert_eq!(requirement.provider, "id_me");
+            assert_eq!(requirement.scope, want_scope);
+            assert_eq!(requirement.loa, want_loa);
+        }
+        other => panic!("expected IdentityVerification for {command}, got {}", other.label()),
+    }
+}
+
+#[test]
+fn iam_change_template_gates_on_identity() {
+    assert_identity_gate(
+        "aws iam attach-user-policy --user-name svc --policy-arn arn:aws:iam::aws:policy/AdministratorAccess",
+        "iam.privilege_change_requires_identity",
+        "iam.privilege_change",
+        3,
+    );
+    assert_identity_gate(
+        "gcloud projects add-iam-policy-binding my-proj --member=user:x --role=roles/owner",
+        "iam.privilege_change_requires_identity",
+        "iam.privilege_change",
+        3,
+    );
+}
+
+#[test]
+fn production_deploy_template_gates_on_identity() {
+    assert_identity_gate(
+        "kubectl apply -f deploy.yaml --namespace production",
+        "deploy.production_requires_identity",
+        "deploy.production",
+        2,
+    );
+    assert_identity_gate(
+        "helm upgrade api ./chart --namespace prod",
+        "deploy.production_requires_identity",
+        "deploy.production",
+        2,
+    );
+}
+
+#[test]
+fn financial_transfer_template_gates_on_identity() {
+    assert_identity_gate(
+        "curl -X POST https://api.stripe.com/v1/transfers -d amount=500000 -d currency=usd",
+        "finance.transfer_requires_identity",
+        "finance.transfer",
+        3,
+    );
+    assert_identity_gate(
+        "initiate wire transfer to account 1234",
+        "finance.transfer_requires_identity",
+        "finance.transfer",
+        3,
+    );
+}
+
 #[test]
 fn flush_clears_the_cache() {
     let yaml = r#"

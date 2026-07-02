@@ -1010,3 +1010,65 @@ shieldset:
     #     loa: 2
     #   reason: "`terraform apply` against a production workspace requires biometric verification."
     #   safer_alternative: "Run `terraform plan` first and post the plan output for review."
+
+    # - id: iam.privilege_change_requires_identity
+    #   severity: Critical
+    #   points: 5
+    #   where: tool_call
+    #   match:
+    #     tool: ["run_terminal", "shell", "Bash", "terminal", "execute_command", "exec"]
+    #     any_param_matches:
+    #       - '(?i)\baws\s+iam\s+(attach|put|create|update|delete)-(user|role|group|policy)'
+    #       - '(?i)\baws\s+iam\s+(add-user-to|remove-user-from)-group\b'
+    #       - '(?i)\bgcloud\s+\S+\s+(add|remove)-iam-policy-binding\b'
+    #       - '(?i)\baz\s+role\s+assignment\s+(create|delete)\b'
+    #       - '(?i)\bkubectl\s+(create|apply)\b.{0,80}(clusterrolebinding|rolebinding)'
+    #   identity:
+    #     provider: id_me
+    #     scope: iam.privilege_change
+    #     allowed_subjects: ["[email protected]"]
+    #     max_proof_age_seconds: 300
+    #     loa: 3
+    #   reason: "Changing IAM users, roles, policies, or bindings is privilege escalation and requires an LOA-3 biometric ID.me verification."
+    #   safer_alternative: "Grant the minimum scoped role on a single resource and have a second human review the IAM change in a PR."
+
+    # - id: deploy.production_requires_identity
+    #   severity: Critical
+    #   points: 5
+    #   where: tool_call
+    #   match:
+    #     tool: ["run_terminal", "shell", "Bash", "terminal", "execute_command", "exec"]
+    #     any_param_matches:
+    #       - '(?i)\bkubectl\s+(apply|rollout\s+restart|set\s+image)\b.{0,80}(prod|production)'
+    #       - '(?i)\bhelm\s+(upgrade|install)\b.{0,80}(prod|production)'
+    #       - '(?i)\baws\s+(lambda\s+update-function-code|ecs\s+update-service)\b.{0,80}(prod|production)'
+    #       - '(?i)\b(serverless|sls)\s+deploy\b.{0,80}(prod|production)'
+    #   identity:
+    #     provider: id_me
+    #     scope: deploy.production
+    #     allowed_subjects: ["*"]              # any verified operator on the team
+    #     max_proof_age_seconds: 600
+    #     loa: 2
+    #   reason: "Deploying to a production environment requires biometric ID.me verification of the operator."
+    #   safer_alternative: "Promote through a staging environment first, or deploy via a reviewed CI pipeline rather than an ad-hoc command."
+
+    # - id: finance.transfer_requires_identity
+    #   severity: Critical
+    #   points: 5
+    #   where: tool_call
+    #   match:
+    #     tool: ["run_terminal", "shell", "Bash", "terminal", "http_request", "execute_command", "exec"]
+    #     any_param_matches:
+    #       - '(?i)\b(wire|ach|payout|disbursement)\b.{0,40}\b(transfer|send|initiate|create)\b'
+    #       - '(?i)/v1/(transfers|payouts)\b'                       # Stripe transfers / payouts API
+    #       - '(?i)\bstripe\b.{0,40}(transfers|payouts).{0,20}\bcreate\b'
+    #       - '(?i)\b(eth_sendtransaction|sendtransaction|transferfrom)\b'   # on-chain value transfer
+    #       - '(?i)\b(move|send|wire)\s+funds\b'
+    #   identity:
+    #     provider: id_me
+    #     scope: finance.transfer
+    #     allowed_subjects: ["[email protected]"]
+    #     max_proof_age_seconds: 120
+    #     loa: 3
+    #   reason: "Initiating a money movement (wire, ACH, payout, or on-chain transfer) requires a fresh LOA-3 biometric ID.me verification."
+    #   safer_alternative: "Route the payment through an approval queue with dual control, or stage it as a draft for a second authoriser to release."

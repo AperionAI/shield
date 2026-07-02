@@ -29,18 +29,15 @@
 //! LOA mapping
 //! -----------
 //!
-//! ID.me userinfo returns a verified-method string. We map it to our
-//! LOA tier:
+//! The live ID.me attributes endpoint reports verification under a
+//! `status[]` array, e.g.
+//! `[{"group":"identity","subgroups":["IAL2"],"verified":true},
+//!   {"group":"liveness","subgroups":[],"verified":true}]`.
+//! [`map_loa_from_status`] maps that to our LOA tier (IAL2 + liveness = 3).
 //!
-//! | userinfo `verified` value | LOA |
-//! |---------------------------|-----|
-//! | `false` / missing         | 0   |
-//! | `true`, no biometric      | 1   |
-//! | `true` + `selfie` proof   | 2   |
-//! | `true` + IAL2 attestation | 3   |
-//!
-//! The mapping lives in [`map_loa`] so it's easy to tweak as we learn
-//! more about the partner's claim shape.
+//! Some older configs instead returned flat `verified` /
+//! `verification_method` attributes; [`map_loa`] handles that legacy shape
+//! and is used as a fallback only when `status[]` is empty.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -216,20 +213,28 @@ impl IdentityProvider for IdMeProvider {
             .find(|a| a.handle == "email")
             .and_then(|a| a.value.as_deref())
             .map(str::to_string);
-        let verified = attrs
-            .attributes
-            .iter()
-            .find(|a| a.handle == "verified")
-            .and_then(|a| a.value.as_deref())
-            .map(|s| s.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let method = attrs
-            .attributes
-            .iter()
-            .find(|a| a.handle == "verification_method")
-            .and_then(|a| a.value.as_deref())
-            .unwrap_or("");
-        let loa = map_loa(verified, method);
+        // ID.me returns verification results under `status[]` (group =
+        // "identity" / "liveness", with subgroups like ["IAL2"]). Some older
+        // configs instead surfaced flat `verified` / `verification_method`
+        // attributes. Support both, preferring `status[]` when present.
+        let loa = if !attrs.status.is_empty() {
+            map_loa_from_status(&attrs.status)
+        } else {
+            let verified = attrs
+                .attributes
+                .iter()
+                .find(|a| a.handle == "verified")
+                .and_then(|a| a.value.as_deref())
+                .map(|s| s.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let method = attrs
+                .attributes
+                .iter()
+                .find(|a| a.handle == "verification_method")
+                .and_then(|a| a.value.as_deref())
+                .unwrap_or("");
+            map_loa(verified, method)
+        };
 
         let raw = serde_json::to_value(&attrs).unwrap_or(serde_json::Value::Null);
 
@@ -258,6 +263,40 @@ fn map_loa(verified: bool, method: &str) -> u8 {
         // Plain NPV: knowledge-based.
         "nv" | "ial1" | "knowledge" => 1,
         _ => 1,
+    }
+}
+
+/// Map ID.me's `status[]` array to our LOA tier. This is the modern shape
+/// returned by the OAuth attributes endpoint: identity-proofing level lives
+/// in the `identity` group's `subgroups` (e.g. `IAL2`), and a separate
+/// `liveness` group flags a passed biometric (selfie/liveness) check.
+///
+/// | status                                              | LOA |
+/// |-----------------------------------------------------|-----|
+/// | identity not verified / missing                     | 0   |
+/// | identity verified, no IAL2, no liveness             | 1   |
+/// | identity verified, liveness passed (no IAL2 tag)    | 2   |
+/// | identity verified + IAL2 (gov-ID + biometric)       | 3   |
+fn map_loa_from_status(status: &[StatusEntry]) -> u8 {
+    let identity = status.iter().find(|s| s.group.as_deref() == Some("identity"));
+    let liveness_verified = status
+        .iter()
+        .any(|s| s.group.as_deref() == Some("liveness") && s.verified);
+    match identity {
+        Some(id) if id.verified => {
+            let ial2 = id
+                .subgroups
+                .iter()
+                .any(|g| g.eq_ignore_ascii_case("IAL2") || g.eq_ignore_ascii_case("ial_2"));
+            if ial2 {
+                3
+            } else if liveness_verified {
+                2
+            } else {
+                1
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -292,8 +331,19 @@ struct AttributesResponse {
     #[serde(default)]
     attributes: Vec<Attribute>,
     #[serde(default)]
-    #[allow(dead_code)]
-    status: Option<Vec<serde_json::Value>>,
+    status: Vec<StatusEntry>,
+}
+
+/// One entry of ID.me's `status[]` array, e.g.
+/// `{ "group": "identity", "subgroups": ["IAL2"], "verified": true }`.
+#[derive(Debug, Deserialize, serde::Serialize)]
+struct StatusEntry {
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    subgroups: Vec<String>,
+    #[serde(default)]
+    verified: bool,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
@@ -385,5 +435,44 @@ mod tests {
         assert_eq!(map_loa(true, "nv_strong"), 2);
         assert_eq!(map_loa(true, "ial2"), 3);
         assert_eq!(map_loa(true, "selfie_id_match"), 3);
+    }
+
+    #[test]
+    fn loa_from_real_idme_status_payload() {
+        // Exact shape returned by api.idmelabs.com/api/public/v3/attributes.json
+        // for the NIST IAL2/AAL2 scope (captured from a live sandbox login).
+        let json = serde_json::json!({
+            "attributes": [
+                {"handle": "email", "value": "scott@aperion.ai"},
+                {"handle": "uuid", "value": "5e7b3352e2f840258514fe1505a5f2db"}
+            ],
+            "status": [
+                {"group": "identity", "subgroups": ["IAL2"], "verified": true},
+                {"group": "liveness", "subgroups": [], "verified": true}
+            ]
+        });
+        let attrs: AttributesResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(map_loa_from_status(&attrs.status), 3);
+    }
+
+    #[test]
+    fn loa_from_status_tiers() {
+        let mk = |group: &str, subs: &[&str], verified: bool| StatusEntry {
+            group: Some(group.to_string()),
+            subgroups: subs.iter().map(|s| s.to_string()).collect(),
+            verified,
+        };
+        // Unverified / empty -> 0
+        assert_eq!(map_loa_from_status(&[]), 0);
+        assert_eq!(map_loa_from_status(&[mk("identity", &[], false)]), 0);
+        // Verified identity, no IAL2, no liveness -> 1
+        assert_eq!(map_loa_from_status(&[mk("identity", &[], true)]), 1);
+        // Verified identity + liveness, no IAL2 tag -> 2
+        assert_eq!(
+            map_loa_from_status(&[mk("identity", &[], true), mk("liveness", &[], true)]),
+            2
+        );
+        // IAL2 -> 3 regardless of liveness entry
+        assert_eq!(map_loa_from_status(&[mk("identity", &["IAL2"], true)]), 3);
     }
 }
