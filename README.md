@@ -1,7 +1,7 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-339%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Tests](https://img.shields.io/badge/tests-365%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
 [![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
@@ -19,6 +19,8 @@
 > `aperion-shield` is the open-source reference implementation of **consequence-level control** for AI coding agents — the layer that stops a destructive `tools/call` *before* it lands, not a log you read after the damage is done. It's transparent insurance: you don't notice it until the day it saves you.
 >
 > If that's a problem you take seriously, a ⭐ is the fastest way to help other engineers in regulated and high-stakes shops find it **before** they need it → **[Star aperion-shield on GitHub](https://github.com/AperionAI/shield)**
+
+![aperion-shield blocks an AI agent's DROP DATABASE and rm -rf before they execute — local, deterministic, with a safer-alternative hint on every block](docs/img/shield-block-demo.gif)
 
 `aperion-shield` is a tiny, local MCP guardrail that sits between your
 AI coding agent (Cursor, Claude Code, …) and the **real** MCP servers
@@ -49,6 +51,48 @@ org-wide policy, ship audit upstream, and use your existing IdP as
 the relying party — no rewrite, no re-install.
 
 ---
+
+## What's new in v1.3
+
+**Cross-tool secret taint tracking** — the first Shield capability that
+correlates activity *across* MCP servers and surfaces instead of judging
+each call in isolation. This closes the "confused deputy" gap (OWASP MCP
+Top 10 **MCP09**) that every point-in-time, single-server MCP guardrail —
+including Shield before v1.3 — structurally cannot see: a credential
+leaked by one (possibly compromised) tool being relayed into a different,
+individually-trusted tool's arguments. Unit 42 measured a **78.3% attack
+success rate** for exactly this pattern once one server in a multi-server
+session is compromised.
+
+How it works, without a new daemon:
+
+1. **Tag.** When a credential-shaped value (AWS / GitHub / Slack / OpenAI
+   / Anthropic / Google / Stripe tokens, JWTs, PEM private-key blocks, DB
+   connection strings) appears in a tool *result*, Shield appends a
+   **SHA-256 hash** of it — never the raw secret — to a shared,
+   per-project ledger at `.aperion-shield/taint.jsonl`.
+2. **Check.** Before an *outgoing* tool call is forwarded, Shield scans
+   its arguments for those same shapes and looks each up in the ledger. A
+   still-within-TTL hit means the secret is crossing a tool boundary — the
+   call is escalated to **at least Approval** (never a silent Allow), with
+   a reason citing the source tool/surface and how long ago it leaked.
+
+Because every MCP server already runs as its own Shield process sharing
+the project's `.aperion-shield/` directory, correlation across *separate
+servers* works out of the box — proven by an integration test that spawns
+**two independent Shield binaries** and shows a secret leaked by server A
+refusing a relay through server B. Git-hook (`--check-staged`) and shell-
+shim (`--check-cmd`) surfaces run the check side too, so a secret an MCP
+tool leaked is also caught being hard-coded into a commit or piped through
+a wrapped CLI.
+
+New flags: `--taint-ttl-secs N` (default 600), `--no-taint-tracking`,
+`--taint-list`, `--taint-flush`. Never stores raw secrets; heuristic
+(hash-equality) correlation, not cryptographic taint propagation — see
+[SECURITY.md](SECURITY.md) for the honest limits. **365 tests passing**
+(was 339) — +12 secret-shape / ledger unit tests, +3 engine escalation
+tests, +1 shim-pickup test, and +2 cross-process two-binary integration
+tests. See [Cross-tool secret taint tracking](#cross-tool-secret-taint-tracking-v13).
 
 ## What's new in v1.2.1
 
@@ -234,6 +278,13 @@ protection against the **MCP server attacking the agent**.
      so a malicious upstream has no cheap, static signature to
      special-case against — see [SECURITY.md](SECURITY.md) for the
      honest limits of this control.
+   - **Cross-tool secret taint tracking (v1.3).** Catches a credential
+     leaked by one tool being relayed into a *different* tool/server/
+     surface in the same project — the confused-deputy pattern (OWASP
+     MCP09) that per-call, single-server checks structurally miss. Only
+     a hash of the secret is stored; a hit escalates the relaying call
+     to at least Approval. See [Cross-tool secret taint
+     tracking](#cross-tool-secret-taint-tracking-v13).
    - **Two new rule scopes.** `where: tool_description` rules scan
      every description in a `tools/list` result for **tool poisoning**
      — hidden instructions aimed at the model ("before using this
@@ -1610,6 +1661,68 @@ process with nothing local to confine.
 The integration tests run real processes under the rendered profiles
 and assert ssh-key reads fail, exemptions work, stray writes fail,
 and sockets are blocked until granted.
+
+## Cross-tool secret taint tracking (v1.3)
+
+Every other MCP guardrail — and Shield before v1.3 — evaluates each tool
+call **in isolation**. The dangerous pattern the MCP ecosystem is now
+seeing (OWASP MCP Top 10 **MCP09**, "Confused Deputy") isn't one server
+misbehaving on its own; it's a **compromised server's output flowing into
+a different, individually-trusted tool's input**. Server A leaks a
+credential; the agent then hands that same credential to server B's
+`http_post` (or a wrapped `curl`, or hard-codes it into a commit).
+Neither call looks wrong on its own.
+
+Shield already spans four surfaces for one project (MCP proxy, git hooks,
+shell shims, `--scan`). v1.3 gives them a shared ledger so a secret seen
+*leaving* one surface is recognised *arriving* at another:
+
+- **Tag (output side).** When a credential-shaped value appears in a tool
+  **result**, Shield appends `{ ts, entity_kind, hash, source_surface,
+  source_tool, ttl_secs }` to `.aperion-shield/taint.jsonl`. Only a
+  **SHA-256 hash** of the value is stored — never the raw secret —
+  mirroring the fingerprinting the decision-memory layer already uses.
+- **Check (input side).** Before an outgoing `tools/call` is forwarded
+  (and on `--check-staged` diff lines and `--check-cmd` command lines),
+  Shield scans the payload for the same shapes, hashes each, and looks it
+  up. A still-within-TTL hit escalates the call to **at least Approval**,
+  with a reason naming the source tool/surface and the secret's age.
+
+Recognised shapes (high-signal, low-false-positive by design): AWS access
+keys, GitHub tokens (classic + fine-grained), Slack tokens, OpenAI /
+Anthropic keys, Google API keys, Stripe keys, JWTs, PEM private-key blocks
+(matched whole, so distinct keys never collide), and DB/broker connection
+strings.
+
+Because each MCP server runs as its own Shield process sharing the
+project directory, **cross-server** correlation needs no daemon and no
+coordination — it falls out of the shared on-disk ledger.
+
+```bash
+# defaults: tracking on, 10-minute correlation window
+aperion-shield -- npx -y some-mcp-server
+
+# widen/narrow the window, or turn the feature off entirely
+aperion-shield --taint-ttl-secs 1800 -- npx -y some-mcp-server
+aperion-shield --no-taint-tracking -- npx -y some-mcp-server
+
+# inspect / clear the per-project ledger (never prints raw secrets)
+aperion-shield --taint-list
+aperion-shield --taint-flush
+
+# preview the escalation on any call without a pre-populated ledger
+aperion-shield --explain --input call.json --explain-force-tainted
+```
+
+The signal shows up as a 5th `adjustment_signals` flag
+(`tainted_secret_in_flight`) in `--explain` and as a `taint` object in the
+audit JSONL, so `--suggest-rules` and downstream SIEM tooling see it too.
+
+**Limits (be honest):** this is *heuristic* hash-equality correlation, not
+cryptographic taint propagation. A secret that's re-encoded or partially
+retyped before reuse (base64, truncation) won't hash-match. The ledger is
+lock-free and CWD-scoped (same inherited caveats as decision memory). See
+[SECURITY.md](SECURITY.md) for the full threat-model discussion.
 
 ## Rule packs
 
