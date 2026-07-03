@@ -14,6 +14,12 @@
 ![Windsurf](https://img.shields.io/badge/Windsurf-supported-success)
 ![Zed](https://img.shields.io/badge/Zed-supported-success)
 
+> ### ⭐ Star this repo if you think AI agents shouldn't touch prod unsupervised
+>
+> `aperion-shield` is the open-source reference implementation of **consequence-level control** for AI coding agents — the layer that stops a destructive `tools/call` *before* it lands, not a log you read after the damage is done. It's transparent insurance: you don't notice it until the day it saves you.
+>
+> If that's a problem you take seriously, a ⭐ is the fastest way to help other engineers in regulated and high-stakes shops find it **before** they need it → **[Star aperion-shield on GitHub](https://github.com/AperionAI/shield)**
+
 `aperion-shield` is a tiny, local MCP guardrail that sits between your
 AI coding agent (Cursor, Claude Code, …) and the **real** MCP servers
 your agent talks to (postgres, github, shell, filesystem, …) — local
@@ -512,6 +518,8 @@ Shield with a hosted approval queue, tamper-evident audit chain (RFC
 3161 timestamps), AI-BOM, EU-AI-Act conformity console, and SOC 2 /
 HIPAA / GDPR connectors. The two products share the same rule language
 — a `shieldset.yaml` you write for one works in the other.
+
+> **⭐ Did the 98.4% pass-through number or the adaptive-scoring design land for you?** Starring the repo is the single easiest way to signal that this approach is worth building on — and to help the next engineer find a guardrail before an agent finds their prod database → **[github.com/AperionAI/shield](https://github.com/AperionAI/shield)**
 
 ---
 
@@ -1926,6 +1934,21 @@ stylesheet at load time.
 - Docs: <https://docs.aperion.ai/aperion-shield.html>
 - MCP Registry name: `mcp-name: io.github.AperionAI/shield`
 - Langflow integration: <https://github.com/AperionAI/shield-langflow> — drop-in Langflow component that runs your agent's MCP tool calls through Shield, with a live allowed/blocked readout on the canvas.
+
+## Star the project ⭐
+
+Shield is transparent insurance — most of its value is the disaster that
+*never happens*, so it rarely gets the "this saved me an hour today"
+shout-out a normal dev tool earns. That makes stars matter more, not less:
+they're how engineers in regulated and high-stakes environments discover a
+guardrail **before** the incident that would have needed it.
+
+If Shield earned a place in your setup — or the design just resonated — a
+star genuinely helps:
+
+**[→ Star aperion-shield on GitHub](https://github.com/AperionAI/shield)**
+
+---
 
 ## License
 
