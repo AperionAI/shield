@@ -1,7 +1,7 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-336%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Tests](https://img.shields.io/badge/tests-339%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
 [![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
@@ -43,6 +43,20 @@ org-wide policy, ship audit upstream, and use your existing IdP as
 the relying party — no rewrite, no re-install.
 
 ---
+
+## What's new in v1.2.1
+
+A hardening follow-up to v1.2's drift-check probe, prompted by external
+feedback questioning whether the probe itself could be spoofed. The
+probe's request id no longer carries a `shield`/`drift`-style prefix —
+that was a static, greppable marker a targeted adversary could pattern-
+match on, given the project is open source — and now uses a bare random
+UUID instead. The polling interval is also jittered +/-20% so the
+cadence isn't a clean periodic signal. Neither change claims to make the
+probe unspoofable against a sufficiently determined, targeted adversary
+doing statistical traffic analysis; see [SECURITY.md](SECURITY.md) §3
+for the honest limits. **339 tests passing** (was 336) — 3 new unit
+tests lock in the "no static marker" and jitter-bounds properties.
 
 ## What's new in v1.2
 
@@ -209,7 +223,11 @@ protection against the **MCP server attacking the agent**.
      without waiting for the host to refresh its own catalog. Disable
      with `--no-drift-check`; it only runs once pinning itself has
      established a baseline, so it can never race the very first real
-     `tools/list`.
+     `tools/list`. The probe's request id is a bare random UUID (no
+     `shield`/`drift`-style marker) and its cadence is jittered ±20%,
+     so a malicious upstream has no cheap, static signature to
+     special-case against — see [SECURITY.md](SECURITY.md) for the
+     honest limits of this control.
    - **Two new rule scopes.** `where: tool_description` rules scan
      every description in a `tools/list` result for **tool poisoning**
      — hidden instructions aimed at the model ("before using this

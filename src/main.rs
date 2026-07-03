@@ -710,11 +710,75 @@ struct Shield {
 enum PendingKind {
     ToolsList,
     ToolCall { tool: String },
-    /// v1.1: a `tools/list` Shield sent itself, on a timer, to catch a
+    /// v1.2: a `tools/list` Shield sent itself, on a timer, to catch a
     /// mid-session rug pull. The response runs through the exact same
     /// detection + quarantine logic as a real `tools/list`, but is
     /// never forwarded downstream -- the client never asked for it.
     DriftCheck,
+}
+
+/// v1.2.1: the id for a drift-check probe. Deliberately a bare random
+/// UUID with no `shield`/`drift`-style prefix -- since this project is
+/// open source, any static, greppable marker in the id would hand a
+/// malicious upstream a free, cheap way to special-case (and lie to)
+/// Shield's probes while behaving normally for everything else. See
+/// SECURITY.md §3 "Known limitation: drift-check probes are not
+/// unspoofable" for what this does and does not defend against.
+fn drift_check_synthetic_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// v1.2.1: jitter the drift-check interval by +/-20% so the polling
+/// cadence itself isn't a clean, easily-fingerprinted periodic signal.
+/// Floored at 1 second so a tiny configured interval can't jitter to
+/// (near) zero and busy-loop.
+fn jittered_drift_interval(base_secs: u64) -> std::time::Duration {
+    use rand::Rng;
+    let jitter_frac = rand::thread_rng().gen_range(0.8..1.2);
+    let secs = (base_secs as f64 * jitter_frac).max(1.0);
+    std::time::Duration::from_secs_f64(secs)
+}
+
+#[cfg(test)]
+mod drift_check_tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_id_has_no_static_greppable_marker() {
+        for _ in 0..100 {
+            let id = drift_check_synthetic_id();
+            let lower = id.to_lowercase();
+            assert!(!lower.contains("shield"), "id leaks a static marker: {id}");
+            assert!(!lower.contains("drift"), "id leaks a static marker: {id}");
+            // A bare UUIDv4 (simple, no hyphens) is exactly 32 hex chars.
+            assert_eq!(id.len(), 32, "expected a bare simple UUID: {id}");
+            assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "expected only hex chars: {id}");
+        }
+    }
+
+    #[test]
+    fn synthetic_ids_are_unique() {
+        let a = drift_check_synthetic_id();
+        let b = drift_check_synthetic_id();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn jitter_stays_within_bounds_and_never_hits_zero() {
+        for base in [1u64, 5, 60, 300, 3600] {
+            for _ in 0..200 {
+                let d = jittered_drift_interval(base);
+                let secs = d.as_secs_f64();
+                assert!(secs >= 1.0, "jitter floor violated for base {base}: got {secs}");
+                let lower_bound = (base as f64 * 0.8).max(1.0) - 0.01;
+                let upper_bound = base as f64 * 1.2 + 0.01;
+                assert!(
+                    secs >= lower_bound && secs <= upper_bound,
+                    "jitter out of +/-20% band for base {base}: got {secs}"
+                );
+            }
+        }
+    }
 }
 
 struct SupplyState {
@@ -1032,30 +1096,42 @@ async fn main() -> anyhow::Result<()> {
         },
     });
 
-    // ── v1.1: continuous MCP catalog drift monitoring ──────────────
+    // ── v1.2: continuous MCP catalog drift monitoring ──────────────
     // TOFU pinning (v0.9) only re-checks the catalog when a REAL
     // `tools/list` happens -- in a long-running agent session that can
     // be hours away. This proactively re-fingerprints the live catalog
     // on an interval so a rug pull is caught (and the tool quarantined)
     // mid-session. Gated on `primed` so the timer can never fire before
     // the client's own first `tools/list` establishes the baseline pin.
+    //
+    // Evasion note: the probe travels over the exact same stdio/HTTP
+    // channel as real client traffic, so the *only* thing a malicious
+    // upstream could use to special-case (and lie to) a probe is the
+    // request `id` -- there is no other distinguishing metadata. We
+    // deliberately use a bare random UUID with no `shield`/`drift`-style
+    // prefix (this crate is open source; any static, greppable marker
+    // would hand an adversary a free tell). We also jitter the interval
+    // (+/-20%) so the polling cadence itself isn't a clean periodic
+    // signal. Neither measure makes the probe *unspoofable* -- a
+    // sufficiently well-resourced, targeted adversary running
+    // statistical traffic analysis over a long session could still
+    // attempt to distinguish "no corresponding user action" `tools/list`
+    // calls from real ones. That residual risk is a fundamental limit of
+    // any protocol-level monitor that shares a channel with the thing it
+    // doesn't trust; `--sandbox` (OS-level process confinement) is the
+    // complementary control for that threat model, not this one.
     if pinning_enabled && !cli.no_drift_check && cli.drift_check_interval_secs > 0 {
         let drift_shield = shield.clone();
         let drift_to_upstream = to_upstream.clone();
-        let interval = std::time::Duration::from_secs(cli.drift_check_interval_secs);
+        let base_interval_secs = cli.drift_check_interval_secs;
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ticker.tick().await; // the first tick fires immediately; skip it
+            tokio::time::sleep(jittered_drift_interval(base_interval_secs)).await;
             loop {
-                ticker.tick().await;
                 if !drift_shield.supply.primed.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(jittered_drift_interval(base_interval_secs)).await;
                     continue; // no baseline pinned yet -- nothing to diff against
                 }
-                let synthetic_id = Value::String(format!(
-                    "__shield_drift_{}",
-                    uuid::Uuid::new_v4().simple()
-                ));
+                let synthetic_id = Value::String(drift_check_synthetic_id());
                 let key = transport::http_server::canonical_id(&synthetic_id);
                 drift_shield
                     .supply
@@ -1078,6 +1154,7 @@ async fn main() -> anyhow::Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     cleanup_shield.supply.pending.lock().await.remove(&key);
                 });
+                tokio::time::sleep(jittered_drift_interval(base_interval_secs)).await;
             }
         });
     }
@@ -1094,7 +1171,7 @@ async fn main() -> anyhow::Result<()> {
         let from_upstream_handle = tokio::spawn(async move {
             while let Some(frame) = from_upstream.recv().await {
                 let Some(frame) = intercept_upstream_frame(frame, &pump_shield).await else {
-                    continue; // swallowed: a v1.1 drift-check response, not for the client
+                    continue; // swallowed: a v1.2 drift-check response, not for the client
                 };
                 pump_state.route_upstream_frame(frame).await;
             }
@@ -1157,7 +1234,7 @@ async fn main() -> anyhow::Result<()> {
             while let Some(frame) = from_upstream.recv().await {
                 debug!("[shield] upstream -> {}", frame);
                 let Some(frame) = intercept_upstream_frame(frame, &shield_clone2).await else {
-                    continue; // swallowed: a v1.1 drift-check response, not for the client
+                    continue; // swallowed: a v1.2 drift-check response, not for the client
                 };
                 let mut out = stdout_clone2.lock().await;
                 if out.write_all(frame.as_bytes()).await.is_err() { break; }
@@ -2067,7 +2144,7 @@ impl transport::http_server::RequestGate for ShieldGate {
 
 /// v0.9 supply-chain seam: inspect upstream -> client frames. Returns
 /// `Some(frame)` to forward (possibly rewritten), or `None` to swallow
-/// the frame entirely -- used for v1.1 drift-check responses, which
+/// the frame entirely -- used for v1.2 drift-check responses, which
 /// the client never asked for and must never see. Only responses to
 /// previously-forwarded `tools/list` / `tools/call` requests (or a
 /// Shield-initiated drift-check poll) are touched; everything else
@@ -2252,7 +2329,7 @@ async fn inspect_tools_list_response(
                     info!("[shield] pinned tool '{}' no longer offered by the upstream", name);
                 }
                 // A catalog has now been pinned (first contact or not)
-                // -- safe for the v1.1 drift-check timer to start
+                // -- safe for the v1.2 drift-check timer to start
                 // sending its own proactive tools/list polls.
                 shield.supply.primed.store(true, std::sync::atomic::Ordering::Relaxed);
             }

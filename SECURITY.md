@@ -111,6 +111,41 @@ inspection of every binary we ship.
 | Identity providers (ID.me, OIDC) over the network | partially | TLS-validated; we trust the chain to the OS's CA bundle |
 | Smartflow control plane (org-mode only, when enrolled) | partially | TLS + HMAC vkey on every request |
 
+### Known limitation: drift-check probes are not unspoofable (v1.2+)
+
+Continuous MCP catalog drift monitoring (`--drift-check-interval-secs`,
+shipped in v1.2) proactively re-sends `tools/list` to the upstream on a
+timer to catch a rug pull mid-session, instead of waiting for the
+client's next real catalog refresh. This raises the cost of a rug pull
+but does **not** make it cryptographically impossible to evade:
+
+- The probe travels over the *same* stdio/HTTP channel as real client
+  traffic. The only thing distinguishing it from a client-initiated
+  `tools/list` is the request `id` -- there is no other metadata
+  boundary between "Shield asked" and "the IDE asked." A malicious
+  upstream that specifically targets Shield could, in principle, try
+  to tell them apart and answer differently (lie to the probe, attack
+  the client).
+- We mitigate the cheapest version of this: the probe id is a bare
+  random UUID with no `shield`/`drift`-style prefix (this project is
+  open source, so any static, greppable marker would hand an adversary
+  a free tell), and the polling interval is jittered +/-20% so the
+  cadence itself isn't a clean, easily-fingerprinted periodic signal.
+- We do **not** claim this defeats a well-resourced, targeted
+  adversary running statistical traffic analysis over a long session
+  (e.g., correlating `tools/list` calls against observable user
+  activity to infer which ones are unattended). Closing that
+  completely would require either making the probe indistinguishable
+  in *timing* as well as content (out of scope for v1.2), or a
+  channel-independent verification mechanism (e.g. signed tool
+  manifests from a registry Shield trusts independently of the
+  upstream server itself) -- an ecosystem-level primitive that does
+  not exist yet for MCP.
+- The complementary control for "I don't trust this upstream server's
+  process at all" is `--sandbox` (OS-level process confinement), which
+  constrains what a malicious server can *do* even if it evades
+  catalog-level detection entirely.
+
 ### Cryptographic primitives
 
 - **Ed25519** for identity proofs (the `--identity-*` family) and
@@ -292,4 +327,5 @@ If you operate Shield as part of an enterprise deployment:
 | 2026-05-15 | Initial policy. Documents the three open Dependabot advisories surfaced by Shield's first public release and the v0.6.0 fix plan. |
 | 2026-05-18 | v0.6.0 shipped. RUSTSEC-2026-0098 / -0099 / -0104 closed by `rustls-webpki 0.103.13` (transitively via the `reqwest 0.12` / `rustls 0.23` / `hyper 1.x` upgrade). `.cargo/audit.toml` ignore list trimmed back to `[]`. Supported-versions table updated. |
 | 2026-05-20 | v0.7.0 shipped. No new advisories or fix-required changes; this is a feature-only release. `cargo audit` clean against `Cargo.lock` at the v0.7.0 commit. New surfaces (`--install-hooks`, `--check-staged`, `--check-pushed-refs`, `--suggest-rules`) all stay within the standalone process model — no new network endpoints, no new on-disk persistence beyond `.git/hooks/` (Shield itself) and the operator-redirected audit log. Supported-versions table updated; v0.6.x dropped to security-only. |
+| 2026-07-03 | v1.2.1 shipped. Hardening for the v1.2 continuous drift-check probe, prompted by external feedback: dropped the `__shield_drift_`-prefixed request id (a static, greppable marker, given this project is open source) in favor of a bare random UUID, and added +/-20% jitter to the polling interval so the cadence isn't a clean periodic signal. New §3 subsection "Known limitation: drift-check probes are not unspoofable" documents what this does and does not close — a targeted adversary running statistical traffic analysis could still attempt evasion; that residual risk is inherent to any protocol-level monitor sharing a channel with the thing it doesn't trust, and `--sandbox` is the complementary control for that threat model. No CVE; not a regression, a hardening of a feature shipped hours earlier. |
 | 2026-05-27 | v0.8.0 shipped. No new advisories or fix-required changes; this is a feature-only release. `cargo audit` clean against `Cargo.lock` at the v0.8.0 commit. New surfaces (`--install-shims`, `--uninstall-shims`, `--list-shims`, `--check-cmd`, `--explain`) all stay within the standalone process model. The shim path writes per-command `/bin/sh` wrappers into `~/.aperion-shield/bin/` (or `--shim-dir PATH`) at mode `0755` inside a directory at mode `0700`; **Shield will NOT overwrite any file it didn't write itself** (foreign-file collisions exit non-zero, file untouched). `--explain` is pure-input/pure-output — no on-disk persistence, no side-effects on decision memory or audit. Supported-versions table updated; v0.7.x dropped to security-only. |
