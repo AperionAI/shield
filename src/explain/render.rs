@@ -288,6 +288,7 @@ pub struct AdjustmentSignalsJson {
     pub burst_in_progress: bool,
     pub fingerprint_repeatedly_approved: bool,
     pub fingerprint_recently_denied: bool,
+    pub tainted_secret_in_flight: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -404,6 +405,7 @@ fn render_json(r: &ExplainReport) -> String {
             burst_in_progress: r.adjustments.burst_in_progress,
             fingerprint_repeatedly_approved: r.adjustments.fingerprint_repeatedly_approved,
             fingerprint_recently_denied: r.adjustments.fingerprint_recently_denied,
+            tainted_secret_in_flight: r.adjustments.tainted_secret_in_flight,
         },
         severity_raw: r.evaluation.raw_severity.as_str(),
         severity_composite: r.evaluation.composite_severity.as_str(),
@@ -484,6 +486,15 @@ fn describe_adjustments_text(
         "fingerprint_repeatedly_approved",
         "fingerprint_repeatedly_approved",
         adj.fingerprint_repeatedly_approved,
+    ) {
+        out.push(s);
+    }
+    // taint always injects a synthetic finding, so it is effectively
+    // always APPLIED when set; kept here for symmetry with the others.
+    if let Some(s) = present_but_unused(
+        "tainted_secret_in_flight",
+        "tainted_secret_in_flight",
+        adj.tainted_secret_in_flight,
     ) {
         out.push(s);
     }

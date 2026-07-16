@@ -190,7 +190,22 @@ pub struct Adjustments {
     pub fingerprint_recently_denied: bool,
     pub fingerprint_repeatedly_approved: bool,
     pub burst_in_progress: bool,
+    /// v1.3 cross-tool taint: a credential-shaped value in this call's
+    /// arguments (or diff line, or shim command) was previously observed
+    /// leaving a *different* tool/server/surface in this project. Set by
+    /// the caller from a `taint::TaintLedger::check()` hit. When true,
+    /// `resolve()` injects a synthetic taint finding, bumps one tier, and
+    /// enforces an Approval floor -- a credential crossing a tool boundary
+    /// is inherently actionable regardless of what other rule matched.
+    pub tainted_secret_in_flight: bool,
 }
+
+/// Synthetic rule id for the cross-tool taint finding injected by
+/// `resolve()` when `Adjustments::tainted_secret_in_flight` is set. It is
+/// not a YAML rule -- it exists so the taint signal flows through the
+/// normal `decide()` path (which short-circuits to `Allow` on an empty
+/// match set) and shows up as a first-class finding in audit + `--explain`.
+pub const TAINT_RULE_ID: &str = "taint.secret_crosses_tool_boundary";
 
 // ─────────────────────────────────────────────────────────────────────────
 // YAML schema (v1 + v2 -- both deserialise via the same Root)
@@ -730,7 +745,31 @@ impl Engine {
         self.resolve(matches, composite_points, adj)
     }
 
-    fn resolve(&self, matches: Vec<MatchInfo>, composite_points: u32, adj: Adjustments) -> Evaluation {
+    fn resolve(&self, mut matches: Vec<MatchInfo>, composite_points: u32, adj: Adjustments) -> Evaluation {
+        // v1.3: inject a synthetic finding for a cross-tool taint hit so
+        // the signal flows through `decide()` (which returns `Allow` on an
+        // empty match set) and is attributable in audit / `--explain`.
+        // Its raw severity is deliberately Low -- the escalation is driven
+        // by the explicit bump + Approval floor below, not by this
+        // carrier's own severity, so it never over-inflates the composite.
+        if adj.tainted_secret_in_flight {
+            matches.push(MatchInfo {
+                rule_id: TAINT_RULE_ID.to_string(),
+                severity: Severity::Low,
+                points: 0,
+                reason: "A credential-shaped value in this call was previously observed leaving a \
+                         different tool/server/surface in this project (possible cross-tool \
+                         credential relay / confused deputy)."
+                    .to_string(),
+                safer_alternative: Some(
+                    "Confirm the destination tool/server is trusted before approving. Never relay \
+                     credentials returned by one tool into another tool's arguments."
+                        .to_string(),
+                ),
+                identity: None,
+            });
+        }
+
         let raw_severity = matches
             .iter()
             .map(|m| m.severity)
@@ -759,15 +798,27 @@ impl Engine {
             adjustments_applied.push("burst_in_progress");
         }
         // Demotion only applies if no escalation kicked in. We bumped
-        // already; only demote on a clean baseline.
+        // already; only demote on a clean baseline. A taint hit is never
+        // eligible for demotion -- it is inherently actionable.
         if adj.fingerprint_repeatedly_approved
             && !matches.is_empty()
             && !adj.workspace_is_prod
             && !adj.fingerprint_recently_denied
             && !adj.burst_in_progress
+            && !adj.tainted_secret_in_flight
         {
             final_severity = final_severity.demoted();
             adjustments_applied.push("fingerprint_repeatedly_approved");
+        }
+
+        // v1.3 taint: bump one tier (like burst/prod) AND enforce an
+        // Approval floor. Applied last so the floor survives any prior
+        // demotion, and so a credential crossing a tool boundary can never
+        // resolve to a silent Allow. Escalates an already-suspicious call
+        // further (e.g. a matched High rule + taint -> Critical/Block).
+        if adj.tainted_secret_in_flight {
+            final_severity = final_severity.bumped().max(Severity::High);
+            adjustments_applied.push("tainted_secret_in_flight");
         }
 
         Evaluation {
@@ -1359,6 +1410,60 @@ mod tests {
         match decide(&ev) {
             Decision::Approval { .. } => {},
             other => panic!("expected Approval from deny escalation, got {}", other.label()),
+        }
+    }
+
+    #[test]
+    fn taint_alone_forces_at_least_approval() {
+        // A totally benign call (no rule matches) that carries a tainted
+        // secret must never be a silent Allow -- it floors at Approval.
+        let e = engine();
+        let p = json!({"arguments": {"command": "echo hi"}});
+        let mut adj = Adjustments::default();
+        adj.tainted_secret_in_flight = true;
+        let ev = e.evaluate("shell", &p, adj);
+        assert!(
+            ev.matches.iter().any(|m| m.rule_id == crate::engine::TAINT_RULE_ID),
+            "synthetic taint finding should be present"
+        );
+        assert!(ev.adjustments_applied.contains(&"tainted_secret_in_flight"));
+        match decide(&ev) {
+            Decision::Approval { .. } => {}
+            other => panic!("expected Approval from bare taint, got {}", other.label()),
+        }
+    }
+
+    #[test]
+    fn taint_escalates_a_matched_rule_further() {
+        // GRANT ALL is Medium (Warn). With a taint hit it should bump past
+        // Approval to Critical/Block: Medium -> +1 -> High -> floor High,
+        // then the injected finding + composite... assert it's blocking.
+        let e = engine();
+        let p = json!({"arguments": {"query": "DROP DATABASE prod;"}});
+        let mut adj = Adjustments::default();
+        adj.tainted_secret_in_flight = true;
+        let ev = e.evaluate("execute_sql", &p, adj);
+        // DROP DATABASE is Critical already; taint keeps it blocking.
+        assert!(decide(&ev).is_blocking(), "taint on a critical call stays blocking");
+    }
+
+    #[test]
+    fn taint_beats_demotion() {
+        // Even with a repeated-approval demotion signal, taint floors at
+        // Approval -- a credential relay is never demoted to Allow.
+        let e = engine();
+        let p = json!({"arguments": {"query": "GRANT ALL ON foo TO bar"}});
+        let mut adj = Adjustments::default();
+        adj.fingerprint_repeatedly_approved = true;
+        adj.tainted_secret_in_flight = true;
+        let ev = e.evaluate("execute_sql", &p, adj);
+        assert!(
+            !ev.adjustments_applied.contains(&"fingerprint_repeatedly_approved"),
+            "demotion must not apply when taint is in flight"
+        );
+        match decide(&ev) {
+            Decision::Approval { .. } | Decision::Block { .. } => {}
+            other => panic!("expected at least Approval, got {}", other.label()),
         }
     }
 

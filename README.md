@@ -52,6 +52,36 @@ the relying party — no rewrite, no re-install.
 
 ---
 
+## What's new in v1.4
+
+**Reversible secret cloaking** — register a secret once, then reference it
+in your agent's tool-call arguments as the placeholder `{{cloak:NAME}}`.
+Shield swaps in the real value **only on the copy it forwards to the MCP
+server** — so the actual secret never lands in the agent's context, the
+transcript, the model provider's logs, or any prompt cache. In the reverse
+direction, if a tool *result* echoes a registered secret back, Shield
+scrubs it to its placeholder before the agent (and the model) ever sees it.
+
+This is the reversible complement to v1.3's taint tracking: taint is
+detect-and-escalate over one-way hashes; cloak is a local, reversible vault
+that transforms the wire at both proxy seams. Both stdio and Streamable-HTTP
+transports are covered, and the transform is a zero-copy fast path when no
+placeholder is present.
+
+```bash
+# Register a secret (value read from $SHIELD_CLOAK_VALUE or stdin, never argv):
+SHIELD_CLOAK_VALUE='sk_live_…' aperion-shield --cloak-add stripe_key
+aperion-shield --cloak-list                # names only, never values
+aperion-shield --cloak-remove stripe_key
+```
+
+Your agent then sends `Authorization: Bearer {{cloak:stripe_key}}`; the
+upstream server receives the real key; the model context only ever holds
+the placeholder. The vault lives at `~/.aperion-shield/cloak-vault.json`
+(mode `0600`, protected by filesystem permissions — never logged, never
+included in audit events). New flags: `--cloak-add NAME`, `--cloak-list`,
+`--cloak-remove NAME`, `--no-cloak`.
+
 ## What's new in v1.3
 
 **Cross-tool secret taint tracking** — the first Shield capability that

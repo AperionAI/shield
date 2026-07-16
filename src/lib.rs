@@ -20,6 +20,7 @@
 //!     the three adaptive helpers, each independently constructable.
 
 pub mod burst;
+pub mod cloak;
 pub mod context;
 pub mod diff;
 pub mod engine;
@@ -34,9 +35,11 @@ pub mod scan;
 pub mod shims;
 pub mod suggest;
 pub mod supply;
+pub mod taint;
 pub mod transport;
 
 pub use burst::BurstDetector;
+pub use cloak::CloakVault;
 pub use context::WorkspaceContext;
 pub use engine::{
     decide, fingerprint, Adjustments, Decision, Engine, Evaluation, MatchInfo, Policy, Severity,
@@ -47,3 +50,4 @@ pub use identity::{
 };
 pub use memory::{DecisionMemory, MemoryEntry, MemoryVerdict, Outcome};
 pub use predicates::{CommandPredicate, SensitivePath};
+pub use taint::{TaintEntry, TaintLedger, TaintMatch};

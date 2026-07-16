@@ -44,9 +44,9 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use aperion_shield::{
-    decide, fingerprint, identity, orgmode, Adjustments, BurstDetector, Decision, DecisionMemory,
-    Engine, IdMeProvider, IdentityConfig, IdentityGate, IdentityProvider, MockProvider, Outcome,
-    ProviderKind, WorkspaceContext,
+    decide, fingerprint, identity, orgmode, Adjustments, BurstDetector, CloakVault, Decision,
+    DecisionMemory, Engine, IdMeProvider, IdentityConfig, IdentityGate, IdentityProvider,
+    MockProvider, Outcome, ProviderKind, TaintLedger, WorkspaceContext,
 };
 use aperion_shield::engine::{Scope, Severity};
 use aperion_shield::orgmode::{
@@ -561,6 +561,12 @@ struct Cli {
     #[arg(long, requires = "explain")]
     explain_force_recently_denied: bool,
 
+    /// Force `tainted_secret_in_flight = true` -- demonstrates the v1.3
+    /// cross-tool taint escalation (Approval floor) for this call without
+    /// needing a pre-populated taint ledger.
+    #[arg(long, requires = "explain")]
+    explain_force_tainted: bool,
+
     // ── Org-mode (v0.5+) ──────────────────────────────────────────
     //
     // Enroll this Shield against a Smartflow control plane so policy,
@@ -667,6 +673,64 @@ struct Cli {
     #[arg(long)]
     no_drift_check: bool,
 
+    // ── Cross-tool secret taint tracking (v1.3+) ──────────────────
+    //
+    // When a credential-shaped value appears in one tool's *result*,
+    // Shield records a hash of it in `<project>/.aperion-shield/taint.jsonl`.
+    // If that same value later shows up in a *different* tool's call
+    // arguments (in the same project), the call is escalated to at least
+    // Approval -- catching the cross-tool "confused deputy" relay that
+    // single-server, point-in-time guardrails miss. Never stores the raw
+    // secret, only a SHA-256 hash. See SECURITY.md for the known limits.
+
+    /// How long (seconds) a tagged secret stays "in flight" for cross-tool
+    /// taint correlation before it expires from the ledger. Default 600.
+    #[arg(long, default_value_t = 600)]
+    taint_ttl_secs: u64,
+
+    /// Disable cross-tool secret taint tracking entirely (no tagging, no
+    /// checking). Other supply-chain protections are unaffected.
+    #[arg(long)]
+    no_taint_tracking: bool,
+
+    /// Print the current (non-expired) cross-tool taint ledger entries for
+    /// this project and exit. Never prints raw secrets -- only hashes,
+    /// entity kinds, and the source tool/surface. Does not start the proxy.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    taint_list: bool,
+
+    /// Drop every entry in this project's cross-tool taint ledger and exit.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    taint_flush: bool,
+
+    // ── Reversible secret cloaking (v1.4+) ────────────────────────
+    //
+    // Register a secret under NAME, then reference it in tool-call
+    // arguments as the placeholder `{{cloak:NAME}}`. Shield swaps in the
+    // real value ONLY on the copy forwarded to the MCP server, so the
+    // secret never lives in the agent / LLM context; results are scrubbed
+    // in reverse. The vault is stored 0600 at ~/.aperion-shield/cloak-vault.json.
+
+    /// Register a cloak secret under NAME and exit. The value is read from
+    /// the SHIELD_CLOAK_VALUE env var (preferred) or, if unset, from stdin.
+    /// Reference it in tool-call arguments as `{{cloak:NAME}}`.
+    #[arg(long, value_name = "NAME", conflicts_with = "upstream", conflicts_with = "check")]
+    cloak_add: Option<String>,
+
+    /// List registered cloak secret NAMEs (never values) and exit.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    cloak_list: bool,
+
+    /// Remove the cloak secret registered under NAME and exit.
+    #[arg(long, value_name = "NAME", conflicts_with = "upstream", conflicts_with = "check")]
+    cloak_remove: Option<String>,
+
+    /// Disable reversible secret cloaking for this run: `{{cloak:NAME}}`
+    /// placeholders are forwarded upstream verbatim and results are not
+    /// scrubbed. Registered secrets are left on disk, just not applied.
+    #[arg(long)]
+    no_cloak: bool,
+
     /// Trailing args after `--` are the upstream MCP server command.
     /// Example: `aperion-shield -- npx @modelcontextprotocol/server-postgres ...`
     #[arg(trailing_var_arg = true, num_args = 0..)]
@@ -684,6 +748,17 @@ struct Shield {
     workspace: WorkspaceContext,
     memory: DecisionMemory,
     burst: BurstDetector,
+    /// v1.3 cross-tool secret taint ledger, shared across every Shield
+    /// process in the same project directory via the on-disk
+    /// `.aperion-shield/taint.jsonl`.
+    taint: TaintLedger,
+    /// v1.4 reversible secret cloak vault. Resolves `{{cloak:NAME}}`
+    /// placeholders in outbound `tools/call` arguments to the real secret
+    /// only on the copy forwarded upstream, and scrubs any leaked secret
+    /// value out of `tools/call` results before the agent sees it. Inert
+    /// (no-op) unless `--no-cloak` is absent AND at least one secret is
+    /// registered via `--cloak-add`.
+    cloak: CloakVault,
     shadow: bool,
     auto_deny: bool,
     /// `None` when the user passed `--no-identity` OR no rule in the
@@ -833,6 +908,21 @@ async fn main() -> anyhow::Result<()> {
     if cli.identity_flush {
         return run_identity_flush(&cli).await;
     }
+    if cli.taint_list {
+        return run_taint_list(&cli);
+    }
+    if cli.taint_flush {
+        return run_taint_flush(&cli);
+    }
+    if let Some(name) = cli.cloak_add.clone() {
+        return run_cloak_add(&name);
+    }
+    if cli.cloak_list {
+        return run_cloak_list();
+    }
+    if let Some(name) = cli.cloak_remove.clone() {
+        return run_cloak_remove(&name);
+    }
     if cli.check {
         return run_check_mode(&cli).await;
     }
@@ -944,6 +1034,15 @@ async fn main() -> anyhow::Result<()> {
     let mut burst_cfg = engine.policy.burst_detector.clone();
     if cli.no_burst { burst_cfg.enabled = false; }
     let burst = BurstDetector::new(burst_cfg);
+    let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
+    let cloak = CloakVault::load(!cli.no_cloak);
+    if cloak.is_active() {
+        info!(
+            "[shield] cloak: {} secret(s) registered -- {{{{cloak:NAME}}}} placeholders will be \
+             resolved for the upstream server only and scrubbed out of results",
+            cloak.len()
+        );
+    }
 
     // ── Startup banner -- make the adaptive surface visible ────────
     let mode_label = if cli.shadow { "SHADOW (warn only)" } else { "ENFORCE" };
@@ -959,12 +1058,13 @@ async fn main() -> anyhow::Result<()> {
         upstream_label_banner,
     );
     warn!(
-        "[shield] composite_scoring={} workspace_probe={} decision_memory={} burst_detector={} catalog_pinning={}",
+        "[shield] composite_scoring={} workspace_probe={} decision_memory={} burst_detector={} catalog_pinning={} taint_tracking={}",
         engine.policy.composite_scoring.enabled,
         engine.policy.workspace_probe.enabled,
         memory.enabled(),
         engine.policy.burst_detector.enabled,
         engine.policy.supply_chain.pinning && !cli.no_pin,
+        taint.enabled(),
     );
     if workspace.is_prod {
         warn!(
@@ -1082,6 +1182,8 @@ async fn main() -> anyhow::Result<()> {
         workspace,
         memory,
         burst,
+        taint,
+        cloak,
         shadow: cli.shadow,
         auto_deny: cli.auto_deny_high,
         identity_gate,
@@ -1218,7 +1320,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                if to_upstream.send(frame.to_string()).await.is_err() {
+                // v1.4 cloak: resolve `{{cloak:NAME}}` placeholders to the real
+                // secret on the copy sent upstream only. Runs AFTER the gate so
+                // rules / taint evaluate the agent-visible placeholder, never the
+                // secret. Falls back to the original frame when nothing matched.
+                let outbound = parsed
+                    .as_ref()
+                    .and_then(|req| shield_clone.cloak.uncloak_request(req))
+                    .unwrap_or_else(|| frame.to_string());
+                if to_upstream.send(outbound).await.is_err() {
                     error!("[shield] upstream channel closed");
                     break;
                 }
@@ -1361,6 +1471,7 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
         burst_cfg.enabled = false;
     }
     let burst = BurstDetector::new(burst_cfg);
+    let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
 
     eprintln!(
         "[shield-check] engine: {} rules | workspace_prod={} signals={:?} composite={} memory={} burst={}",
@@ -1410,7 +1521,18 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
         // Two input shapes: tool-call OR llm_response text.
         let expect = input.get("expect").and_then(|v| v.as_str()).map(str::to_string);
 
+        // v1.3 taint (corpus mode = both tag + check for testability):
+        // an explicit `"tool_result"` string on a line tags any secrets it
+        // carries (as if returned by `tool`); `"text"` lines are also
+        // treated as taggable output; tool-call lines are *checked* so a
+        // later corpus line relaying a previously-tagged secret escalates.
+        if let Some(tr) = input.get("tool_result").and_then(|v| v.as_str()) {
+            let src_tool = input.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
+            taint.tag_all_in(tr, "check_corpus", src_tool);
+        }
+
         let (eval, scope) = if let Some(text) = input.get("text").and_then(|v| v.as_str()) {
+            taint.tag_all_in(text, "check_corpus", "llm_response");
             let adj = Adjustments {
                 workspace_is_prod: workspace.is_prod,
                 burst_in_progress: burst.in_burst(),
@@ -1426,16 +1548,19 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
             } else {
                 json!({ "name": tool, "arguments": params })
             };
+            let taint_hit = taint.check(&canonical.to_string());
             // Pre-pass to fingerprint the primary rule, then re-eval with memory.
             let first_adj = Adjustments {
                 workspace_is_prod: workspace.is_prod,
                 burst_in_progress: burst.in_burst(),
+                tainted_secret_in_flight: taint_hit.is_some(),
                 ..Default::default()
             };
             let first = engine.evaluate(tool, &canonical, first_adj);
             let mv = if let Some(primary) = first
                 .matches
                 .iter()
+                .filter(|m| m.rule_id != aperion_shield::engine::TAINT_RULE_ID)
                 .max_by(|a, b| a.severity.cmp(&b.severity).then(a.points.cmp(&b.points)))
             {
                 let fp = fingerprint(&primary.rule_id, &canonical);
@@ -1448,6 +1573,7 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
                 burst_in_progress: burst.in_burst(),
                 fingerprint_recently_denied: mv.recent_deny,
                 fingerprint_repeatedly_approved: mv.repeated_approve,
+                tainted_secret_in_flight: taint_hit.is_some(),
             };
             (engine.evaluate(tool, &canonical, adj), "tool_call")
         };
@@ -1681,7 +1807,8 @@ fn run_check_staged(cli: &Cli) -> anyhow::Result<i32> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
     let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
-    let report = run(&repo, &engine, cli.workspace.as_deref())?;
+    let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
+    let report = run(&repo, &engine, cli.workspace.as_deref(), Some(&taint))?;
 
     if report.findings.is_empty() {
         eprintln!(
@@ -1999,6 +2126,7 @@ fn run_explain(cli: &Cli) -> anyhow::Result<i32> {
     }
     opts.force_repeatedly_approved = cli.explain_force_repeatedly_approved;
     opts.force_recently_denied = cli.explain_force_recently_denied;
+    opts.force_tainted = cli.explain_force_tainted;
 
     let report = explain(&engine, &descriptor, &opts)?;
     let format = match cli.explain_format.as_deref() {
@@ -2021,7 +2149,8 @@ fn run_check_cmd(cli: &Cli) -> anyhow::Result<i32> {
     }
 
     let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
-    let report = run(&engine, &cli.upstream)?;
+    let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
+    let report = run(&engine, &cli.upstream, Some(&taint))?;
 
     // Always print the audit JSON line to stderr -- mirrors the shape
     // emitted by the MCP path so `--suggest-rules` keeps working over
@@ -2139,6 +2268,10 @@ struct ShieldGate(Arc<Shield>);
 impl transport::http_server::RequestGate for ShieldGate {
     async fn intercept(&self, req: &Value) -> Option<Value> {
         process_client_frame(req, &self.0).await
+    }
+
+    async fn transform_outbound(&self, req: &Value) -> Option<String> {
+        self.0.cloak.uncloak_request(req)
     }
 }
 
@@ -2384,8 +2517,35 @@ async fn inspect_tool_call_response(
     };
     let texts = supply::extract_result_text(result);
     if texts.is_empty() {
-        return frame;
+        // No text blocks, but a structured result can still carry a secret;
+        // scrub registered cloak values before returning to the agent.
+        return shield.cloak.scrub_response(&parsed).unwrap_or(frame);
     }
+
+    // v1.3: tag any credential-shaped values this tool returned into the
+    // shared per-project taint ledger, so a *different* tool relaying the
+    // same secret later is caught at its request seam. Best-effort; never
+    // blocks or rewrites the result -- tagging is observation-only.
+    // NB: runs on the ORIGINAL texts so taint hashes the real secret, before
+    // the v1.4 cloak scrub below rewrites the agent-facing copy.
+    let mut tagged = 0usize;
+    for text in &texts {
+        tagged += shield.taint.tag_all_in(text, "mcp_tool_result", tool);
+    }
+    if tagged > 0 {
+        info!(
+            "[shield] taint: tagged {} credential-shaped value(s) returned by '{}' \
+             (hashes only) for cross-tool tracking",
+            tagged, tool
+        );
+    }
+
+    // v1.4 cloak: scrub any registered secret value that leaked into the
+    // result back to its `{{cloak:NAME}}` placeholder before the agent (and
+    // thus the LLM context) ever sees it. Every subsequent `return frame`
+    // returns this scrubbed copy; a blocking verdict returns an error frame
+    // that carries no result content.
+    let frame = shield.cloak.scrub_response(&parsed).unwrap_or(frame);
 
     let engine = shield.current_engine();
     let adj = Adjustments {
@@ -2430,7 +2590,7 @@ async fn inspect_tool_call_response(
         eval.final_severity,
         json!({
             "matched_rules": eval.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>(),
-            "snippet": snippet,
+            "snippet": shield.cloak.scrub_plain(&snippet),
         }),
     )
     .await;
@@ -2540,25 +2700,39 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let canonical_params = json!({ "name": tool_name, "arguments": arguments });
 
+    // v1.3 cross-tool taint: does this outgoing call carry a credential we
+    // already saw leave a *different* tool/surface in this project? Scan
+    // the arguments (not the whole envelope) so the check tracks what the
+    // agent is actually sending onward. Must run BEFORE the empty-match
+    // early return below -- a taint hit is actionable even when no content
+    // rule fires (that's the whole point of the confused-deputy case).
+    let taint_hit = shield.taint.check(&arguments.to_string());
+
     // First-pass evaluation (no memory yet -- we don't have a primary rule).
     let initial_adj = Adjustments {
         workspace_is_prod: shield.workspace.is_prod,
         burst_in_progress: shield.burst.in_burst(),
+        tainted_secret_in_flight: taint_hit.is_some(),
         ..Default::default()
     };
     let engine = shield.current_engine();
     let first = engine.evaluate(tool_name, &canonical_params, initial_adj);
+    // When taint fired, `resolve()` injects a synthetic finding, so
+    // `first.matches` is non-empty and we don't short-circuit here.
     if first.matches.is_empty() {
         return None;
     }
 
     // Pick the primary rule (highest individual severity) to fingerprint.
+    // Exclude the synthetic taint finding so the fingerprint stays keyed on
+    // a real, reproducible rule when one exists.
     let primary_id = first
         .matches
         .iter()
+        .filter(|m| m.rule_id != aperion_shield::engine::TAINT_RULE_ID)
         .max_by(|a, b| a.severity.cmp(&b.severity).then(a.points.cmp(&b.points)))
         .map(|m| m.rule_id.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| aperion_shield::engine::TAINT_RULE_ID.to_string());
     let fp = fingerprint(&primary_id, &canonical_params);
 
     // Consult memory and re-evaluate with full adjustments.
@@ -2568,9 +2742,18 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
         burst_in_progress: shield.burst.in_burst(),
         fingerprint_recently_denied: mv.recent_deny,
         fingerprint_repeatedly_approved: mv.repeated_approve,
+        tainted_secret_in_flight: taint_hit.is_some(),
     };
     let eval = engine.evaluate(tool_name, &canonical_params, adj);
     let decision = decide(&eval);
+
+    if let Some(t) = &taint_hit {
+        warn!(
+            "[shield] CROSS-TOOL TAINT on '{}': {}",
+            tool_name,
+            t.reason()
+        );
+    }
 
     // Anything beyond Allow counts toward the burst window.
     if decision.is_blocking() || matches!(decision, Decision::Warn { .. }) {
@@ -2592,6 +2775,12 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
         "adjustments": eval.adjustments_applied,
         "decision": decision.label(),
         "memory": { "approves": mv.approve_count, "denies": mv.deny_count },
+        "taint": taint_hit.as_ref().map(|t| json!({
+            "entity_kind": t.entity_kind,
+            "source_surface": t.source_surface,
+            "source_tool": t.source_tool,
+            "age_secs": t.age_secs,
+        })),
     });
     eprintln!("{}", audit);
 
@@ -3142,6 +3331,105 @@ async fn run_identity_flush(cli: &Cli) -> anyhow::Result<()> {
     let gate = build_identity_gate(cli.identity_config.as_deref()).await?;
     let n = gate.flush()?;
     println!("flushed {} cached identity proof(s).", n);
+    Ok(())
+}
+
+/// `--taint-list`: print this project's non-expired cross-tool taint
+/// ledger. Never prints raw secrets -- only hashes + metadata.
+fn run_taint_list(cli: &Cli) -> anyhow::Result<()> {
+    let ledger = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
+    let entries = ledger.list();
+    println!("cross-tool taint ledger: {}", ledger.path().display());
+    println!("ttl: {}s | tracking: {}", ledger.ttl_secs(), if cli.no_taint_tracking { "disabled" } else { "enabled" });
+    println!("active (non-expired) entries: {}", entries.len());
+    if !entries.is_empty() {
+        println!();
+        for e in &entries {
+            let age = chrono::Utc::now().signed_duration_since(e.ts).num_seconds().max(0);
+            println!(
+                "  - kind={:<22} source={}/{:<16} age={}s hash={}…",
+                e.entity_kind,
+                e.source_surface,
+                e.source_tool,
+                age,
+                &e.hash[..e.hash.len().min(12)],
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `--taint-flush`: drop every entry in this project's taint ledger.
+fn run_taint_flush(cli: &Cli) -> anyhow::Result<()> {
+    let ledger = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
+    let n = ledger.flush()?;
+    println!("flushed {} cross-tool taint ledger entry/entries.", n);
+    Ok(())
+}
+
+/// `--cloak-add NAME`: register a reversible secret in the cloak vault. The
+/// value is read from `SHIELD_CLOAK_VALUE` if set, else from stdin (so it
+/// never lands in shell history). Never echoes the value back.
+fn run_cloak_add(name: &str) -> anyhow::Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("cloak name must not be empty");
+    }
+    let value = match std::env::var("SHIELD_CLOAK_VALUE") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            use std::io::Read;
+            eprintln!(
+                "[shield] reading secret value for '{}' from stdin (paste it, then Ctrl-D)…",
+                name
+            );
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf.trim_end_matches(['\n', '\r']).to_string()
+        }
+    };
+    if value.is_empty() {
+        anyhow::bail!("empty secret value; nothing registered");
+    }
+    let mut vault = CloakVault::load(true);
+    vault.register(name, &value);
+    vault.save()?;
+    println!(
+        "registered cloak secret '{}' ({} total). Reference it in tool-call arguments as {}",
+        name,
+        vault.len(),
+        aperion_shield::cloak::placeholder(name),
+    );
+    println!("vault: {} (mode 0600)", vault.path().display());
+    Ok(())
+}
+
+/// `--cloak-list`: print registered secret NAMEs (never values) and exit.
+fn run_cloak_list() -> anyhow::Result<()> {
+    let vault = CloakVault::load(true);
+    println!("cloak vault: {}", vault.path().display());
+    println!("registered secrets: {}", vault.len());
+    if !vault.is_empty() {
+        println!();
+        for name in vault.names() {
+            println!(
+                "  - {:<24} reference as {}",
+                name,
+                aperion_shield::cloak::placeholder(name)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `--cloak-remove NAME`: drop one secret from the cloak vault.
+fn run_cloak_remove(name: &str) -> anyhow::Result<()> {
+    let mut vault = CloakVault::load(true);
+    if vault.remove(name) {
+        vault.save()?;
+        println!("removed cloak secret '{}'.", name);
+    } else {
+        println!("no cloak secret registered under '{}'.", name);
+    }
     Ok(())
 }
 

@@ -54,7 +54,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::engine::Engine;
-use crate::{decide, Adjustments, BurstDetector, Decision, WorkspaceContext};
+use crate::{decide, Adjustments, BurstDetector, Decision, TaintLedger, WorkspaceContext};
 
 const MAX_FILE_SIZE_BYTES: u64 = 256 * 1024;
 
@@ -108,7 +108,12 @@ impl CheckStagedReport {
 /// every added/modified line through `engine`, returns the aggregated
 /// report. Runs synchronously — git invocations are cheap and the corpus
 /// is small (~hundreds of lines at most for a normal commit).
-pub fn run(repo_root: &std::path::Path, engine: &Engine, workspace_root: Option<&std::path::Path>) -> Result<CheckStagedReport> {
+pub fn run(
+    repo_root: &std::path::Path,
+    engine: &Engine,
+    workspace_root: Option<&std::path::Path>,
+    taint: Option<&TaintLedger>,
+) -> Result<CheckStagedReport> {
     if !is_inside_git_repo(repo_root)? {
         return Err(anyhow!(
             "--check-staged must be run inside a git repository (got {})",
@@ -163,7 +168,11 @@ pub fn run(repo_root: &std::path::Path, engine: &Engine, workspace_root: Option<
             }
             report.lines_scanned += 1;
 
-            let (eval, _scope) = evaluate_line(engine, kind, &content, &workspace, &burst);
+            // v1.3 cross-tool taint: check-only against staged diff content.
+            // Catches a credential that leaked from an MCP tool result being
+            // hard-coded into a commit in the same project.
+            let tainted = taint.map(|t| t.check(&content).is_some()).unwrap_or(false);
+            let (eval, _scope) = evaluate_line(engine, kind, &content, &workspace, &burst, tainted);
             let decision = decide(&eval);
             match decision {
                 Decision::Allow => continue,
@@ -280,10 +289,12 @@ fn evaluate_line(
     line: &str,
     workspace: &WorkspaceContext,
     burst: &BurstDetector,
+    tainted: bool,
 ) -> (crate::engine::Evaluation, &'static str) {
     let adj = Adjustments {
         workspace_is_prod: workspace.is_prod,
         burst_in_progress: burst.in_burst(),
+        tainted_secret_in_flight: tainted,
         ..Default::default()
     };
     match kind {

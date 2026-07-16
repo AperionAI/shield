@@ -48,6 +48,14 @@ pub trait RequestGate: Send + Sync {
     /// `Some(response)` when Shield answers the request itself (block /
     /// denied approval / pending identity); `None` to forward upstream.
     async fn intercept(&self, req: &Value) -> Option<Value>;
+
+    /// Rewrite a to-be-forwarded request frame before it goes upstream.
+    /// `Some(frame)` replaces the outbound frame (v1.4 secret cloaking
+    /// resolves `{{cloak:NAME}}` placeholders here); `None` forwards the
+    /// original frame unchanged. Default: no rewrite.
+    async fn transform_outbound(&self, _req: &Value) -> Option<String> {
+        None
+    }
 }
 
 /// Shared state between the HTTP server and the relay core.
@@ -202,7 +210,10 @@ async fn handle_post(
     let key = canonical_id(&id);
     state.pending.lock().await.insert(key.clone(), tx);
 
-    if to_upstream.send(frame).await.is_err() {
+    // v1.4 cloak: resolve `{{cloak:NAME}}` placeholders on the upstream copy
+    // only (runs after the gate, so rules saw the placeholder).
+    let outbound = gate.transform_outbound(&parsed).await.unwrap_or(frame);
+    if to_upstream.send(outbound).await.is_err() {
         state.pending.lock().await.remove(&key);
         return text(StatusCode::BAD_GATEWAY, "upstream gone");
     }

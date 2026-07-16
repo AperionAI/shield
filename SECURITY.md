@@ -146,6 +146,47 @@ but does **not** make it cryptographically impossible to evade:
   constrains what a malicious server can *do* even if it evades
   catalog-level detection entirely.
 
+### Known limitation: cross-tool taint tracking is heuristic (v1.3+)
+
+Cross-tool secret taint tracking (`--taint-ttl-secs`, shipped in v1.3)
+tags a hash of any credential-shaped value a tool *returns*, and escalates
+a later call on any surface that relays the same value. It closes the
+confused-deputy / cross-tool-relay gap (OWASP MCP09) that per-call checks
+miss, but it is **heuristic correlation, not a cryptographic taint-
+tracking guarantee**:
+
+- **Hash-equality only.** The correlation works by matching a SHA-256 of
+  the *exact substring* our regex extracts. A secret that is re-encoded or
+  transformed before reuse -- base64/hex re-encoding, URL-encoding,
+  splitting across fields, partial retyping, or wrapping in a different
+  serialization -- will not hash-match and will evade detection. Detecting
+  transformed secrets would require dataflow-level taint propagation
+  inside the agent/runtime, which a protocol-level proxy cannot see.
+- **Regex coverage is finite.** Only the enumerated high-signal shapes
+  (AWS/GitHub/Slack/OpenAI/Anthropic/Google/Stripe tokens, JWTs, PEM
+  private-key blocks, DB connection strings) are tracked. A bespoke or
+  vendor-specific credential format outside that corpus is not tagged. The
+  scope is deliberately tight to keep false positives near zero; it is not
+  a claim of completeness.
+- **No file locking.** The ledger (`.aperion-shield/taint.jsonl`) is
+  append-only and lock-free, the same best-effort contract as decision
+  memory. A read/write race between two Shield processes in the same
+  project can, in a narrow window, miss a just-written entry (fail open,
+  never fail closed with a false block on unrelated data).
+- **CWD-scoped.** The ledger lives under the current working directory's
+  `.aperion-shield/` (falling back to `~/.aperion-shield/` when the
+  project dir is read-only) -- the same inherited scoping caveat that
+  already applies to decision memory. Two IDE windows rooted at different
+  directories do not share a ledger.
+- **We never store the raw secret** -- only its hash, plus the entity kind
+  and the source tool/surface for the human-readable reason. `--taint-list`
+  and the audit log surface those metadata, never the credential itself.
+
+The signal is intended to *raise the cost and visibility* of a cross-tool
+credential relay and force a human decision on it, not to be an
+unbypassable exfiltration control. For "I don't trust this server's
+process at all," `--sandbox` remains the complementary control.
+
 ### Cryptographic primitives
 
 - **Ed25519** for identity proofs (the `--identity-*` family) and
@@ -329,3 +370,4 @@ If you operate Shield as part of an enterprise deployment:
 | 2026-05-20 | v0.7.0 shipped. No new advisories or fix-required changes; this is a feature-only release. `cargo audit` clean against `Cargo.lock` at the v0.7.0 commit. New surfaces (`--install-hooks`, `--check-staged`, `--check-pushed-refs`, `--suggest-rules`) all stay within the standalone process model — no new network endpoints, no new on-disk persistence beyond `.git/hooks/` (Shield itself) and the operator-redirected audit log. Supported-versions table updated; v0.6.x dropped to security-only. |
 | 2026-07-03 | v1.2.1 shipped. Hardening for the v1.2 continuous drift-check probe, prompted by external feedback: dropped the `__shield_drift_`-prefixed request id (a static, greppable marker, given this project is open source) in favor of a bare random UUID, and added +/-20% jitter to the polling interval so the cadence isn't a clean periodic signal. New §3 subsection "Known limitation: drift-check probes are not unspoofable" documents what this does and does not close — a targeted adversary running statistical traffic analysis could still attempt evasion; that residual risk is inherent to any protocol-level monitor sharing a channel with the thing it doesn't trust, and `--sandbox` is the complementary control for that threat model. No CVE; not a regression, a hardening of a feature shipped hours earlier. |
 | 2026-05-27 | v0.8.0 shipped. No new advisories or fix-required changes; this is a feature-only release. `cargo audit` clean against `Cargo.lock` at the v0.8.0 commit. New surfaces (`--install-shims`, `--uninstall-shims`, `--list-shims`, `--check-cmd`, `--explain`) all stay within the standalone process model. The shim path writes per-command `/bin/sh` wrappers into `~/.aperion-shield/bin/` (or `--shim-dir PATH`) at mode `0755` inside a directory at mode `0700`; **Shield will NOT overwrite any file it didn't write itself** (foreign-file collisions exit non-zero, file untouched). `--explain` is pure-input/pure-output — no on-disk persistence, no side-effects on decision memory or audit. Supported-versions table updated; v0.7.x dropped to security-only. |
+| 2026-07-03 | v1.3.0 shipped. New feature: cross-tool secret taint tracking (`--taint-ttl-secs`, `--no-taint-tracking`, `--taint-list`, `--taint-flush`). Closes the OWASP MCP09 confused-deputy / cross-tool-relay gap that per-call, single-server guardrails structurally miss — a credential leaked by one tool being relayed into a different tool/server/surface. New on-disk persistence: `.aperion-shield/taint.jsonl`, a per-project append-only ledger storing **only a SHA-256 hash** of each observed credential-shaped value (never the raw secret) plus its entity kind and source tool/surface. No new network endpoints. New §3 subsection "Known limitation: cross-tool taint tracking is heuristic" documents the honest limits: hash-equality correlation only (transformed/re-encoded secrets evade), finite regex corpus, lock-free (fail-open) ledger, CWD-scoped — it raises the cost and visibility of a relay and forces a human decision, it is not an unbypassable exfiltration control; `--sandbox` remains the complementary process-level control. `cargo audit` clean against `Cargo.lock` at the v1.3.0 commit. |

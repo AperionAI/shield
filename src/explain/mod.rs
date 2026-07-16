@@ -89,6 +89,10 @@ pub struct ExplainOptions {
     /// Pretend the same fingerprint had a recent deny. Drives the
     /// decision-memory escalation path.
     pub force_recently_denied: bool,
+    /// Pretend a credential-shaped value in these arguments was already
+    /// seen leaving another tool/surface. Drives the v1.3 cross-tool
+    /// taint escalation path (Approval floor).
+    pub force_tainted: bool,
 }
 
 /// Parsed shape of the input descriptor. We only require `name` and
@@ -191,6 +195,7 @@ fn build_adjustments(engine: &Engine, opts: &ExplainOptions) -> Result<Adjustmen
         burst_in_progress,
         fingerprint_repeatedly_approved: opts.force_repeatedly_approved,
         fingerprint_recently_denied: opts.force_recently_denied,
+        tainted_secret_in_flight: opts.force_tainted,
     })
 }
 
