@@ -40,7 +40,11 @@ against rug pulls, descriptions are scanned for tool poisoning, and
 tool results are scanned for prompt injection. v1.0 completes the
 story **before install and below the protocol**: `--scan` audits an
 MCP server before you ever wire it in, and `--sandbox` confines the
-server *process* at the OS level.
+server *process* at the OS level. And since v1.4, **reversible secret
+cloaking** lets your agent reference a real credential as a
+`{{cloak:NAME}}` placeholder — the secret is substituted in only on the
+frame Shield forwards upstream and scrubbed back out of any result, so it
+never enters the model's context, transcript, or prompt cache.
 
 Plus, when you need to prove **who** approved a destructive call —
 not just that *someone* did — Shield can gate selected rules behind
