@@ -5,7 +5,7 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Aperion Shield — Developer One-Pager — APERION</title>
-<meta name="description" content="Aperion Shield developer one-pager: install, integrate with Cursor / Claude Code in 60 seconds, what it catches, how to test against your own command history. Free, open-source, Apache 2.0.">
+<meta name="description" content="Aperion Shield developer one-pager: install, integrate with Cursor / Claude Code in 60 seconds, what it catches, how to test against your own command history. Free tier, binary-only.">
 <meta name="keywords" content="Aperion Shield, MCP guardrails, AI coding agents, Cursor, Claude Code, developer guide, install, integration, supply chain, reverse shell, sensitive paths">
 <meta name="author" content="APERION">
 <meta name="robots" content="index, follow">
@@ -255,10 +255,10 @@ table.cheat td.muted { color: #94a3b8; }
     <div class="version-chip">Aperion Shield · v0.3.0 · Developer One-Pager</div>
     <h1>Local guardrails for AI coding agents,<br>in 60 seconds.</h1>
     <p class="tagline">
-      A 1.2 MB binary that sits between Cursor / Claude Code and the real MCP servers your agent talks to (Postgres, GitHub, shell, filesystem...). Inspects every <code>tools/call</code> against 45 adaptive rules, blocks the destructive ones, prompts you for the high-risk ones, and lets the other 98% through. No cloud, no telemetry, Apache 2.0.
+      A 1.2 MB binary that sits between Cursor / Claude Code and the real MCP servers your agent talks to (Postgres, GitHub, shell, filesystem...). Inspects every <code>tools/call</code> against 45 adaptive rules, blocks the destructive ones, prompts you for the high-risk ones, and lets the other 98% through. No cloud, no telemetry, free tier.
     </p>
     <div class="badge-row">
-      <span class="badge badge-emerald"><i class="fas fa-code-branch"></i>&nbsp;Apache 2.0</span>
+      <span class="badge badge-emerald"><i class="fas fa-code-branch"></i>&nbsp;Free tier</span>
       <span class="badge badge-teal"><i class="fas fa-shield-halved"></i>&nbsp;45 rules · 8 surfaces</span>
       <span class="badge badge-blue"><i class="fas fa-desktop"></i>&nbsp;macOS · Linux · Windows</span>
       <span class="badge badge-violet"><i class="fab fa-rust"></i>&nbsp;95 tests · 0 dependencies on the call path</span>
@@ -462,7 +462,7 @@ aperion-shield --check --rules my-shieldset.yaml &lt; my-history.jsonl &gt; deci
         <li>YAML <code>shieldset</code> — bring your own rules</li>
         <li>Local audit log (JSON-Lines to stderr)</li>
         <li>Drop-in for Cursor and Claude Code over stdio</li>
-        <li>Apache 2.0 — no account, no telemetry, no cloud</li>
+        <li>Free tier — no account, no telemetry, no cloud</li>
       </ul>
     </div>
     <div class="paid">
@@ -503,7 +503,7 @@ cargo test --release    <span class="cm"># 44 unit + 51 integration = 95 tests, 
   </div>
 
   <div class="footer">
-    Aperion Shield is free, open-source, Apache 2.0 &nbsp;·&nbsp; built by <a href="https://aperion.ai">APERION</a> &nbsp;·&nbsp;
+    Aperion Shield is free (binary-only) &nbsp;·&nbsp; built by <a href="https://aperion.ai">APERION</a> &nbsp;·&nbsp;
     Use the toolbar above to save this page as a PDF (dark or light handout).
   </div>
 

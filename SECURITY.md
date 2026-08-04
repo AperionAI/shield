@@ -127,8 +127,8 @@ but does **not** make it cryptographically impossible to evade:
   to tell them apart and answer differently (lie to the probe, attack
   the client).
 - We mitigate the cheapest version of this: the probe id is a bare
-  random UUID with no `shield`/`drift`-style prefix (this project is
-  open source, so any static, greppable marker would hand an adversary
+  random UUID with no `shield`/`drift`-style prefix (any static,
+  greppable marker in observed network traffic would hand an adversary
   a free tell), and the polling interval is jittered +/-20% so the
   cadence itself isn't a clean, easily-fingerprinted periodic signal.
 - We do **not** claim this defeats a well-resourced, targeted

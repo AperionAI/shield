@@ -793,9 +793,9 @@ enum PendingKind {
 }
 
 /// v1.2.1: the id for a drift-check probe. Deliberately a bare random
-/// UUID with no `shield`/`drift`-style prefix -- since this project is
-/// open source, any static, greppable marker in the id would hand a
-/// malicious upstream a free, cheap way to special-case (and lie to)
+/// UUID with no `shield`/`drift`-style prefix -- any static, greppable
+/// marker in observed network traffic would hand a malicious upstream
+/// a free, cheap way to special-case (and lie to)
 /// Shield's probes while behaving normally for everything else. See
 /// SECURITY.md §3 "Known limitation: drift-check probes are not
 /// unspoofable" for what this does and does not defend against.
@@ -1211,7 +1211,7 @@ async fn main() -> anyhow::Result<()> {
     // upstream could use to special-case (and lie to) a probe is the
     // request `id` -- there is no other distinguishing metadata. We
     // deliberately use a bare random UUID with no `shield`/`drift`-style
-    // prefix (this crate is open source; any static, greppable marker
+    // prefix (any static, greppable marker in observed network traffic
     // would hand an adversary a free tell). We also jitter the interval
     // (+/-20%) so the polling cadence itself isn't a clean periodic
     // signal. Neither measure makes the probe *unspoofable* -- a

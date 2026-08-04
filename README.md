@@ -1,6 +1,6 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-365%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
@@ -16,7 +16,7 @@
 
 > ### ⭐ Star this repo if you think AI agents shouldn't touch prod unsupervised
 >
-> `aperion-shield` is the open-source reference implementation of **consequence-level control** for AI coding agents — the layer that stops a destructive `tools/call` *before* it lands, not a log you read after the damage is done. It's transparent insurance: you don't notice it until the day it saves you.
+> `aperion-shield` is the free reference implementation of **consequence-level control** for AI coding agents — the layer that stops a destructive `tools/call` *before* it lands, not a log you read after the damage is done. It's transparent insurance: you don't notice it until the day it saves you.
 >
 > If that's a problem you take seriously, a ⭐ is the fastest way to help other engineers in regulated and high-stakes shops find it **before** they need it → **[Star aperion-shield on GitHub](https://github.com/AperionAI/shield)**
 
@@ -134,7 +134,7 @@ A hardening follow-up to v1.2's drift-check probe, prompted by external
 feedback questioning whether the probe itself could be spoofed. The
 probe's request id no longer carries a `shield`/`drift`-style prefix —
 that was a static, greppable marker a targeted adversary could pattern-
-match on, given the project is open source — and now uses a bare random
+match on in observed network traffic — and now uses a bare random
 UUID instead. The polling interval is also jittered +/-20% so the
 cadence isn't a clean periodic signal. Neither change claims to make the
 probe unspoofable against a sufficiently determined, targeted adversary
@@ -594,7 +594,7 @@ result: fewer false-positive prompts on benign repeats, harder gates
 on the operations that matter, and a teach-as-you-go safer-alternative
 hint on every block.
 
-It is **free**, **open source** (Apache 2.0), and **standalone**. No
+It is **free** (binary-only, no source distributed) and **standalone**. No
 cloud account required. The binary is the same size as `git` and runs
 on macOS, Linux, and Windows.
 
@@ -1827,11 +1827,9 @@ Shield is in the control bucket, at the MCP transport layer.
   (ALLOW/DENY/BLOCK/ASK/FORCE/LOG). Strengths: signed rule
   distribution, multi-IDE support (Cursor / Claude Code / Copilot /
   Codex / Gemini), mature web dashboard. **How Shield differs:**
-  Apache-2.0 OSS for the full client (SigmaShake's CLI is closed-
-  source); adaptive composite scoring across five signals vs.
-  first-match-wins; published, reproducible false-positive rate
-  against a real-history corpus; embeddable Rust crate for non-MCP
-  hosts.
+  adaptive composite scoring across five signals vs. first-match-wins;
+  published, reproducible false-positive rate against a real-history
+  corpus; embeddable Rust crate for non-MCP hosts.
 - **[Captain Hook](https://github.com/securityreviewai/captain-hook)** by
   SecurityReview.ai — Python, Claude-Code-specific, YAML rules at
   `.claude/captain-hook.yaml`. Intercepts tool calls, prompts, and
@@ -1932,9 +1930,10 @@ the answer.
 | MCP trust registry (signed servers)                                    | —               | ✅               |
 | Sigstore-signed binaries + admission policies                          | —               | ✅               |
 
-The free product is governed by Apache 2.0 — including the `src/orgmode/`
-client. The paid product is the Smartflow **control plane** that the
-client talks to: a hosted service, separately licensed. Both halves
+The free product is distributed under a proprietary binary license — see
+[LICENSE](LICENSE) — including the `src/orgmode/` client. The paid
+product is the Smartflow **control plane** that the client talks to: a
+hosted service, separately licensed. Both halves
 share the same `shieldset.yaml` schema and the same audit-record format,
 so policy you author for standalone Shield works unchanged once you
 enroll into Smartflow.
@@ -2099,6 +2098,7 @@ star genuinely helps:
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Proprietary — binaries and images only, no source distributed. See
+[LICENSE](LICENSE) (Aperion AI Shield Binary License Agreement).
 
 <!-- ci: trigger codeql re-run after billing fix (2026-06-22) -->

@@ -289,10 +289,14 @@ reason / safer_alternative text.
 
 ## License and contributor agreement
 
-By contributing, you agree that your contributions will be licensed
-under the project's [Apache License 2.0](LICENSE). No separate CLA
-required; the Apache 2.0 license already contains the necessary
-patent and copyright grant language.
+Shield is proprietary — see [LICENSE](LICENSE) — so, unlike an Apache-2.0
+project, we can't rely on the license itself to carry an inbound
+contribution grant. By contributing, you agree to irrevocably assign to
+Aperion AI, Inc. (or, at Aperion's option, grant it a perpetual,
+worldwide, royalty-free, sublicensable copyright and patent license
+sufficient to relicense) all rights in your contribution, so it can be
+distributed under the project's license and any future license Aperion
+AI chooses.
 
 We do not require [DCO sign-off](https://developercertificate.org/)
 on commits, though you are welcome to use it if your employer
