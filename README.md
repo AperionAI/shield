@@ -604,6 +604,11 @@ Shield with a hosted approval queue, tamper-evident audit chain (RFC
 HIPAA / GDPR connectors. The two products share the same rule language
 — a `shieldset.yaml` you write for one works in the other.
 
+If you run a self-hosted agent on your own machine (OpenClaw, Hermes),
+[Smartflow Halo](https://github.com/AperionAI/halo-dist) is the local
+spend firewall for that box. It reuses Shield's MCP interception.
+Shield's terms are unchanged: still no cloud, no telemetry, no account.
+
 > **⭐ Did the 98.4% pass-through number or the adaptive-scoring design land for you?** Starring the repo is the single easiest way to signal that this approach is worth building on — and to help the next engineer find a guardrail before an agent finds their prod database → **[github.com/AperionAI/shield](https://github.com/AperionAI/shield)**
 
 ---
