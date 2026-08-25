@@ -135,10 +135,7 @@ impl OrgApi {
     pub async fn heartbeat(&self, device_id: &str) -> Result<(), OrgApiError> {
         let resp = self
             .http
-            .post(self.url(&format!(
-                "/api/enterprise/devices/{}/heartbeat",
-                device_id
-            )))
+            .post(self.url(&format!("/api/enterprise/devices/{}/heartbeat", device_id)))
             .bearer_auth(&self.vkey)
             .send()
             .await?;

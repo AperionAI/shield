@@ -51,19 +51,25 @@ fn render_text(suggestions: &[Suggestion]) -> String {
         out.push_str("[shield-suggest-rules] No tuning suggestions — your shieldset is well-fit for the audit window.\n");
         return out;
     }
-    let _ = writeln!(out, "[shield-suggest-rules] {} suggestion(s):\n", suggestions.len());
+    let _ = writeln!(
+        out,
+        "[shield-suggest-rules] {} suggestion(s):\n",
+        suggestions.len()
+    );
     for s in suggestions {
         match s {
-            Suggestion::RuleNeverFires { rule_id, window_days } => {
-                let _ = writeln!(
-                    out,
-                    "  [{kind}] {rid}",
-                    kind = s.kind(),
-                    rid = rule_id,
-                );
+            Suggestion::RuleNeverFires {
+                rule_id,
+                window_days,
+            } => {
+                let _ = writeln!(out, "  [{kind}] {rid}", kind = s.kind(), rid = rule_id,);
                 match window_days {
                     Some(d) => {
-                        let _ = writeln!(out, "    Did not fire over the last {} day(s) of audit log.", d);
+                        let _ = writeln!(
+                            out,
+                            "    Did not fire over the last {} day(s) of audit log.",
+                            d
+                        );
                     }
                     None => {
                         let _ = writeln!(out, "    Did not fire over the audit log window.");
@@ -90,7 +96,10 @@ fn render_text(suggestions: &[Suggestion]) -> String {
                     observed_fires, raw_severity, observed_final, raw_severity, observed_final,
                 );
             }
-            Suggestion::NoisyWarn { rule_id, observed_fires } => {
+            Suggestion::NoisyWarn {
+                rule_id,
+                observed_fires,
+            } => {
                 let _ = writeln!(out, "  [{}] {}", s.kind(), rule_id);
                 let _ = writeln!(
                     out,
@@ -116,16 +125,26 @@ fn render_markdown(suggestions: &[Suggestion]) -> String {
     );
     for s in suggestions {
         match s {
-            Suggestion::RuleNeverFires { rule_id, window_days } => {
+            Suggestion::RuleNeverFires {
+                rule_id,
+                window_days,
+            } => {
                 let _ = writeln!(out, "### `{}` — never fires", rule_id);
                 match window_days {
                     Some(d) => {
                         let _ = writeln!(out, "\n- **Kind:** `RULE_NEVER_FIRES`");
-                        let _ = writeln!(out, "- **Evidence:** 0 audit rows over the last {} day(s).", d);
+                        let _ = writeln!(
+                            out,
+                            "- **Evidence:** 0 audit rows over the last {} day(s).",
+                            d
+                        );
                     }
                     None => {
                         let _ = writeln!(out, "\n- **Kind:** `RULE_NEVER_FIRES`");
-                        let _ = writeln!(out, "- **Evidence:** 0 audit rows over the analyzed window.");
+                        let _ = writeln!(
+                            out,
+                            "- **Evidence:** 0 audit rows over the analyzed window."
+                        );
                     }
                 }
                 let _ = writeln!(
@@ -152,7 +171,10 @@ fn render_markdown(suggestions: &[Suggestion]) -> String {
                     raw_severity, observed_final,
                 );
             }
-            Suggestion::NoisyWarn { rule_id, observed_fires } => {
+            Suggestion::NoisyWarn {
+                rule_id,
+                observed_fires,
+            } => {
                 let _ = writeln!(out, "### `{}` — noisy warn", rule_id);
                 let _ = writeln!(out, "\n- **Kind:** `NOISY_WARN`");
                 let _ = writeln!(
@@ -185,19 +207,28 @@ fn render_yaml_patch(suggestions: &[Suggestion]) -> String {
     }
     for s in suggestions {
         match s {
-            Suggestion::RuleNeverFires { rule_id, window_days } => {
+            Suggestion::RuleNeverFires {
+                rule_id,
+                window_days,
+            } => {
                 let _ = writeln!(out);
                 let _ = writeln!(out, "# RULE_NEVER_FIRES: {}", rule_id);
                 match window_days {
                     Some(d) => {
-                        let _ = writeln!(out, "#   rationale: 0 audit rows in the last {} day(s).", d);
+                        let _ =
+                            writeln!(out, "#   rationale: 0 audit rows in the last {} day(s).", d);
                     }
                     None => {
-                        let _ = writeln!(out, "#   rationale: 0 audit rows in the analyzed window.");
+                        let _ =
+                            writeln!(out, "#   rationale: 0 audit rows in the analyzed window.");
                     }
                 }
                 let _ = writeln!(out, "#   action: REVIEW. We do not auto-suggest removal.");
-                let _ = writeln!(out, "# - id: {}\n#   # (left intact — review only)", rule_id);
+                let _ = writeln!(
+                    out,
+                    "# - id: {}\n#   # (left intact — review only)",
+                    rule_id
+                );
             }
             Suggestion::ConsistentlyDemoted {
                 rule_id,
@@ -215,7 +246,10 @@ fn render_yaml_patch(suggestions: &[Suggestion]) -> String {
                 let _ = writeln!(out, "- id: {}", rule_id);
                 let _ = writeln!(out, "  severity: {}", observed_final);
             }
-            Suggestion::NoisyWarn { rule_id, observed_fires } => {
+            Suggestion::NoisyWarn {
+                rule_id,
+                observed_fires,
+            } => {
                 let _ = writeln!(out);
                 let _ = writeln!(out, "# NOISY_WARN: {}", rule_id);
                 let _ = writeln!(
@@ -239,18 +273,35 @@ mod tests {
     #[test]
     fn parse_format_accepts_aliases() {
         assert_eq!(OutputFormat::parse("text").unwrap(), OutputFormat::Text);
-        assert_eq!(OutputFormat::parse("markdown").unwrap(), OutputFormat::Markdown);
+        assert_eq!(
+            OutputFormat::parse("markdown").unwrap(),
+            OutputFormat::Markdown
+        );
         assert_eq!(OutputFormat::parse("md").unwrap(), OutputFormat::Markdown);
-        assert_eq!(OutputFormat::parse("yaml-patch").unwrap(), OutputFormat::YamlPatch);
-        assert_eq!(OutputFormat::parse("patch").unwrap(), OutputFormat::YamlPatch);
+        assert_eq!(
+            OutputFormat::parse("yaml-patch").unwrap(),
+            OutputFormat::YamlPatch
+        );
+        assert_eq!(
+            OutputFormat::parse("patch").unwrap(),
+            OutputFormat::YamlPatch
+        );
         assert!(OutputFormat::parse("bogus").is_err());
     }
 
     #[test]
     fn empty_suggestion_list_renders_a_clean_message_in_each_format() {
-        for fmt in [OutputFormat::Text, OutputFormat::Markdown, OutputFormat::YamlPatch] {
+        for fmt in [
+            OutputFormat::Text,
+            OutputFormat::Markdown,
+            OutputFormat::YamlPatch,
+        ] {
             let s = render(&[], fmt);
-            assert!(!s.is_empty(), "format {:?} should always render something", fmt);
+            assert!(
+                !s.is_empty(),
+                "format {:?} should always render something",
+                fmt
+            );
         }
     }
 

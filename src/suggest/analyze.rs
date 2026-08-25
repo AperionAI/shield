@@ -41,7 +41,10 @@ pub enum Suggestion {
     /// Rule is loaded but produced no audit rows over the window.
     /// Either the operator doesn't need it (consider removing) or
     /// nobody's tried to do that destructive thing yet (keep it).
-    RuleNeverFires { rule_id: String, window_days: Option<u32> },
+    RuleNeverFires {
+        rule_id: String,
+        window_days: Option<u32>,
+    },
 
     /// The adaptive layer has been demoting this rule on every fire
     /// for ≥ min_occurrences observations.  The static severity is
@@ -56,7 +59,10 @@ pub enum Suggestion {
     /// The rule fires a lot AND every observation resolved to Warn
     /// (never Approval / Block). Consider demoting to informational
     /// so it stops eating composite-score headroom for other rules.
-    NoisyWarn { rule_id: String, observed_fires: usize },
+    NoisyWarn {
+        rule_id: String,
+        observed_fires: usize,
+    },
 }
 
 impl Suggestion {
@@ -129,11 +135,7 @@ pub fn aggregate(records: &[AuditRecord]) -> BTreeMap<String, RuleStats> {
 /// Generate suggestions from per-rule stats + the loaded engine (so we
 /// know which rule IDs exist in the current shieldset, even if they
 /// never fired in the audit window).
-pub fn analyze(
-    engine: &Engine,
-    records: &[AuditRecord],
-    opts: AnalyzeOptions,
-) -> Vec<Suggestion> {
+pub fn analyze(engine: &Engine, records: &[AuditRecord], opts: AnalyzeOptions) -> Vec<Suggestion> {
     let stats = aggregate(records);
     let mut out: Vec<Suggestion> = Vec::new();
 
@@ -154,8 +156,8 @@ pub fn analyze(
         if s.fires >= opts.min_occurrences && s.demotions == s.fires {
             // Pick the lowest final severity we ever observed -- that's
             // probably the right target for the static severity.
-            let lowest_final = lowest_severity(&s.final_severities)
-                .unwrap_or_else(|| "Low".to_string());
+            let lowest_final =
+                lowest_severity(&s.final_severities).unwrap_or_else(|| "Low".to_string());
             let raw_one = s
                 .raw_severities
                 .iter()
@@ -173,8 +175,7 @@ pub fn analyze(
 
         // NoisyWarn: fires often AND every observation was Warn.
         if s.fires >= opts.min_occurrences {
-            let only_warn = s.decisions.len() == 1
-                && s.decisions.contains_key("warn");
+            let only_warn = s.decisions.len() == 1 && s.decisions.contains_key("warn");
             if only_warn {
                 out.push(Suggestion::NoisyWarn {
                     rule_id: rule_id.clone(),
@@ -276,7 +277,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(demoted.len(), 1, "expected one CONSISTENTLY_DEMOTED for {}", rule_id);
+        assert_eq!(
+            demoted.len(),
+            1,
+            "expected one CONSISTENTLY_DEMOTED for {}",
+            rule_id
+        );
     }
 
     #[test]
@@ -324,7 +330,15 @@ mod tests {
             .iter()
             .filter(|s| s.rule_id() == rule_id)
             .collect();
-        assert_eq!(for_this_rule.len(), 1, "expected one suggestion, got {:#?}", for_this_rule);
-        assert!(matches!(for_this_rule[0], Suggestion::ConsistentlyDemoted { .. }));
+        assert_eq!(
+            for_this_rule.len(),
+            1,
+            "expected one suggestion, got {:#?}",
+            for_this_rule
+        );
+        assert!(matches!(
+            for_this_rule[0],
+            Suggestion::ConsistentlyDemoted { .. }
+        ));
     }
 }

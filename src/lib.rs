@@ -45,7 +45,7 @@ pub use engine::{
     decide, fingerprint, Adjustments, Decision, Engine, Evaluation, MatchInfo, Policy, Severity,
 };
 pub use identity::{
-    IdentityConfig, IdentityGate, IdentityProvider, IdMeProvider, MockProvider, Proof,
+    IdMeProvider, IdentityConfig, IdentityGate, IdentityProvider, MockProvider, Proof,
     ProviderConfig, ProviderKind, Requirement as IdentityRequirement,
 };
 pub use memory::{DecisionMemory, MemoryEntry, MemoryVerdict, Outcome};

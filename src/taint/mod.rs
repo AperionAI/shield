@@ -100,7 +100,10 @@ impl TaintMatch {
 
     /// Short label for the audit JSON / `--explain` signal.
     pub fn label(&self) -> String {
-        format!("{} from {}/{}", self.entity_kind, self.source_surface, self.source_tool)
+        format!(
+            "{} from {}/{}",
+            self.entity_kind, self.source_surface, self.source_tool
+        )
     }
 }
 
@@ -128,18 +131,30 @@ impl TaintLedger {
 
     #[cfg(test)]
     pub fn at_path(path: PathBuf, ttl_secs: u64, enabled: bool) -> Self {
-        Self { path, ttl_secs, enabled }
+        Self {
+            path,
+            ttl_secs,
+            enabled,
+        }
     }
 
-    pub fn enabled(&self) -> bool { self.enabled }
-    pub fn path(&self) -> &PathBuf { &self.path }
-    pub fn ttl_secs(&self) -> u64 { self.ttl_secs }
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+    pub fn ttl_secs(&self) -> u64 {
+        self.ttl_secs
+    }
 
     /// Tag a single known secret value. Best-effort: I/O errors are
     /// swallowed (the ledger must never break the proxy hot path), same
     /// contract as `memory.rs::record()`.
     pub fn tag(&self, entity_kind: &str, raw_value: &str, source_surface: &str, source_tool: &str) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -152,7 +167,11 @@ impl TaintLedger {
             ttl_secs: self.ttl_secs,
         };
         if let Ok(line) = serde_json::to_string(&entry) {
-            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.path) {
+            if let Ok(mut f) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            {
                 let _ = writeln!(f, "{}", line);
             }
         }
@@ -162,7 +181,9 @@ impl TaintLedger {
     /// the number of secrets tagged. Used on the *output* side (tool
     /// results, corpus inputs).
     pub fn tag_all_in(&self, text: &str, source_surface: &str, source_tool: &str) -> usize {
-        if !self.enabled { return 0; }
+        if !self.enabled {
+            return 0;
+        }
         let found = scan_secrets(text);
         for s in &found {
             self.tag(s.kind, &s.value, source_surface, source_tool);
@@ -178,7 +199,9 @@ impl TaintLedger {
     /// `memory.rs::verdict_for()` -- the file stays small (one line per
     /// distinct secret sighting per project).
     pub fn check(&self, text: &str) -> Option<TaintMatch> {
-        if !self.enabled { return None; }
+        if !self.enabled {
+            return None;
+        }
         let candidates = scan_secrets(text);
         if candidates.is_empty() {
             return None;
@@ -275,9 +298,15 @@ mod tests {
     fn tag_then_check_matches_same_secret() {
         let tmp = TempDir::new().unwrap();
         let l = ledger(&tmp);
-        let n = l.tag_all_in(&format!("your key is {AWS}"), "mcp_tool_result", "fetch_url");
+        let n = l.tag_all_in(
+            &format!("your key is {AWS}"),
+            "mcp_tool_result",
+            "fetch_url",
+        );
         assert_eq!(n, 1);
-        let hit = l.check(&format!("{{\"auth\":\"{AWS}\"}}")).expect("cross-tool hit");
+        let hit = l
+            .check(&format!("{{\"auth\":\"{AWS}\"}}"))
+            .expect("cross-tool hit");
         assert_eq!(hit.entity_kind, "aws_access_key");
         assert_eq!(hit.source_tool, "fetch_url");
         assert_eq!(hit.source_surface, "mcp_tool_result");
@@ -314,7 +343,11 @@ mod tests {
     fn list_and_flush() {
         let tmp = TempDir::new().unwrap();
         let l = ledger(&tmp);
-        l.tag_all_in(&format!("{AWS} and {}", concat!("sk-", "abcdefghijklmnopqrstuvwx")), "mcp_tool_result", "t");
+        l.tag_all_in(
+            &format!("{AWS} and {}", concat!("sk-", "abcdefghijklmnopqrstuvwx")),
+            "mcp_tool_result",
+            "t",
+        );
         assert_eq!(l.list().len(), 2);
         assert_eq!(l.flush().unwrap(), 2);
         assert!(l.list().is_empty());

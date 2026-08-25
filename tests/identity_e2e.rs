@@ -60,7 +60,11 @@ fn rule_emits_identity_verification_decision() {
     let eval = engine.evaluate("run_terminal", &params, Adjustments::default());
     assert!(!eval.matches.is_empty(), "rule should match");
     match decide(&eval) {
-        Decision::IdentityVerification { rule_id, requirement, .. } => {
+        Decision::IdentityVerification {
+            rule_id,
+            requirement,
+            ..
+        } => {
             assert_eq!(rule_id, "scm.commit_to_main");
             assert_eq!(requirement.provider, "mock");
             assert_eq!(requirement.scope, "scm.commit_to_main");
@@ -178,7 +182,12 @@ async fn loa_below_requirement_does_not_satisfy() {
     // Mock at LOA 1, rule requires LOA 2.
     let tmp = tempfile::tempdir().unwrap();
     let cfg = IdentityConfig::default();
-    let mock = Arc::new(MockProvider::new("mock", "subject-loa1", Some(format!("{}@{}", "low", "test")), 1));
+    let mock = Arc::new(MockProvider::new(
+        "mock",
+        "subject-loa1",
+        Some(format!("{}@{}", "low", "test")),
+        1,
+    ));
     let gate = IdentityGate::new(cfg, vec![mock], tmp.path().to_path_buf()).unwrap();
     let provider = gate.provider("mock").unwrap();
 
@@ -196,7 +205,10 @@ async fn loa_below_requirement_does_not_satisfy() {
         challenge_id: "ch-loa".into(),
     };
     let _ = provider.begin(creq).await.unwrap();
-    let vi = provider.exchange("ch-loa", "s", "ch-loa", None).await.unwrap();
+    let vi = provider
+        .exchange("ch-loa", "s", "ch-loa", None)
+        .await
+        .unwrap();
     gate.mint_and_cache(&vi, &req).unwrap();
     // The mint stores the LOA-1 proof. Requirement wants LOA-2.
     assert!(
@@ -229,7 +241,10 @@ async fn allowlist_restricts_which_subjects_can_satisfy() {
         challenge_id: "ch-allow".into(),
     };
     let _ = provider.begin(creq).await.unwrap();
-    let vi = provider.exchange("ch-allow", "s", "ch-allow", None).await.unwrap();
+    let vi = provider
+        .exchange("ch-allow", "s", "ch-allow", None)
+        .await
+        .unwrap();
     gate.mint_and_cache(&vi, &req).unwrap();
     // The mock's email is "[email protected]", which is NOT on the
     // allow-list (which contains "[email protected]"). So the cached
@@ -311,15 +326,25 @@ fn assert_identity_gate(command: &str, want_rule: &str, want_scope: &str, want_l
         "arguments": { "command": command }
     });
     let eval = engine.evaluate("run_terminal", &params, Adjustments::default());
-    assert!(!eval.matches.is_empty(), "rule should match command: {command}");
+    assert!(
+        !eval.matches.is_empty(),
+        "rule should match command: {command}"
+    );
     match decide(&eval) {
-        Decision::IdentityVerification { rule_id, requirement, .. } => {
+        Decision::IdentityVerification {
+            rule_id,
+            requirement,
+            ..
+        } => {
             assert_eq!(rule_id, want_rule, "command: {command}");
             assert_eq!(requirement.provider, "id_me");
             assert_eq!(requirement.scope, want_scope);
             assert_eq!(requirement.loa, want_loa);
         }
-        other => panic!("expected IdentityVerification for {command}, got {}", other.label()),
+        other => panic!(
+            "expected IdentityVerification for {command}, got {}",
+            other.label()
+        ),
     }
 }
 
@@ -381,7 +406,12 @@ shieldset:
     let _engine = Engine::from_yaml(yaml).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let cfg = IdentityConfig::default();
-    let mock = Arc::new(MockProvider::new("mock", "subject", Some(format!("{}@{}", "demo", "x")), 2));
+    let mock = Arc::new(MockProvider::new(
+        "mock",
+        "subject",
+        Some(format!("{}@{}", "demo", "x")),
+        2,
+    ));
     let gate = IdentityGate::new(cfg, vec![mock.clone()], tmp.path().to_path_buf()).unwrap();
     let req = IdentityRequirement {
         provider: "mock".into(),

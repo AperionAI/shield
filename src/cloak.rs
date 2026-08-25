@@ -67,14 +67,22 @@ impl CloakVault {
     /// regardless of stored contents.
     pub fn load(enabled: bool) -> Self {
         let path = resolve_path();
-        Self { secrets: read_secrets(&path), path, enabled }
+        Self {
+            secrets: read_secrets(&path),
+            path,
+            enabled,
+        }
     }
 
     /// Load from an explicit path (tests, and any embedder that wants a
     /// project-local vault instead of the home-dir default).
     pub fn at_path(path: PathBuf, enabled: bool) -> Self {
         let secrets = read_secrets(&path);
-        Self { secrets, path, enabled }
+        Self {
+            secrets,
+            path,
+            enabled,
+        }
     }
 
     /// Vault file path.
@@ -118,7 +126,9 @@ impl CloakVault {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = VaultFile { secrets: self.secrets.clone() };
+        let file = VaultFile {
+            secrets: self.secrets.clone(),
+        };
         let json = serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{}".to_string());
         atomic_write_0600(&self.path, json.as_bytes())
     }

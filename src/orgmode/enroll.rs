@@ -72,11 +72,15 @@ pub async fn run_enroll(
     eprintln!("[shield] enrolled successfully");
     eprintln!("[shield]   device_id    = {}", resp.device_id);
     eprintln!("[shield]   policy_group = {}", resp.policy_group);
-    eprintln!("[shield]   vkey         = {}*** (stored at ~/.aperion-shield/orgmode.json)",
-        &resp.vkey[..resp.vkey.len().min(12)]);
+    eprintln!(
+        "[shield]   vkey         = {}*** (stored at ~/.aperion-shield/orgmode.json)",
+        &resp.vkey[..resp.vkey.len().min(12)]
+    );
     eprintln!("[shield]");
-    eprintln!("[shield] next run of `aperion-shield -- <mcp-server>` will pull policy from {}",
-        smartflow_url);
+    eprintln!(
+        "[shield] next run of `aperion-shield -- <mcp-server>` will pull policy from {}",
+        smartflow_url
+    );
     Ok(())
 }
 
@@ -100,8 +104,10 @@ pub async fn run_status() -> anyhow::Result<()> {
     println!("  device_id        = {}", state.device_id);
     println!("  device_name      = {}", state.device_name);
     println!("  policy_group     = {}", state.policy_group);
-    println!("  owner_email      = {}",
-        state.owner_email.clone().unwrap_or_else(|| "<none>".into()));
+    println!(
+        "  owner_email      = {}",
+        state.owner_email.clone().unwrap_or_else(|| "<none>".into())
+    );
     println!("  enrolled_at      = {}", state.enrolled_at);
     println!("  platform         = {}", state.platform);
     println!("  device_fingerprint = {}", state.device_fingerprint);

@@ -145,7 +145,10 @@ fn under_threshold_does_not_emit_consistency_suggestions() {
     // shouldn't be listed there either). Let's just confirm the
     // body doesn't contain CONSISTENTLY_DEMOTED for this rule.
     let needle = format!("CONSISTENTLY_DEMOTED] {}", rule_id);
-    assert!(!body.contains(&needle), "should not emit DEMOTED at 3 fires when min=5");
+    assert!(
+        !body.contains(&needle),
+        "should not emit DEMOTED at 3 fires when min=5"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────

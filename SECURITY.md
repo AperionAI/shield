@@ -23,7 +23,8 @@ If you only read one section, read **§4 — Open advisories** below.
 
 | Version | Status | Receives fixes |
 |---|---|---|
-| `1.5.x` | current stable | yes |
+| `1.6.x` | current stable | yes |
+| `1.5.x` | previous       | security-only — superseded by v1.6.0 on 2026-08-25 |
 | `1.4.x` | previous       | security-only — superseded by v1.5.0 on 2026-08-25 |
 | `1.3.x` | superseded     | no |
 | `0.8.x` | superseded     | no |
@@ -190,17 +191,19 @@ process at all," `--sandbox` remains the complementary control.
 ### Known limitation: native agent hooks are user-level (v1.5+)
 
 `--install-agent-hooks` writes fail-closed wrappers under
-`~/.aperion-shield/hooks/` and merges **user-level** Claude
-`~/.claude/settings.json` / Cursor `~/.cursor/hooks.json`. That is the
+`~/.aperion-shield/hooks/` and merges **user-level** host config
+(Claude, Cursor, Codex, Gemini CLI, Copilot CLI). That is the
 TrustFall-shaped threat: project-local hook files can be dropped in by
-a malicious repo.
+a malicious repo. Install prints those files and does not modify them;
+`--scan-ide` flags them as `scan.ide.project_hooks`.
 
 Honest limits:
 
 - **Project hooks can still exist.** We do not delete or override
-  `.cursor/hooks.json` / `.claude/settings.json` inside a repo. A
-  project can add its own hooks; user-level hooks still fire if the
-  host loads both, but that is host-defined.
+  `.cursor/hooks.json` / `.claude/settings.json` (or Codex / Gemini /
+  Copilot equivalents) inside a repo. A project can add its own hooks;
+  user-level hooks still fire if the host loads both, but that is
+  host-defined.
 - **`SHIELD_HOOKS_DISABLE=1` and git `--no-verify` still bypass.** Same
   contract as the git hooks. The native wrappers fail closed if the
   binary is missing; git hooks historically fail open so teammates
@@ -389,6 +392,7 @@ If you operate Shield as part of an enterprise deployment:
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | v1.6.0. Linux Landlock backend for `--sandbox secrets` / `--sandbox strict` (helper `--internal-sandbox-exec`, then exec into the upstream; `strict` without `--sandbox-allow-network` is a hard fail if the kernel cannot deny TCP). Windows PATH shims (`aws.cmd` via PATHEXT). `--install-agent-hooks` covers Codex / Gemini CLI / Copilot CLI. TrustFall follow-through: install reports project-level hook files without modifying them; `--scan-ide` finding `scan.ide.project_hooks`. Supported-versions table: 1.6.x current, 1.5.x security-only. No new network endpoints. |
 | 2026-08-25 | v1.5.0 shipped. Native Claude/Cursor PreToolUse hooks (`--check-hook`, `--install-agent-hooks`, fail-closed wrappers), `--scan-ide` (TrustFall project MCP + Skills ATR pass), `install.sh` for `shield-get.aperion.ai`. New §3 subsection "native agent hooks are user-level". Supported-versions table: 1.5.x current, 1.4.x security-only. No new network endpoints in the binary; the installer still only talks to GitHub Releases. |
 | 2026-05-15 | Initial policy. Documents the three open Dependabot advisories surfaced by Shield's first public release and the v0.6.0 fix plan. |
 | 2026-05-18 | v0.6.0 shipped. RUSTSEC-2026-0098 / -0099 / -0104 closed by `rustls-webpki 0.103.13` (transitively via the `reqwest 0.12` / `rustls 0.23` / `hyper 1.x` upgrade). `.cargo/audit.toml` ignore list trimmed back to `[]`. Supported-versions table updated. |

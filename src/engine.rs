@@ -165,7 +165,9 @@ impl Decision {
     pub fn is_blocking(&self) -> bool {
         matches!(
             self,
-            Decision::Block { .. } | Decision::Approval { .. } | Decision::IdentityVerification { .. }
+            Decision::Block { .. }
+                | Decision::Approval { .. }
+                | Decision::IdentityVerification { .. }
         )
     }
 
@@ -267,8 +269,12 @@ impl Default for SupplyChainCfg {
         }
     }
 }
-fn default_on_changed() -> String { "block".into() }
-fn default_on_new() -> String { "warn".into() }
+fn default_on_changed() -> String {
+    "block".into()
+}
+fn default_on_new() -> String {
+    "warn".into()
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorkspaceProbeCfg {
@@ -354,18 +360,38 @@ pub struct CompositeThresholds {
 }
 impl Default for CompositeThresholds {
     fn default() -> Self {
-        Self { medium: 2, high: 5, critical: 9 }
+        Self {
+            medium: 2,
+            high: 5,
+            critical: 9,
+        }
     }
 }
 
-fn default_true() -> bool { true }
-fn one() -> u8 { 1 }
-fn default_three() -> u32 { 3 }
-fn default_seven() -> u32 { 7 }
-fn default_300() -> u32 { 300 }
-fn default_five() -> u32 { 5 }
-fn default_two() -> u32 { 2 }
-fn default_nine() -> u32 { 9 }
+fn default_true() -> bool {
+    true
+}
+fn one() -> u8 {
+    1
+}
+fn default_three() -> u32 {
+    3
+}
+fn default_seven() -> u32 {
+    7
+}
+fn default_300() -> u32 {
+    300
+}
+fn default_five() -> u32 {
+    5
+}
+fn default_two() -> u32 {
+    2
+}
+fn default_nine() -> u32 {
+    9
+}
 fn default_prod_signals() -> Vec<String> {
     vec![
         ".env.production".into(),
@@ -439,7 +465,10 @@ pub enum Scope {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum SqlPredicate { UnscopedUpdate, UnscopedDelete }
+pub enum SqlPredicate {
+    UnscopedUpdate,
+    UnscopedDelete,
+}
 
 #[derive(Debug)]
 struct Match {
@@ -469,7 +498,10 @@ pub struct CompiledRule {
 
 impl CompiledRule {
     pub fn matches_tool_call(&self, tool: &str, params: &serde_json::Value) -> bool {
-        let m = match &self.matcher { Some(m) => m, None => return false };
+        let m = match &self.matcher {
+            Some(m) => m,
+            None => return false,
+        };
         if let Some(allow) = &m.tool_whitelist {
             if !allow.contains(tool) {
                 return false;
@@ -481,10 +513,14 @@ impl CompiledRule {
             let sqls = extract_sql(params);
             for s in &sqls {
                 for re in &m.sql_re {
-                    if re.is_match(s) { return true; }
+                    if re.is_match(s) {
+                        return true;
+                    }
                 }
                 for p in &m.sql_predicates {
-                    if matches_sql_predicate(*p, s) { return true; }
+                    if matches_sql_predicate(*p, s) {
+                        return true;
+                    }
                 }
             }
         }
@@ -493,12 +529,19 @@ impl CompiledRule {
         if !m.any_param_re.is_empty() {
             let mut hit = false;
             walk_strings(params, &mut |s| {
-                if hit { return; }
+                if hit {
+                    return;
+                }
                 for re in &m.any_param_re {
-                    if re.is_match(s) { hit = true; return; }
+                    if re.is_match(s) {
+                        hit = true;
+                        return;
+                    }
                 }
             });
-            if hit { return true; }
+            if hit {
+                return true;
+            }
         }
 
         // 3. Structured command predicates (v2): operate on the joined
@@ -507,12 +550,19 @@ impl CompiledRule {
         if !m.command_predicates.is_empty() {
             let mut hit = false;
             walk_strings(params, &mut |s| {
-                if hit { return; }
+                if hit {
+                    return;
+                }
                 for p in &m.command_predicates {
-                    if p.matches(s) { hit = true; return; }
+                    if p.matches(s) {
+                        hit = true;
+                        return;
+                    }
                 }
             });
-            if hit { return true; }
+            if hit {
+                return true;
+            }
         }
 
         // 4. Sensitive path matcher (v2): walks all string params and
@@ -528,22 +578,36 @@ impl CompiledRule {
         if !m.sensitive_paths.is_empty() {
             let mut hit = false;
             walk_strings(params, &mut |s| {
-                if hit { return; }
-                if !crate::predicates::command_writes(s) { return; }
+                if hit {
+                    return;
+                }
+                if !crate::predicates::command_writes(s) {
+                    return;
+                }
                 for sp in &m.sensitive_paths {
-                    if sp.touches(s) { hit = true; return; }
+                    if sp.touches(s) {
+                        hit = true;
+                        return;
+                    }
                 }
             });
-            if hit { return true; }
+            if hit {
+                return true;
+            }
         }
 
         false
     }
 
     pub fn matches_text(&self, text: &str) -> bool {
-        let m = match &self.matcher { Some(m) => m, None => return false };
+        let m = match &self.matcher {
+            Some(m) => m,
+            None => return false,
+        };
         for re in &m.text_re {
-            if re.is_match(text) { return true; }
+            if re.is_match(text) {
+                return true;
+            }
         }
         false
     }
@@ -552,7 +616,9 @@ impl CompiledRule {
     /// evaluator so `tool_description` / `tool_result` rules can target
     /// specific tools.
     pub fn tool_whitelist(&self) -> Option<&HashSet<String>> {
-        self.matcher.as_ref().and_then(|m| m.tool_whitelist.as_ref())
+        self.matcher
+            .as_ref()
+            .and_then(|m| m.tool_whitelist.as_ref())
     }
 }
 
@@ -633,7 +699,9 @@ impl Engine {
                     let p = match n.to_ascii_lowercase().as_str() {
                         "unscoped_update" => SqlPredicate::UnscopedUpdate,
                         "unscoped_delete" => SqlPredicate::UnscopedDelete,
-                        other => anyhow::bail!("rule '{}'.sql_predicates: unknown '{}'", y.id, other),
+                        other => {
+                            anyhow::bail!("rule '{}'.sql_predicates: unknown '{}'", y.id, other)
+                        }
                     };
                     sql_preds.push(p);
                 }
@@ -745,7 +813,12 @@ impl Engine {
         self.resolve(matches, composite_points, adj)
     }
 
-    fn resolve(&self, mut matches: Vec<MatchInfo>, composite_points: u32, adj: Adjustments) -> Evaluation {
+    fn resolve(
+        &self,
+        mut matches: Vec<MatchInfo>,
+        composite_points: u32,
+        adj: Adjustments,
+    ) -> Evaluation {
         // v1.3: inject a synthetic finding for a cross-tool taint hit so
         // the signal flows through `decide()` (which returns `Allow` on an
         // empty match set) and is attributable in audit / `--explain`.
@@ -843,7 +916,8 @@ pub fn decide(eval: &Evaluation) -> Decision {
         .matches
         .iter()
         .max_by(|a, b| {
-            a.severity.cmp(&b.severity)
+            a.severity
+                .cmp(&b.severity)
                 .then(a.points.cmp(&b.points))
                 .then(b.rule_id.cmp(&a.rule_id))
         })
@@ -912,10 +986,15 @@ pub fn decide(eval: &Evaluation) -> Decision {
 }
 
 fn severity_from_points(points: u32, t: &CompositeThresholds) -> Severity {
-    if points >= t.critical { Severity::Critical }
-    else if points >= t.high { Severity::High }
-    else if points >= t.medium { Severity::Medium }
-    else { Severity::Low }
+    if points >= t.critical {
+        Severity::Critical
+    } else if points >= t.high {
+        Severity::High
+    } else if points >= t.medium {
+        Severity::Medium
+    } else {
+        Severity::Low
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -925,7 +1004,9 @@ fn severity_from_points(points: u32, t: &CompositeThresholds) -> Severity {
 fn compile_regexes(rule_id: &str, field: &str, ps: Vec<String>) -> anyhow::Result<Vec<Regex>> {
     let mut out = Vec::with_capacity(ps.len());
     for p in ps {
-        out.push(Regex::new(&p).map_err(|e| anyhow::anyhow!("rule '{}'.{}: bad regex '{}': {}", rule_id, field, p, e))?);
+        out.push(Regex::new(&p).map_err(|e| {
+            anyhow::anyhow!("rule '{}'.{}: bad regex '{}': {}", rule_id, field, p, e)
+        })?);
     }
     Ok(out)
 }
@@ -943,13 +1024,17 @@ fn walk_sql(v: &serde_json::Value, out: &mut Vec<String>) {
         serde_json::Value::Object(map) => {
             for (k, val) in map {
                 if SQL_KEYS.iter().any(|sk| sk.eq_ignore_ascii_case(k)) {
-                    if let Some(s) = val.as_str() { out.push(s.to_string()); }
+                    if let Some(s) = val.as_str() {
+                        out.push(s.to_string());
+                    }
                 }
                 walk_sql(val, out);
             }
         }
         serde_json::Value::Array(arr) => {
-            for item in arr { walk_sql(item, out); }
+            for item in arr {
+                walk_sql(item, out);
+            }
         }
         _ => {}
     }
@@ -958,31 +1043,41 @@ fn walk_sql(v: &serde_json::Value, out: &mut Vec<String>) {
 pub(crate) fn walk_strings<F: FnMut(&str)>(v: &serde_json::Value, f: &mut F) {
     match v {
         serde_json::Value::String(s) => f(s),
-        serde_json::Value::Array(arr) => for item in arr { walk_strings(item, f); },
-        serde_json::Value::Object(map) => for (_, val) in map { walk_strings(val, f); },
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                walk_strings(item, f);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, val) in map {
+                walk_strings(val, f);
+            }
+        }
         _ => {}
     }
 }
 
-static UPDATE_HEAD: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\bUPDATE\s+[A-Za-z_][A-Za-z0-9_\.]*\s+SET\b").expect("static")
-});
-static DELETE_HEAD: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\bDELETE\s+FROM\s+[A-Za-z_][A-Za-z0-9_\.]*").expect("static")
-});
-static WHERE_CLAUSE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\bWHERE\b").expect("static")
-});
+static UPDATE_HEAD: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\bUPDATE\s+[A-Za-z_][A-Za-z0-9_\.]*\s+SET\b").expect("static"));
+static DELETE_HEAD: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\bDELETE\s+FROM\s+[A-Za-z_][A-Za-z0-9_\.]*").expect("static"));
+static WHERE_CLAUSE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bWHERE\b").expect("static"));
 
 fn matches_sql_predicate(p: SqlPredicate, sql: &str) -> bool {
     for frag in sql.split(';') {
         let f = frag.trim();
-        if f.is_empty() { continue; }
+        if f.is_empty() {
+            continue;
+        }
         match p {
             SqlPredicate::UnscopedUpdate => {
-                if !UPDATE_HEAD.is_match(f) { continue; }
+                if !UPDATE_HEAD.is_match(f) {
+                    continue;
+                }
                 // Case 1 -- no WHERE clause at all.
-                if !WHERE_CLAUSE.is_match(f) { return true; }
+                if !WHERE_CLAUSE.is_match(f) {
+                    return true;
+                }
                 // Case 2 -- tautological WHERE clause: the WHERE
                 // selects exactly the rows the SET would change, so
                 // the UPDATE is functionally identical to an unscoped
@@ -992,10 +1087,14 @@ fn matches_sql_predicate(p: SqlPredicate, sql: &str) -> bool {
                 // (every FALSE row gets flipped; no FALSE row is left
                 // behind; the WHERE adds nothing the SET wasn't
                 // already going to do.)
-                if where_is_tautological_for_update(f) { return true; }
+                if where_is_tautological_for_update(f) {
+                    return true;
+                }
             }
             SqlPredicate::UnscopedDelete => {
-                if DELETE_HEAD.is_match(f) && !WHERE_CLAUSE.is_match(f) { return true; }
+                if DELETE_HEAD.is_match(f) && !WHERE_CLAUSE.is_match(f) {
+                    return true;
+                }
             }
         }
     }
@@ -1047,18 +1146,30 @@ fn where_is_tautological_for_update(sql: &str) -> bool {
         Some(c) => c,
         None => return false,
     };
-    let set_part = match caps.get(1) { Some(m) => m.as_str(), None => return false };
-    let where_part = match caps.get(2) { Some(m) => m.as_str(), None => return false };
+    let set_part = match caps.get(1) {
+        Some(m) => m.as_str(),
+        None => return false,
+    };
+    let where_part = match caps.get(2) {
+        Some(m) => m.as_str(),
+        None => return false,
+    };
 
     let set_pairs = parse_set_pairs(set_part);
-    if set_pairs.is_empty() { return false; }
+    if set_pairs.is_empty() {
+        return false;
+    }
 
     let conjuncts = split_where_on_and(where_part);
-    if conjuncts.is_empty() { return false; }
+    if conjuncts.is_empty() {
+        return false;
+    }
 
     for conjunct in &conjuncts {
         let trimmed = conjunct.trim_matches(|c: char| c.is_whitespace() || c == '(' || c == ')');
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         let mut matched = false;
         for (col, val) in &set_pairs {
             if predicate_is_tautological(col, val, trimmed) {
@@ -1066,7 +1177,9 @@ fn where_is_tautological_for_update(sql: &str) -> bool {
                 break;
             }
         }
-        if !matched { return false; }
+        if !matched {
+            return false;
+        }
     }
     true
 }
@@ -1079,11 +1192,21 @@ fn parse_set_pairs(set_part: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for raw in set_part.split(',') {
         let mut halves = raw.splitn(2, '=');
-        let col = match halves.next() { Some(c) => c.trim(), None => continue };
-        let val = match halves.next() { Some(v) => v.trim(), None => continue };
-        if col.is_empty() || val.is_empty() { continue; }
+        let col = match halves.next() {
+            Some(c) => c.trim(),
+            None => continue,
+        };
+        let val = match halves.next() {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if col.is_empty() || val.is_empty() {
+            continue;
+        }
         let col_norm = col.trim_matches(|c: char| c == '"' || c == '`').to_string();
-        let val_norm = val.trim_matches(|c: char| c == '\'' || c == '"').to_string();
+        let val_norm = val
+            .trim_matches(|c: char| c == '\'' || c == '"')
+            .to_string();
         out.push((col_norm, val_norm));
     }
     out
@@ -1094,9 +1217,7 @@ fn parse_set_pairs(set_part: &str) -> Vec<(String, String)> {
 /// with OR or parentheses fall through to "no split" and the caller
 /// will inspect the whole clause as a single conjunct.
 fn split_where_on_and(where_part: &str) -> Vec<&str> {
-    static AND_SPLIT: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)\s+AND\s+").expect("static")
-    });
+    static AND_SPLIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s+AND\s+").expect("static"));
     AND_SPLIT.split(where_part).collect()
 }
 
@@ -1112,7 +1233,10 @@ fn predicate_is_tautological(col: &str, set_val: &str, predicate: &str) -> bool 
 
     // Pattern 1 -- inequality: col != X / col <> X.
     if regex_match(
-        &format!(r"(?i)^\s*{}\s*(?:!=|<>)\s*{}{}{}\s*$", col_esc, q, val_esc, q),
+        &format!(
+            r"(?i)^\s*{}\s*(?:!=|<>)\s*{}{}{}\s*$",
+            col_esc, q, val_esc, q
+        ),
         predicate,
     ) {
         return true;
@@ -1120,7 +1244,10 @@ fn predicate_is_tautological(col: &str, set_val: &str, predicate: &str) -> bool 
 
     // Pattern 2 -- IS NOT: col IS NOT X (or IS DISTINCT FROM X).
     if regex_match(
-        &format!(r"(?i)^\s*{}\s+IS\s+(?:NOT|DISTINCT\s+FROM)\s+{}{}{}\s*$", col_esc, q, val_esc, q),
+        &format!(
+            r"(?i)^\s*{}\s+IS\s+(?:NOT|DISTINCT\s+FROM)\s+{}{}{}\s*$",
+            col_esc, q, val_esc, q
+        ),
         predicate,
     ) {
         return true;
@@ -1132,7 +1259,10 @@ fn predicate_is_tautological(col: &str, set_val: &str, predicate: &str) -> bool 
     if is_bool_literal(&set_val_lower) {
         let opposite_pat = bool_opposite_regex_alt(&set_val_lower);
         if regex_match(
-            &format!(r"(?i)^\s*{}\s*=\s*{}(?:{}){}\s*$", col_esc, q, opposite_pat, q),
+            &format!(
+                r"(?i)^\s*{}\s*=\s*{}(?:{}){}\s*$",
+                col_esc, q, opposite_pat, q
+            ),
             predicate,
         ) {
             return true;
@@ -1143,10 +1273,7 @@ fn predicate_is_tautological(col: &str, set_val: &str, predicate: &str) -> bool 
     // TRUE, so flipping all NULLs to TRUE captures every "not yet
     // verified" row.
     if set_val_lower == "true" || set_val_lower == "t" || set_val_lower == "1" {
-        if regex_match(
-            &format!(r"(?i)^\s*{}\s+IS\s+NULL\s*$", col_esc),
-            predicate,
-        ) {
+        if regex_match(&format!(r"(?i)^\s*{}\s+IS\s+NULL\s*$", col_esc), predicate) {
             return true;
         }
         // Pattern 5 -- NOT col: SQL truthiness negation; functionally
@@ -1225,12 +1352,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn engine() -> Engine { Engine::builtin_default() }
+    fn engine() -> Engine {
+        Engine::builtin_default()
+    }
 
     #[test]
     fn bundled_default_loads_with_many_rules() {
         let e = engine();
-        assert!(e.rules.len() >= 30, "expected >= 30 default rules, got {}", e.rules.len());
+        assert!(
+            e.rules.len() >= 30,
+            "expected >= 30 default rules, got {}",
+            e.rules.len()
+        );
     }
 
     #[test]
@@ -1278,7 +1411,10 @@ mod tests {
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
         match decide(&ev) {
             Decision::Approval { rule_id, .. } => assert_eq!(rule_id, "sql.unscoped_update"),
-            other => panic!("expected Approval on tautological WHERE, got {}", other.label()),
+            other => panic!(
+                "expected Approval on tautological WHERE, got {}",
+                other.label()
+            ),
         }
     }
 
@@ -1288,8 +1424,10 @@ mod tests {
         let p = json!({"arguments": {"query":
             "UPDATE users SET status = 'active' WHERE status != 'active'"}});
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
-        assert!(matches!(decide(&ev), Decision::Approval { .. }),
-                "expected Approval on `WHERE col != X` tautology");
+        assert!(
+            matches!(decide(&ev), Decision::Approval { .. }),
+            "expected Approval on `WHERE col != X` tautology"
+        );
     }
 
     #[test]
@@ -1298,8 +1436,10 @@ mod tests {
         let p = json!({"arguments": {"query":
             "UPDATE users SET status = 'active' WHERE status <> 'active'"}});
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
-        assert!(matches!(decide(&ev), Decision::Approval { .. }),
-                "expected Approval on `WHERE col <> X` tautology");
+        assert!(
+            matches!(decide(&ev), Decision::Approval { .. }),
+            "expected Approval on `WHERE col <> X` tautology"
+        );
     }
 
     #[test]
@@ -1308,8 +1448,10 @@ mod tests {
         let p = json!({"arguments": {"query":
             "UPDATE users SET verified = TRUE WHERE verified IS NULL"}});
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
-        assert!(matches!(decide(&ev), Decision::Approval { .. }),
-                "expected Approval on `WHERE col IS NULL` + `SET col = TRUE` tautology");
+        assert!(
+            matches!(decide(&ev), Decision::Approval { .. }),
+            "expected Approval on `WHERE col IS NULL` + `SET col = TRUE` tautology"
+        );
     }
 
     #[test]
@@ -1318,8 +1460,10 @@ mod tests {
         let p = json!({"arguments": {"query":
             "UPDATE users SET banned = TRUE WHERE NOT banned"}});
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
-        assert!(matches!(decide(&ev), Decision::Approval { .. }),
-                "expected Approval on `WHERE NOT col` + `SET col = TRUE` tautology");
+        assert!(
+            matches!(decide(&ev), Decision::Approval { .. }),
+            "expected Approval on `WHERE NOT col` + `SET col = TRUE` tautology"
+        );
     }
 
     #[test]
@@ -1328,8 +1472,10 @@ mod tests {
         let p = json!({"arguments": {"query":
             "UPDATE users SET email_verified = TRUE WHERE email_verified IS NOT TRUE"}});
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
-        assert!(matches!(decide(&ev), Decision::Approval { .. }),
-                "expected Approval on `WHERE col IS NOT TRUE` + `SET col = TRUE` tautology");
+        assert!(
+            matches!(decide(&ev), Decision::Approval { .. }),
+            "expected Approval on `WHERE col IS NOT TRUE` + `SET col = TRUE` tautology"
+        );
     }
 
     #[test]
@@ -1339,8 +1485,10 @@ mod tests {
         let p = json!({"arguments": {"query":
             "UPDATE users SET email_verified = 1 WHERE email_verified = 0"}});
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
-        assert!(matches!(decide(&ev), Decision::Approval { .. }),
-                "expected Approval on 1/0 boolean opposites");
+        assert!(
+            matches!(decide(&ev), Decision::Approval { .. }),
+            "expected Approval on 1/0 boolean opposites"
+        );
     }
 
     #[test]
@@ -1352,8 +1500,11 @@ mod tests {
         let p = json!({"arguments": {"query":
             "UPDATE users SET email_verified = TRUE WHERE email_verified = FALSE AND created_at > NOW() - INTERVAL '7 days'"}});
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
-        assert!(matches!(decide(&ev), Decision::Allow { .. } | Decision::Warn { .. }),
-                "expected Allow/Warn on real time-window scope; got {}", decide(&ev).label());
+        assert!(
+            matches!(decide(&ev), Decision::Allow { .. } | Decision::Warn { .. }),
+            "expected Allow/Warn on real time-window scope; got {}",
+            decide(&ev).label()
+        );
     }
 
     #[test]
@@ -1363,8 +1514,11 @@ mod tests {
         let p = json!({"arguments": {"query":
             "UPDATE users SET email_verified = TRUE WHERE id = 7"}});
         let ev = e.evaluate("execute_sql", &p, Adjustments::default());
-        assert!(matches!(decide(&ev), Decision::Allow { .. } | Decision::Warn { .. }),
-                "expected Allow/Warn on scoped UPDATE by id; got {}", decide(&ev).label());
+        assert!(
+            matches!(decide(&ev), Decision::Allow { .. } | Decision::Warn { .. }),
+            "expected Allow/Warn on scoped UPDATE by id; got {}",
+            decide(&ev).label()
+        );
     }
 
     #[test]
@@ -1384,7 +1538,7 @@ mod tests {
         adj.workspace_is_prod = true;
         let ev = e.evaluate("execute_sql", &p, adj);
         match decide(&ev) {
-            Decision::Approval { .. } => {},
+            Decision::Approval { .. } => {}
             other => panic!("expected Approval from prod bump, got {}", other.label()),
         }
     }
@@ -1408,8 +1562,11 @@ mod tests {
         adj.fingerprint_recently_denied = true;
         let ev = e.evaluate("execute_sql", &p, adj);
         match decide(&ev) {
-            Decision::Approval { .. } => {},
-            other => panic!("expected Approval from deny escalation, got {}", other.label()),
+            Decision::Approval { .. } => {}
+            other => panic!(
+                "expected Approval from deny escalation, got {}",
+                other.label()
+            ),
         }
     }
 
@@ -1423,7 +1580,9 @@ mod tests {
         adj.tainted_secret_in_flight = true;
         let ev = e.evaluate("shell", &p, adj);
         assert!(
-            ev.matches.iter().any(|m| m.rule_id == crate::engine::TAINT_RULE_ID),
+            ev.matches
+                .iter()
+                .any(|m| m.rule_id == crate::engine::TAINT_RULE_ID),
             "synthetic taint finding should be present"
         );
         assert!(ev.adjustments_applied.contains(&"tainted_secret_in_flight"));
@@ -1444,7 +1603,10 @@ mod tests {
         adj.tainted_secret_in_flight = true;
         let ev = e.evaluate("execute_sql", &p, adj);
         // DROP DATABASE is Critical already; taint keeps it blocking.
-        assert!(decide(&ev).is_blocking(), "taint on a critical call stays blocking");
+        assert!(
+            decide(&ev).is_blocking(),
+            "taint on a critical call stays blocking"
+        );
     }
 
     #[test]
@@ -1458,7 +1620,8 @@ mod tests {
         adj.tainted_secret_in_flight = true;
         let ev = e.evaluate("execute_sql", &p, adj);
         assert!(
-            !ev.adjustments_applied.contains(&"fingerprint_repeatedly_approved"),
+            !ev.adjustments_applied
+                .contains(&"fingerprint_repeatedly_approved"),
             "demotion must not apply when taint is in flight"
         );
         match decide(&ev) {

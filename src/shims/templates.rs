@@ -43,7 +43,8 @@
 /// Stable marker line that identifies an Aperion-installed shim. The
 /// installer matches on this line so we can evolve the shim body across
 /// versions without losing the ability to recognise our own footprint.
-pub const APERION_SHIELD_SHIM_MARKER: &str = "# APERION-SHIELD-SHIM v1 -- managed by `aperion-shield --install-shims`";
+pub const APERION_SHIELD_SHIM_MARKER: &str =
+    "# APERION-SHIELD-SHIM v1 -- managed by `aperion-shield --install-shims`";
 
 /// Render a shim wrapper for `command_name` whose real binary lives at
 /// `real_binary_path`. Returns a complete shell script suitable for
@@ -97,12 +98,63 @@ if [ "$exit_code" -ne 0 ]; then
     exit "$exit_code"
 fi
 
-exec "{real}" "$@"
+    exec "{real}" "$@"
 "#,
         marker = APERION_SHIELD_SHIM_MARKER,
         cmd = command_name,
         real = real_binary_path,
     )
+}
+
+/// Windows `cmd.exe` wrapper. PATHEXT includes `.CMD`, so a file named
+/// `aws.cmd` on PATH is what `aws` resolves to.
+pub fn shim_cmd(command_name: &str, real_binary_path: &str) -> String {
+    // cmd.exe treats `&`, `|`, `>`, `^` as metacharacters. Quote the
+    // real path and double any embedded quotes.
+    let real = real_binary_path.replace('"', "\"\"");
+    format!(
+        r#"@echo off
+REM {marker}
+REM Bypass: set SHIELD_SHIMS_DISABLE=1
+if "%SHIELD_SHIMS_DISABLE%"=="1" goto :run_real
+where aperion-shield >nul 2>nul
+if errorlevel 1 (
+    echo [aperion-shield] binary not on PATH; skipping shim guardrail for `{cmd}` 1>&2
+    goto :run_real
+)
+aperion-shield --check-cmd -- {cmd} %*
+if errorlevel 1 exit /b %ERRORLEVEL%
+:run_real
+"{real}" %*
+"#,
+        marker = APERION_SHIELD_SHIM_MARKER,
+        cmd = command_name,
+        real = real,
+    )
+}
+
+/// Filename written into the shim dir for `command_name`.
+pub fn shim_filename(command_name: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("{command_name}.cmd")
+    }
+    #[cfg(not(windows))]
+    {
+        command_name.to_string()
+    }
+}
+
+/// Render the platform shim body.
+pub fn shim_body(command_name: &str, real_binary_path: &str) -> String {
+    #[cfg(windows)]
+    {
+        shim_cmd(command_name, real_binary_path)
+    }
+    #[cfg(not(windows))]
+    {
+        shim_script(command_name, real_binary_path)
+    }
 }
 
 /// The set of commands Shield knows how to shim out-of-the-box. Each
@@ -160,6 +212,15 @@ mod tests {
         let bypass_idx = s.find("SHIELD_SHIMS_DISABLE").expect("bypass branch");
         let after_bypass = &s[bypass_idx..];
         assert!(after_bypass.contains("exec \"/opt/homebrew/bin/kubectl\""));
+    }
+
+    #[test]
+    fn shim_cmd_contains_marker_and_check_cmd() {
+        let s = shim_cmd("aws", r"C:\Program Files\Amazon\AWSCLIV2\aws.exe");
+        assert!(s.contains(APERION_SHIELD_SHIM_MARKER));
+        assert!(s.contains("aperion-shield --check-cmd -- aws"));
+        assert!(s.contains(r#""C:\Program Files\Amazon\AWSCLIV2\aws.exe""#));
+        assert!(s.contains("SHIELD_SHIMS_DISABLE"));
     }
 
     #[test]

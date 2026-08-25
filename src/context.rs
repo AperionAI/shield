@@ -32,7 +32,11 @@ impl WorkspaceContext {
     pub fn probe_at(policy: &Policy, root: &Path) -> Self {
         let root = root.to_path_buf();
         if !policy.workspace_probe.enabled {
-            return Self { root, is_prod: false, matched_signals: vec![] };
+            return Self {
+                root,
+                is_prod: false,
+                matched_signals: vec![],
+            };
         }
         let mut matched = Vec::new();
         for sig in &policy.workspace_probe.prod_signals {
@@ -41,7 +45,11 @@ impl WorkspaceContext {
             }
         }
         let is_prod = !matched.is_empty();
-        Self { root, is_prod, matched_signals: matched }
+        Self {
+            root,
+            is_prod,
+            matched_signals: matched,
+        }
     }
 }
 
@@ -96,10 +104,8 @@ mod tests {
     fn file_signal_at_cwd_root() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join(".env.production"), "DB=prod").unwrap();
-        let ctx = WorkspaceContext::probe_at(
-            &policy_with_signals(&[".env.production"]),
-            tmp.path(),
-        );
+        let ctx =
+            WorkspaceContext::probe_at(&policy_with_signals(&[".env.production"]), tmp.path());
         assert!(ctx.is_prod);
         assert_eq!(ctx.matched_signals, vec![".env.production".to_string()]);
     }

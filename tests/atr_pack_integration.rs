@@ -35,7 +35,8 @@ fn scope_of(name: &str) -> Scope {
 
 fn engine_with_pack() -> Engine {
     let mut e = Engine::builtin_default();
-    e.extend_from_yaml(PACK).expect("ATR pack must merge cleanly");
+    e.extend_from_yaml(PACK)
+        .expect("ATR pack must merge cleanly");
     e
 }
 
@@ -105,17 +106,17 @@ shieldset:
 fn upstream_corpus_cases_behave_as_labelled() {
     let engine = engine_with_pack();
     let cases: Vec<Case> = serde_json::from_str(CASES).expect("fixture parses");
-    assert!(cases.len() > 300, "expected a substantial corpus, got {}", cases.len());
+    assert!(
+        cases.len() > 300,
+        "expected a substantial corpus, got {}",
+        cases.len()
+    );
 
     let mut tp_failures = Vec::new();
     let mut tn_failures = Vec::new();
     for c in &cases {
-        let eval = engine.evaluate_scoped_text(
-            scope_of(&c.scope),
-            None,
-            &c.text,
-            Adjustments::default(),
-        );
+        let eval =
+            engine.evaluate_scoped_text(scope_of(&c.scope), None, &c.text, Adjustments::default());
         let fired = eval.matches.iter().any(|m| m.rule_id == c.rule_id);
         match c.expect.as_str() {
             "triggered" if !fired => tp_failures.push(format!("{}: {:?}", c.rule_id, c.text)),

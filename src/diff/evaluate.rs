@@ -62,7 +62,10 @@ pub fn evaluate_corpus(
     opts: &EvalOptions,
 ) -> anyhow::Result<Vec<DecisionLine>> {
     let raw = std::fs::read_to_string(rules_path).with_context(|| {
-        format!("reading shieldset for evaluation from {}", rules_path.display())
+        format!(
+            "reading shieldset for evaluation from {}",
+            rules_path.display()
+        )
     })?;
     let engine = Engine::from_yaml(&raw)
         .with_context(|| format!("loading shieldset from {}", rules_path.display()))?;
@@ -119,8 +122,7 @@ pub fn evaluate_corpus(
         } else {
             let tool = input.get("tool").and_then(|v| v.as_str()).unwrap_or("");
             let params = input.get("params").cloned().unwrap_or(Value::Null);
-            let canonical = if params.get("name").is_some() || params.get("arguments").is_some()
-            {
+            let canonical = if params.get("name").is_some() || params.get("arguments").is_some() {
                 params.clone()
             } else {
                 json!({ "name": tool, "arguments": params })
@@ -131,12 +133,18 @@ pub fn evaluate_corpus(
         let decision = decide(&eval);
         let label = decision.label().to_string();
         let (primary_rule_id, reason) = match &decision {
-            Decision::Block { rule_id, reason, .. }
-            | Decision::Approval { rule_id, reason, .. }
-            | Decision::IdentityVerification { rule_id, reason, .. } => {
-                (Some(rule_id.clone()), reason.clone())
+            Decision::Block {
+                rule_id, reason, ..
             }
-            Decision::Warn { rule_id, banner, .. } => (Some(rule_id.clone()), banner.clone()),
+            | Decision::Approval {
+                rule_id, reason, ..
+            }
+            | Decision::IdentityVerification {
+                rule_id, reason, ..
+            } => (Some(rule_id.clone()), reason.clone()),
+            Decision::Warn {
+                rule_id, banner, ..
+            } => (Some(rule_id.clone()), banner.clone()),
             Decision::Allow => (None, String::new()),
         };
 

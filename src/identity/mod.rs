@@ -278,7 +278,10 @@ impl IdentityGate {
         state_dir: std::path::PathBuf,
     ) -> anyhow::Result<Self> {
         let signer = Arc::new(ProofSigner::load_or_create(&state_dir)?);
-        let cache = Arc::new(ProofCache::open(state_dir.join("identity-cache.json"), &signer)?);
+        let cache = Arc::new(ProofCache::open(
+            state_dir.join("identity-cache.json"),
+            &signer,
+        )?);
         Ok(Self {
             config,
             providers,
@@ -337,7 +340,11 @@ impl IdentityGate {
         let h = self.ensure_server().await?;
         h.register(
             challenge.clone(),
-            server::Inflight { rule_id, provider, requirement },
+            server::Inflight {
+                rule_id,
+                provider,
+                requirement,
+            },
         )
         .await;
         Ok(())
@@ -346,13 +353,8 @@ impl IdentityGate {
     /// Block up to `hold_seconds` waiting for a proof to land in the
     /// cache for `req`. Returns the proof if one arrives; None on
     /// timeout. Callers should treat None as "tell the agent to retry".
-    pub async fn wait_for_proof(
-        &self,
-        req: &Requirement,
-        hold_seconds: u64,
-    ) -> Option<Proof> {
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(hold_seconds);
+    pub async fn wait_for_proof(&self, req: &Requirement, hold_seconds: u64) -> Option<Proof> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(hold_seconds);
         loop {
             if let Some(p) = self.cached_proof_for(req) {
                 return Some(p);
@@ -442,7 +444,7 @@ mod tests {
         // such tokens to a placeholder which made earlier versions of
         // this test compare two identical strings without us noticing.
         let allowed = format!("{}@{}", "ace", "aperion.ai");
-        let denied  = format!("{}@{}", "bee", "other.com");
+        let denied = format!("{}@{}", "bee", "other.com");
         let req = Requirement {
             provider: "id_me".into(),
             scope: "scm.commit".into(),
@@ -493,14 +495,34 @@ mod tests {
         };
         let now = unix_now();
         let fresh = Proof {
-            v: 1, provider: "id_me".into(), subject: "s".into(), email: None,
-            loa: 0, scope: "x".into(), verified_at: now, expires_at: now + 60,
-            nonce: "".into(), sig: "".into(),
+            v: 1,
+            provider: "id_me".into(),
+            subject: "s".into(),
+            email: None,
+            loa: 0,
+            scope: "x".into(),
+            verified_at: now,
+            expires_at: now + 60,
+            nonce: "".into(),
+            sig: "".into(),
         };
-        let stale = Proof { verified_at: now - 120, expires_at: now + 60, ..fresh.clone() };
-        let wrong_scope = Proof { scope: "y".into(), ..fresh.clone() };
-        let low_loa = Proof { loa: 0, ..fresh.clone() };
-        let high_loa_req = Requirement { loa: 2, ..req.clone() };
+        let stale = Proof {
+            verified_at: now - 120,
+            expires_at: now + 60,
+            ..fresh.clone()
+        };
+        let wrong_scope = Proof {
+            scope: "y".into(),
+            ..fresh.clone()
+        };
+        let low_loa = Proof {
+            loa: 0,
+            ..fresh.clone()
+        };
+        let high_loa_req = Requirement {
+            loa: 2,
+            ..req.clone()
+        };
 
         assert!(req.is_satisfied_by(&fresh, now));
         assert!(!req.is_satisfied_by(&stale, now));

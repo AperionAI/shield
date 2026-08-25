@@ -66,8 +66,14 @@ pub fn spawn_stdio_upstream(cmd: &[String]) -> anyhow::Result<UpstreamHandle> {
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("failed to spawn upstream '{}'", program))?;
-    let mut child_in = child.stdin.take().ok_or_else(|| anyhow!("missing child stdin"))?;
-    let child_out = child.stdout.take().ok_or_else(|| anyhow!("missing child stdout"))?;
+    let mut child_in = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("missing child stdin"))?;
+    let child_out = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("missing child stdout"))?;
 
     let (to_tx, mut to_rx) = mpsc::channel::<String>(CHANNEL_DEPTH);
     let (from_tx, from_rx) = mpsc::channel::<String>(CHANNEL_DEPTH);

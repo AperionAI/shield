@@ -41,11 +41,17 @@ struct CacheFile {
     proofs: Vec<Proof>,
 }
 
-fn default_v() -> u32 { 1 }
+fn default_v() -> u32 {
+    1
+}
 
 impl Default for CacheFile {
     fn default() -> Self {
-        Self { v: 1, public_key: String::new(), proofs: Vec::new() }
+        Self {
+            v: 1,
+            public_key: String::new(),
+            proofs: Vec::new(),
+        }
     }
 }
 
@@ -70,7 +76,9 @@ impl ProofCache {
                     log::warn!(
                         "[shield-identity] dropping proof with bad signature \
                          (provider={} subject={} scope={})",
-                        p.provider, p.subject, p.scope
+                        p.provider,
+                        p.subject,
+                        p.scope
                     );
                 }
             }
@@ -167,11 +175,16 @@ mod tests {
     fn proof(subject: &str, scope: &str, ttl: u64) -> Proof {
         let now = super::super::unix_now();
         Proof {
-            v: 1, provider: "mock".into(), subject: subject.into(),
+            v: 1,
+            provider: "mock".into(),
+            subject: subject.into(),
             email: Some("[email protected]".into()),
-            loa: 2, scope: scope.into(),
-            verified_at: now, expires_at: now + ttl,
-            nonce: "abc".into(), sig: String::new(),
+            loa: 2,
+            scope: scope.into(),
+            verified_at: now,
+            expires_at: now + ttl,
+            nonce: "abc".into(),
+            sig: String::new(),
         }
     }
 

@@ -12,6 +12,13 @@
 //!     Apple for third-party use but stable, universally present, and
 //!     still what Bazel/Chromium-class tooling uses for exactly this
 //!     job. No daemon, no privileges required.
+//!   - Linux: Landlock (kernel 5.13+). Applied in a helper process
+//!     (`--internal-sandbox-exec`) then exec'd into the upstream.
+//!     Landlock is allow-list only, so `secrets` grants `$HOME`
+//!     children except credential paths rather than deny-listing.
+//!     `strict` additionally denies TCP bind/connect unless
+//!     `--sandbox-allow-network`. No Landlock → `secrets` warns and
+//!     runs unconfined; `strict` refuses to start.
 //!   - other platforms: graceful degrade -- warn loudly and run
 //!     unconfined (`SandboxLevel::Off` semantics) unless the user
 //!     passed `--sandbox strict`, in which case refusing to start is
@@ -35,6 +42,11 @@
 //!     the part that stops exfiltration and tampering.
 
 use std::path::{Path, PathBuf};
+
+pub mod paths;
+
+#[cfg(target_os = "linux")]
+pub mod linux;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxLevel {
@@ -87,51 +99,31 @@ impl Default for SandboxConfig {
 pub enum Confinement {
     None,
     Seatbelt { level: SandboxLevel },
+    Landlock { level: SandboxLevel },
 }
 
 impl std::fmt::Display for Confinement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = |l: SandboxLevel| match l {
+            SandboxLevel::Off => "off",
+            SandboxLevel::Secrets => "secrets",
+            SandboxLevel::Strict => "strict",
+        };
         match self {
             Confinement::None => write!(f, "unconfined"),
-            Confinement::Seatbelt { level } => {
-                write!(f, "seatbelt:{}", match level {
-                    SandboxLevel::Off => "off",
-                    SandboxLevel::Secrets => "secrets",
-                    SandboxLevel::Strict => "strict",
-                })
-            }
+            Confinement::Seatbelt { level } => write!(f, "seatbelt:{}", label(*level)),
+            Confinement::Landlock { level } => write!(f, "landlock:{}", label(*level)),
         }
     }
 }
-
-/// Credential material the `secrets` level denies. Relative to $HOME.
-const SECRET_SUBPATHS: &[&str] = &[
-    ".ssh",
-    ".aws",
-    ".gnupg",
-    ".gcloud",
-    ".config/gcloud",
-    ".azure",
-    ".kube",
-    ".netrc",
-    ".docker/config.json",
-    ".npmrc",
-    ".pypirc",
-    ".cargo/credentials.toml",
-];
 
 fn sbpl_escape(p: &Path) -> String {
     // SBPL string literals are double-quoted; escape embedded quotes
     // and backslashes. Paths with either are vanishingly rare but a
     // sandbox profile is the wrong place to be sloppy.
-    p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn home_dir(cfg: &SandboxConfig) -> PathBuf {
-    cfg.home
-        .clone()
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/"))
+    p.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 /// Render the Seatbelt (SBPL) profile for a config. Public for tests.
@@ -142,13 +134,16 @@ fn home_dir(cfg: &SandboxConfig) -> PathBuf {
 /// rejected: the dyld/runtime read surface differs per macOS release
 /// and fails as SIGABRT before the upstream's main() -- unshippable.
 pub fn seatbelt_profile(cfg: &SandboxConfig) -> String {
-    let home = home_dir(cfg);
+    let home = paths::home_dir(cfg);
     let mut out = String::from("(version 1)\n(allow default)\n");
 
     // Both levels: deny credential material (minus exemptions).
-    for sub in SECRET_SUBPATHS {
-        let p = home.join(sub);
-        if cfg.allow_paths.iter().any(|a| p.starts_with(a) || a.starts_with(&p)) {
+    for p in paths::secret_paths(&home) {
+        if cfg
+            .allow_paths
+            .iter()
+            .any(|a| p.starts_with(a) || a.starts_with(&p))
+        {
             continue;
         }
         out.push_str(&format!(
@@ -166,8 +161,19 @@ pub fn seatbelt_profile(cfg: &SandboxConfig) -> String {
             "(allow file-write* (subpath \"{}\"))\n",
             sbpl_escape(&cwd)
         ));
-        for p in ["/tmp", "/private/tmp", "/private/var/tmp", "/private/var/folders", "/dev/null", "/dev/tty"] {
-            let kind = if p.starts_with("/dev/") { "literal" } else { "subpath" };
+        for p in [
+            "/tmp",
+            "/private/tmp",
+            "/private/var/tmp",
+            "/private/var/folders",
+            "/dev/null",
+            "/dev/tty",
+        ] {
+            let kind = if p.starts_with("/dev/") {
+                "literal"
+            } else {
+                "subpath"
+            };
             out.push_str(&format!("(allow file-write* ({} \"{}\"))\n", kind, p));
         }
         for p in &cfg.allow_paths {
@@ -183,13 +189,30 @@ pub fn seatbelt_profile(cfg: &SandboxConfig) -> String {
     out
 }
 
+/// Restrict-then-exec helper used by `--internal-sandbox-exec`.
+pub fn exec_sandboxed(spec_json: &str, cmd: &[String]) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::exec_sandboxed(spec_json, cmd)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = spec_json;
+        let _ = cmd;
+        anyhow::bail!("--internal-sandbox-exec is Linux-only")
+    }
+}
+
 /// Wrap `cmd` in the platform sandbox launcher per `cfg`.
 ///
 /// Returns the command to exec plus the achieved confinement. Degrades
 /// gracefully (warn + unconfined) when the platform has no sandbox,
 /// EXCEPT for `strict`, where silently running unconfined would be a
 /// lie -- there we refuse.
-pub fn wrap_command(cmd: &[String], cfg: &SandboxConfig) -> anyhow::Result<(Vec<String>, Confinement)> {
+pub fn wrap_command(
+    cmd: &[String],
+    cfg: &SandboxConfig,
+) -> anyhow::Result<(Vec<String>, Confinement)> {
     if cfg.level == SandboxLevel::Off || cmd.is_empty() {
         return Ok((cmd.to_vec(), Confinement::None));
     }
@@ -206,12 +229,29 @@ pub fn wrap_command(cmd: &[String], cfg: &SandboxConfig) -> anyhow::Result<(Vec<
         Ok((wrapped, Confinement::Seatbelt { level: cfg.level }))
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let spec = serde_json::to_string(&linux::ExecSpec::from(cfg))?;
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "aperion-shield".to_string());
+        let mut wrapped = vec![
+            exe,
+            "--internal-sandbox-exec".to_string(),
+            spec,
+            "--".to_string(),
+        ];
+        wrapped.extend(cmd.iter().cloned());
+        Ok((wrapped, Confinement::Landlock { level: cfg.level }))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         match cfg.level {
             SandboxLevel::Strict => anyhow::bail!(
                 "--sandbox strict is not supported on this platform yet \
-                 (macOS Seatbelt only); refusing to run unconfined when \
+                 (macOS Seatbelt / Linux Landlock); refusing to run unconfined when \
                  strict confinement was requested"
             ),
             _ => {
@@ -293,6 +333,28 @@ mod tests {
         assert_eq!(wrapped[1], "-p");
         assert!(wrapped[2].contains("(deny file-read*"));
         assert_eq!(&wrapped[3..], &cmd[..]);
-        assert_eq!(conf, Confinement::Seatbelt { level: SandboxLevel::Secrets });
+        assert_eq!(
+            conf,
+            Confinement::Seatbelt {
+                level: SandboxLevel::Secrets
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_wraps_with_internal_helper() {
+        let cmd = vec!["/bin/echo".to_string(), "hi".to_string()];
+        let (wrapped, conf) = wrap_command(&cmd, &cfg(SandboxLevel::Secrets)).unwrap();
+        assert_eq!(wrapped[1], "--internal-sandbox-exec");
+        assert!(wrapped[2].contains("secrets"));
+        assert_eq!(wrapped[3], "--");
+        assert_eq!(&wrapped[4..], &cmd[..]);
+        assert_eq!(
+            conf,
+            Confinement::Landlock {
+                level: SandboxLevel::Secrets
+            }
+        );
     }
 }

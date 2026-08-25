@@ -118,17 +118,15 @@ impl ToolCallDescriptor {
             .get("name")
             .or_else(|| v.get("tool"))
             .and_then(|x| x.as_str())
-            .ok_or_else(|| {
-                anyhow!("input descriptor must have a `name` (or `tool`) string field")
-            })?
+            .ok_or_else(|| anyhow!("input descriptor must have a `name` (or `tool`) string field"))?
             .to_string();
         let arguments = v
             .get("arguments")
             .or_else(|| v.get("params"))
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let arguments_pretty = serde_json::to_string_pretty(&arguments)
-            .unwrap_or_else(|_| "{}".to_string());
+        let arguments_pretty =
+            serde_json::to_string_pretty(&arguments).unwrap_or_else(|_| "{}".to_string());
         Ok(Self {
             tool,
             arguments,
@@ -210,8 +208,7 @@ pub fn read_descriptor_from(path: &str) -> Result<ToolCallDescriptor> {
             .context("couldn't read stdin")?;
         buf
     } else {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("couldn't read --input {}", path))?
+        std::fs::read_to_string(path).with_context(|| format!("couldn't read --input {}", path))?
     };
     let v: Value = serde_json::from_str(&raw)
         .with_context(|| format!("couldn't parse --input {} as JSON", path))?;
@@ -282,10 +279,9 @@ mod tests {
     #[test]
     fn force_workspace_prod_overrides_probe() {
         let engine = Engine::builtin_default();
-        let d = ToolCallDescriptor::from_json(
-            json!({"name": "shell", "arguments": {"command": "ls"}}),
-        )
-        .unwrap();
+        let d =
+            ToolCallDescriptor::from_json(json!({"name": "shell", "arguments": {"command": "ls"}}))
+                .unwrap();
         let mut opts = ExplainOptions::default();
         opts.force_workspace_prod = Some(true);
         let report = explain(&engine, &d, &opts).unwrap();
@@ -295,10 +291,9 @@ mod tests {
     #[test]
     fn force_burst_is_honoured() {
         let engine = Engine::builtin_default();
-        let d = ToolCallDescriptor::from_json(
-            json!({"name": "shell", "arguments": {"command": "ls"}}),
-        )
-        .unwrap();
+        let d =
+            ToolCallDescriptor::from_json(json!({"name": "shell", "arguments": {"command": "ls"}}))
+                .unwrap();
         let mut opts = ExplainOptions::default();
         opts.force_burst = Some(true);
         let report = explain(&engine, &d, &opts).unwrap();

@@ -34,7 +34,10 @@ fn aperion_shield_binary() -> PathBuf {
 }
 
 fn python3_available() -> bool {
-    std::process::Command::new("python3").arg("--version").output().is_ok()
+    std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok()
 }
 
 const MOCK_SERVER_PY: &str = r#"
@@ -138,19 +141,31 @@ async fn drift_check_catches_mid_session_rug_pull_without_client_refresh() {
     )
     .await;
     let init_resp = next(&mut out_lines).await;
-    let init_json: serde_json::Value = serde_json::from_str(&init_resp).expect("init response is JSON");
+    let init_json: serde_json::Value =
+        serde_json::from_str(&init_resp).expect("init response is JSON");
     assert_eq!(init_json["id"], json!(1), "{init_resp}");
 
-    send(&mut stdin, json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await;
+    send(
+        &mut stdin,
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    )
+    .await;
 
     // The ONE real tools/list the client ever sends.
-    send(&mut stdin, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
+    send(
+        &mut stdin,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    )
+    .await;
     let list_resp = next(&mut out_lines).await;
     assert!(
         list_resp.contains("Fetches a URL and returns its content"),
         "expected the first (benign) description: {list_resp}"
     );
-    assert!(!list_resp.contains("id_rsa"), "first tools/list must not already be rug-pulled: {list_resp}");
+    assert!(
+        !list_resp.contains("id_rsa"),
+        "first tools/list must not already be rug-pulled: {list_resp}"
+    );
 
     // Wait long enough for the 1s drift-check timer to fire at least
     // twice (reaching the mock server's 3rd tools/list call, which is
@@ -175,7 +190,8 @@ async fn drift_check_catches_mid_session_rug_pull_without_client_refresh() {
         call_resp.contains("shield_supply_chain_blocked"),
         "expected the call to be blocked as quarantined (proves the drift-check caught the mid-session rug pull): {call_resp}"
     );
-    let call_json: serde_json::Value = serde_json::from_str(&call_resp).expect("call response is JSON");
+    let call_json: serde_json::Value =
+        serde_json::from_str(&call_resp).expect("call response is JSON");
     assert_eq!(call_json["id"], json!(3), "{call_resp}");
 
     let stderr_text = stderr_buf.lock().await.clone();

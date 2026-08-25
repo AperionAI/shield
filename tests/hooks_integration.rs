@@ -94,8 +94,12 @@ fn install_creates_executable_hooks() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(meta.permissions().mode() & 0o111, 0o111,
-                "hook {} not executable", name);
+            assert_eq!(
+                meta.permissions().mode() & 0o111,
+                0o111,
+                "hook {} not executable",
+                name
+            );
         }
         let body = fs::read_to_string(&p).unwrap();
         assert!(body.contains("APERION-SHIELD-HOOK"));
@@ -154,7 +158,11 @@ fn check_staged_blocks_drop_database_migration() {
         .findings
         .iter()
         .any(|f| f.rule_id.starts_with("sql."));
-    assert!(any_sql, "expected sql.* rule attribution, findings: {:#?}", report.findings);
+    assert!(
+        any_sql,
+        "expected sql.* rule attribution, findings: {:#?}",
+        report.findings
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -250,7 +258,11 @@ fn check_pushed_refs_blocks_force_push_to_main() {
     .expect("run check_pushed_refs");
 
     assert_eq!(report.refs_inspected, 1);
-    assert_eq!(report.violations.len(), 1, "expected 1 force-push violation");
+    assert_eq!(
+        report.violations.len(),
+        1,
+        "expected 1 force-push violation"
+    );
     assert_eq!(report.exit_code(), 1);
 }
 
@@ -323,8 +335,7 @@ fn check_pushed_refs_blocks_protected_branch_deletion() {
 
 #[test]
 fn parse_line_round_trip() {
-    let upd: RefUpdate =
-        parse_line("refs/heads/feat 1234 refs/heads/main 5678").unwrap();
+    let upd: RefUpdate = parse_line("refs/heads/feat 1234 refs/heads/main 5678").unwrap();
     assert_eq!(upd.local_ref, "refs/heads/feat");
     assert_eq!(upd.local_sha, "1234");
     assert_eq!(upd.remote_ref, "refs/heads/main");

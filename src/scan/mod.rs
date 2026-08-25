@@ -186,67 +186,139 @@ const ANY: &[&str] = &[];
 /// signature is something a benign MCP server has no business doing.
 static STATIC_SIGS: &[StaticSig] = &[
     // exfiltration: credential reads
-    StaticSig { id: "scan.static.ssh_key_read", severity: Severity::Critical, exts: ANY,
+    StaticSig {
+        id: "scan.static.ssh_key_read",
+        severity: Severity::Critical,
+        exts: ANY,
         detail: "reads SSH private key material",
-        re: r#"(?i)[~$./\\A-Za-z_]*\.ssh[/\\](id_[a-z0-9]+|authorized_keys|known_hosts)"# },
-    StaticSig { id: "scan.static.cloud_creds_read", severity: Severity::Critical, exts: ANY,
+        re: r#"(?i)[~$./\\A-Za-z_]*\.ssh[/\\](id_[a-z0-9]+|authorized_keys|known_hosts)"#,
+    },
+    StaticSig {
+        id: "scan.static.cloud_creds_read",
+        severity: Severity::Critical,
+        exts: ANY,
         detail: "reads cloud credential files",
-        re: r#"(?i)\.(aws[/\\]credentials|kube[/\\]config|gnupg|netrc|docker[/\\]config\.json)"# },
-    StaticSig { id: "scan.static.browser_secrets", severity: Severity::Critical, exts: ANY,
+        re: r#"(?i)\.(aws[/\\]credentials|kube[/\\]config|gnupg|netrc|docker[/\\]config\.json)"#,
+    },
+    StaticSig {
+        id: "scan.static.browser_secrets",
+        severity: Severity::Critical,
+        exts: ANY,
         detail: "touches browser credential / cookie stores",
-        re: r#"(?i)(Login Data|Cookies|Local State)['"].{0,40}(Chrome|Chromium|Brave|Edge)|keychain-db"# },
+        re: r#"(?i)(Login Data|Cookies|Local State)['"].{0,40}(Chrome|Chromium|Brave|Edge)|keychain-db"#,
+    },
     // exfiltration: env harvesting shipped over the network
-    StaticSig { id: "scan.static.env_exfil_js", severity: Severity::High, exts: JS,
+    StaticSig {
+        id: "scan.static.env_exfil_js",
+        severity: Severity::High,
+        exts: JS,
         detail: "serializes the entire process environment (pair with any network call = exfil)",
-        re: r#"JSON\.stringify\(\s*process\.env\s*\)|Object\.(entries|keys)\(\s*process\.env\s*\)"# },
-    StaticSig { id: "scan.static.env_exfil_py", severity: Severity::High, exts: PY,
+        re: r#"JSON\.stringify\(\s*process\.env\s*\)|Object\.(entries|keys)\(\s*process\.env\s*\)"#,
+    },
+    StaticSig {
+        id: "scan.static.env_exfil_py",
+        severity: Severity::High,
+        exts: PY,
         detail: "serializes the entire process environment",
-        re: r#"(json\.dumps|str)\(\s*(dict\(\s*)?os\.environ"# },
+        re: r#"(json\.dumps|str)\(\s*(dict\(\s*)?os\.environ"#,
+    },
     // dynamic execution
-    StaticSig { id: "scan.static.dynamic_eval_js", severity: Severity::High, exts: JS,
+    StaticSig {
+        id: "scan.static.dynamic_eval_js",
+        severity: Severity::High,
+        exts: JS,
         detail: "dynamic code execution (eval / new Function)",
-        re: r#"\beval\s*\(\s*[^'")\s]|new\s+Function\s*\("# },
-    StaticSig { id: "scan.static.child_process_js", severity: Severity::Medium, exts: JS,
+        re: r#"\beval\s*\(\s*[^'")\s]|new\s+Function\s*\("#,
+    },
+    StaticSig {
+        id: "scan.static.child_process_js",
+        severity: Severity::Medium,
+        exts: JS,
         detail: "spawns shell subprocesses (child_process)",
-        re: r#"require\(\s*['"]child_process['"]\s*\)|from\s+['"](node:)?child_process['"]"# },
-    StaticSig { id: "scan.static.dynamic_require", severity: Severity::High, exts: JS,
+        re: r#"require\(\s*['"]child_process['"]\s*\)|from\s+['"](node:)?child_process['"]"#,
+    },
+    StaticSig {
+        id: "scan.static.dynamic_require",
+        severity: Severity::High,
+        exts: JS,
         detail: "dynamic require/import of a computed module path",
-        re: r#"require\s*\(\s*[A-Za-z_$][\w$]*(\[|\.|\+| )|import\s*\(\s*[A-Za-z_$][\w$]*[\s+\[]"# },
-    StaticSig { id: "scan.static.dynamic_exec_py", severity: Severity::High, exts: PY,
+        re: r#"require\s*\(\s*[A-Za-z_$][\w$]*(\[|\.|\+| )|import\s*\(\s*[A-Za-z_$][\w$]*[\s+\[]"#,
+    },
+    StaticSig {
+        id: "scan.static.dynamic_exec_py",
+        severity: Severity::High,
+        exts: PY,
         detail: "dynamic code execution (exec/eval on non-literal)",
-        re: r#"\b(exec|eval)\s*\(\s*[A-Za-z_]"# },
-    StaticSig { id: "scan.static.shell_true_py", severity: Severity::Medium, exts: PY,
+        re: r#"\b(exec|eval)\s*\(\s*[A-Za-z_]"#,
+    },
+    StaticSig {
+        id: "scan.static.shell_true_py",
+        severity: Severity::Medium,
+        exts: PY,
         detail: "subprocess with shell=True",
-        re: r#"subprocess\.[A-Za-z_]+\([^)]*shell\s*=\s*True"# },
+        re: r#"subprocess\.[A-Za-z_]+\([^)]*shell\s*=\s*True"#,
+    },
     // obfuscation
-    StaticSig { id: "scan.static.b64_exec", severity: Severity::Critical, exts: ANY,
+    StaticSig {
+        id: "scan.static.b64_exec",
+        severity: Severity::Critical,
+        exts: ANY,
         detail: "decodes base64 then executes it",
-        re: r#"(?i)(eval|exec|Function|spawn|system)\s*\(\s*[^)]{0,60}(atob|b64decode|from(?:_base64)?\s*\(\s*[^)]{0,40}['"]base64)"# },
-    StaticSig { id: "scan.static.charcode_assembly", severity: Severity::High, exts: JS,
+        re: r#"(?i)(eval|exec|Function|spawn|system)\s*\(\s*[^)]{0,60}(atob|b64decode|from(?:_base64)?\s*\(\s*[^)]{0,40}['"]base64)"#,
+    },
+    StaticSig {
+        id: "scan.static.charcode_assembly",
+        severity: Severity::High,
+        exts: JS,
         detail: "assembles strings from character codes (classic obfuscation)",
-        re: r#"String\.fromCharCode\s*\((\s*\d+\s*,){8,}"# },
-    StaticSig { id: "scan.static.hex_blob_decode", severity: Severity::Medium, exts: ANY,
+        re: r#"String\.fromCharCode\s*\((\s*\d+\s*,){8,}"#,
+    },
+    StaticSig {
+        id: "scan.static.hex_blob_decode",
+        severity: Severity::Medium,
+        exts: ANY,
         detail: "decodes a large embedded hex/base64 blob at runtime",
-        re: r#"(?i)(atob|b64decode|fromhex|Buffer\.from)\s*\(\s*['"][A-Za-z0-9+/=]{200,}"# },
+        re: r#"(?i)(atob|b64decode|fromhex|Buffer\.from)\s*\(\s*['"][A-Za-z0-9+/=]{200,}"#,
+    },
     // install-time hooks (npm)
-    StaticSig { id: "scan.static.install_script", severity: Severity::Medium, exts: &["json"],
+    StaticSig {
+        id: "scan.static.install_script",
+        severity: Severity::Medium,
+        exts: &["json"],
         detail: "package.json declares an install-time script hook",
-        re: r#""(pre|post)?install"\s*:"# },
+        re: r#""(pre|post)?install"\s*:"#,
+    },
 ];
 
 static COMPILED_SIGS: Lazy<Vec<(usize, Regex)>> = Lazy::new(|| {
     STATIC_SIGS
         .iter()
         .enumerate()
-        .map(|(i, s)| (i, Regex::new(s.re).expect("static scan signature must compile")))
+        .map(|(i, s)| {
+            (
+                i,
+                Regex::new(s.re).expect("static scan signature must compile"),
+            )
+        })
         .collect()
 });
 
 const MAX_FILE_BYTES: u64 = 2_000_000;
-const SKIP_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target", "__pycache__", ".venv", "venv"];
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
 
 fn walk(root: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().to_string();
@@ -268,13 +340,19 @@ pub fn static_scan(root: &Path) -> Vec<Finding> {
     // doesn't drown the report.
     let mut per_sig: BTreeMap<&'static str, usize> = BTreeMap::new();
     for f in files {
-        let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let ext = f
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if let Ok(meta) = f.metadata() {
             if meta.len() > MAX_FILE_BYTES {
                 continue;
             }
         }
-        let Ok(content) = std::fs::read_to_string(&f) else { continue };
+        let Ok(content) = std::fs::read_to_string(&f) else {
+            continue;
+        };
         // package.json install hooks only matter in package.json.
         for (i, re) in COMPILED_SIGS.iter() {
             let sig = &STATIC_SIGS[*i];
@@ -503,7 +581,10 @@ pub async fn npm_metadata_scan(pkg: &str) -> anyhow::Result<Vec<Finding>> {
     }
 
     if let Ok(resp) = client
-        .get(format!("https://api.npmjs.org/downloads/point/last-week/{}", pkg))
+        .get(format!(
+            "https://api.npmjs.org/downloads/point/last-week/{}",
+            pkg
+        ))
         .send()
         .await
     {
@@ -535,7 +616,10 @@ pub async fn npm_metadata_scan(pkg: &str) -> anyhow::Result<Vec<Finding>> {
         .unwrap_or_else(|_| serde_json::json!({}));
     if let Some(vulns) = osv.get("vulns").and_then(|v| v.as_array()) {
         for v in vulns.iter().take(5) {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("OSV-unknown");
+            let id = v
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("OSV-unknown");
             let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("");
             findings.push(Finding {
                 pass: "metadata",
@@ -596,8 +680,14 @@ pub async fn catalog_audit(launch: &[String], engine: &Engine) -> anyhow::Result
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("failed to launch '{program}' for catalog audit"))?;
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no child stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no child stdout"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("no child stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("no child stdout"))?;
     let mut lines = BufReader::new(stdout).lines();
 
     let send = |frame: serde_json::Value| {
@@ -616,19 +706,28 @@ pub async fn catalog_audit(launch: &[String], engine: &Engine) -> anyhow::Result
         )
         .await?;
     stdin
-        .write_all(send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).as_bytes())
+        .write_all(
+            send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+                .as_bytes(),
+        )
         .await?;
     stdin
-        .write_all(send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).as_bytes())
+        .write_all(
+            send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).as_bytes(),
+        )
         .await?;
     stdin.flush().await?;
 
     let tools = tokio::time::timeout(Duration::from_secs(20), async {
         while let Some(line) = lines.next_line().await? {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
             if v.get("id").and_then(|i| i.as_i64()) == Some(2) {
                 return Ok::<_, anyhow::Error>(
-                    v.pointer("/result/tools").cloned().unwrap_or(serde_json::json!([])),
+                    v.pointer("/result/tools")
+                        .cloned()
+                        .unwrap_or(serde_json::json!([])),
                 );
             }
         }
@@ -643,9 +742,15 @@ pub async fn catalog_audit(launch: &[String], engine: &Engine) -> anyhow::Result
     let empty = vec![];
     let tool_list = tools.as_array().unwrap_or(&empty);
     for t in tool_list {
-        let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("<unnamed>");
+        let name = t
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unnamed>");
         let desc = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let schema = t.get("inputSchema").map(|s| s.to_string()).unwrap_or_default();
+        let schema = t
+            .get("inputSchema")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         let surface = format!("{desc}\n{schema}");
         let eval = engine.evaluate_scoped_text(
             Scope::ToolDescription,
@@ -668,7 +773,8 @@ pub async fn catalog_audit(launch: &[String], engine: &Engine) -> anyhow::Result
             pass: "catalog",
             id: "scan.catalog.empty".into(),
             severity: Severity::Low,
-            detail: "server advertised zero tools (nothing to audit; suspicious for an MCP server)".into(),
+            detail: "server advertised zero tools (nothing to audit; suspicious for an MCP server)"
+                .into(),
             location: None,
         });
     }
@@ -713,7 +819,11 @@ pub fn fetch_target(target: &Target, workdir: &Path) -> anyhow::Result<PathBuf> 
             if !out.status.success() {
                 anyhow::bail!("npm pack failed: {}", String::from_utf8_lossy(&out.stderr));
             }
-            let tarball = String::from_utf8_lossy(&out.stdout).trim().lines().last().map(str::to_string)
+            let tarball = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .lines()
+                .last()
+                .map(str::to_string)
                 .ok_or_else(|| anyhow!("npm pack produced no tarball name"))?;
             let tar_out = std::process::Command::new("tar")
                 .args(["xzf", &tarball])
@@ -721,7 +831,10 @@ pub fn fetch_target(target: &Target, workdir: &Path) -> anyhow::Result<PathBuf> 
                 .output()
                 .context("extracting npm tarball")?;
             if !tar_out.status.success() {
-                anyhow::bail!("tar extract failed: {}", String::from_utf8_lossy(&tar_out.stderr));
+                anyhow::bail!(
+                    "tar extract failed: {}",
+                    String::from_utf8_lossy(&tar_out.stderr)
+                );
             }
             // npm tarballs unpack to package/
             Ok(workdir.join("package"))
@@ -770,7 +883,9 @@ pub async fn run_scan(opts: &ScanOptions, engine: &Engine) -> anyhow::Result<Rep
 
     // (c) metadata
     if opts.offline {
-        report.passes_skipped.push(("metadata", "--scan-offline".into()));
+        report
+            .passes_skipped
+            .push(("metadata", "--scan-offline".into()));
     } else if let Target::Npm(pkg) = &target {
         match npm_metadata_scan(pkg).await {
             Ok(f) => {
@@ -780,9 +895,10 @@ pub async fn run_scan(opts: &ScanOptions, engine: &Engine) -> anyhow::Result<Rep
             Err(e) => report.passes_skipped.push(("metadata", format!("{e:#}"))),
         }
     } else {
-        report
-            .passes_skipped
-            .push(("metadata", "only npm targets have registry metadata today".into()));
+        report.passes_skipped.push((
+            "metadata",
+            "only npm targets have registry metadata today".into(),
+        ));
     }
 
     // (d) live catalog
@@ -822,7 +938,10 @@ mod tests {
             Target::Github("https://github.com/o/r".into())
         );
         assert_eq!(Target::parse(".").unwrap(), Target::LocalPath(".".into()));
-        assert_eq!(Target::parse("some-package").unwrap(), Target::Npm("some-package".into()));
+        assert_eq!(
+            Target::parse("some-package").unwrap(),
+            Target::Npm("some-package".into())
+        );
         assert!(Target::parse("./does-not-exist-xyz").is_err());
         assert!(Target::parse("https://gitlab.com/o/r").is_err());
     }
@@ -835,14 +954,23 @@ mod tests {
 
     #[test]
     fn static_scan_catches_ssh_read() {
-        let ids = scan_str("index.js", r#"const k = fs.readFileSync(home + "/.ssh/id_rsa");"#);
-        assert!(ids.contains(&"scan.static.ssh_key_read".to_string()), "{ids:?}");
+        let ids = scan_str(
+            "index.js",
+            r#"const k = fs.readFileSync(home + "/.ssh/id_rsa");"#,
+        );
+        assert!(
+            ids.contains(&"scan.static.ssh_key_read".to_string()),
+            "{ids:?}"
+        );
     }
 
     #[test]
     fn static_scan_catches_env_exfil() {
         let ids = scan_str("x.js", "fetch(url, {body: JSON.stringify(process.env)})");
-        assert!(ids.contains(&"scan.static.env_exfil_js".to_string()), "{ids:?}");
+        assert!(
+            ids.contains(&"scan.static.env_exfil_js".to_string()),
+            "{ids:?}"
+        );
     }
 
     #[test]
@@ -853,10 +981,22 @@ mod tests {
 
     #[test]
     fn static_scan_install_hook_only_in_package_json() {
-        let ids = scan_str("package.json", r#"{"scripts": {"postinstall": "node evil.js"}}"#);
-        assert!(ids.contains(&"scan.static.install_script".to_string()), "{ids:?}");
-        let ids = scan_str("README.json", r#"{"scripts": {"postinstall": "node evil.js"}}"#);
-        assert!(!ids.contains(&"scan.static.install_script".to_string()), "{ids:?}");
+        let ids = scan_str(
+            "package.json",
+            r#"{"scripts": {"postinstall": "node evil.js"}}"#,
+        );
+        assert!(
+            ids.contains(&"scan.static.install_script".to_string()),
+            "{ids:?}"
+        );
+        let ids = scan_str(
+            "README.json",
+            r#"{"scripts": {"postinstall": "node evil.js"}}"#,
+        );
+        assert!(
+            !ids.contains(&"scan.static.install_script".to_string()),
+            "{ids:?}"
+        );
     }
 
     #[test]
@@ -876,26 +1016,55 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
     #[test]
     fn typosquat_flags_separator_collision() {
-        let ids: Vec<String> = typosquat_scan("mcp_shield").into_iter().map(|f| f.id).collect();
-        assert!(ids.contains(&"scan.typo.name_collision".to_string()), "{ids:?}");
+        let ids: Vec<String> = typosquat_scan("mcp_shield")
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            ids.contains(&"scan.typo.name_collision".to_string()),
+            "{ids:?}"
+        );
 
-        let ids: Vec<String> = typosquat_scan("mcpshield").into_iter().map(|f| f.id).collect();
-        assert!(ids.contains(&"scan.typo.name_collision".to_string()), "{ids:?}");
+        let ids: Vec<String> = typosquat_scan("mcpshield")
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            ids.contains(&"scan.typo.name_collision".to_string()),
+            "{ids:?}"
+        );
 
-        let ids: Vec<String> = typosquat_scan("MCP.Shield").into_iter().map(|f| f.id).collect();
-        assert!(ids.contains(&"scan.typo.name_collision".to_string()), "{ids:?}");
+        let ids: Vec<String> = typosquat_scan("MCP.Shield")
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            ids.contains(&"scan.typo.name_collision".to_string()),
+            "{ids:?}"
+        );
     }
 
     #[test]
     fn typosquat_flags_small_edit_distance() {
         // homoglyph-ish: 'l' -> '1' against the known "mcp-shield".
-        let ids: Vec<String> = typosquat_scan("mcp-shie1d").into_iter().map(|f| f.id).collect();
-        assert!(ids.contains(&"scan.typo.similar_name".to_string()), "{ids:?}");
+        let ids: Vec<String> = typosquat_scan("mcp-shie1d")
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            ids.contains(&"scan.typo.similar_name".to_string()),
+            "{ids:?}"
+        );
 
         // classic typo (dropped letter) against a longer known name.
-        let ids: Vec<String> =
-            typosquat_scan("@modelcontextprotocol/server-githb").into_iter().map(|f| f.id).collect();
-        assert!(ids.contains(&"scan.typo.similar_name".to_string()), "{ids:?}");
+        let ids: Vec<String> = typosquat_scan("@modelcontextprotocol/server-githb")
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            ids.contains(&"scan.typo.similar_name".to_string()),
+            "{ids:?}"
+        );
     }
 
     #[test]
@@ -939,21 +1108,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     #[test]
     fn verdict_mapping() {
         let mut r = Report {
-            target: "t".into(), findings: vec![], passes_run: vec![],
-            passes_skipped: vec![], verdict: Verdict::Pass,
+            target: "t".into(),
+            findings: vec![],
+            passes_run: vec![],
+            passes_skipped: vec![],
+            verdict: Verdict::Pass,
         };
         r.finalize();
         assert_eq!(r.verdict, Verdict::Pass);
         r.findings.push(Finding {
-            pass: "static", id: "x".into(), severity: Severity::Medium,
-            detail: "".into(), location: None,
+            pass: "static",
+            id: "x".into(),
+            severity: Severity::Medium,
+            detail: "".into(),
+            location: None,
         });
         r.finalize();
         assert_eq!(r.verdict, Verdict::Caution);
         assert_eq!(r.exit_code(), 1);
         r.findings.push(Finding {
-            pass: "static", id: "y".into(), severity: Severity::Critical,
-            detail: "".into(), location: None,
+            pass: "static",
+            id: "y".into(),
+            severity: Severity::Critical,
+            detail: "".into(),
+            location: None,
         });
         r.finalize();
         assert_eq!(r.verdict, Verdict::Fail);

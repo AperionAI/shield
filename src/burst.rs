@@ -22,14 +22,19 @@ pub struct BurstDetector {
 
 impl BurstDetector {
     pub fn new(cfg: BurstDetectorCfg) -> Self {
-        Self { cfg, events: Mutex::new(VecDeque::new()) }
+        Self {
+            cfg,
+            events: Mutex::new(VecDeque::new()),
+        }
     }
 
     /// Record a destructive event observed at `Instant::now()` and
     /// return whether we are currently inside a burst (count >= threshold
     /// within the trailing window).
     pub fn observe(&self) -> bool {
-        if !self.cfg.enabled { return false; }
+        if !self.cfg.enabled {
+            return false;
+        }
         let now = Instant::now();
         let window = Duration::from_secs(self.cfg.window_seconds as u64);
         let mut q = self.events.lock().expect("burst mutex poisoned");
@@ -49,7 +54,9 @@ impl BurstDetector {
     /// a burst is "still in progress" while deciding the *current*
     /// event without double-counting it.
     pub fn in_burst(&self) -> bool {
-        if !self.cfg.enabled { return false; }
+        if !self.cfg.enabled {
+            return false;
+        }
         let now = Instant::now();
         let window = Duration::from_secs(self.cfg.window_seconds as u64);
         let q = self.events.lock().expect("burst mutex poisoned");

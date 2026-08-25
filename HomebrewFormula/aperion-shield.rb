@@ -12,7 +12,7 @@ class AperionShield < Formula
   desc     "Local MCP guardrail for AI coding agents"
   homepage "https://github.com/AperionAI/shield"
   license  :cannot_represent
-  version  "1.5.0"
+  version  "1.6.0"
 
   on_macos do
     on_arm do

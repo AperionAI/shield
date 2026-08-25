@@ -70,11 +70,17 @@ static ENTITIES: Lazy<Vec<EntityPattern>> = Lazy::new(|| {
         // Google API key.
         ("google_api_key", r"AIza[A-Za-z0-9_\-]{35}"),
         // Stripe keys (live + test, secret + publishable + restricted).
-        ("stripe_key", r"(?:sk_live|pk_live|sk_test|pk_test|rk_live)_[A-Za-z0-9]{20,}"),
+        (
+            "stripe_key",
+            r"(?:sk_live|pk_live|sk_test|pk_test|rk_live)_[A-Za-z0-9]{20,}",
+        ),
         // ── Structural credentials ─────────────────────────────────
         // JWT (three base64url segments; the first two start with the
         // canonical `eyJ` header/payload prefix).
-        ("jwt", r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+"),
+        (
+            "jwt",
+            r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+",
+        ),
         // PEM private-key block -- match the WHOLE block (BEGIN..END) so
         // the hash is unique per key, not per key *type*. `[\s\S]` matches
         // across newlines in the `regex` crate without the multiline flag.
@@ -93,7 +99,8 @@ static ENTITIES: Lazy<Vec<EntityPattern>> = Lazy::new(|| {
         .iter()
         .map(|(kind, pat)| EntityPattern {
             kind,
-            re: Regex::new(pat).unwrap_or_else(|e| panic!("secret-shape regex '{pat}' failed to compile: {e}")),
+            re: Regex::new(pat)
+                .unwrap_or_else(|e| panic!("secret-shape regex '{pat}' failed to compile: {e}")),
         })
         .collect()
 });
@@ -112,7 +119,10 @@ pub fn scan_secrets(text: &str) -> Vec<SecretMatch> {
                 kind: ent.kind,
                 value: m.as_str().to_string(),
             };
-            if !out.iter().any(|s| s.kind == candidate.kind && s.value == candidate.value) {
+            if !out
+                .iter()
+                .any(|s| s.kind == candidate.kind && s.value == candidate.value)
+            {
                 out.push(candidate);
             }
         }
@@ -166,13 +176,23 @@ mod tests {
     fn anthropic_key_labelled_anthropic_not_openai() {
         let ks = kinds(concat!("token sk-ant-", "api03-abcdefghijklmnopqrstuvwxyz"));
         assert!(ks.contains(&"anthropic_key"), "kinds={ks:?}");
-        assert!(!ks.contains(&"openai_key"), "sk-ant must not double-report as openai: {ks:?}");
+        assert!(
+            !ks.contains(&"openai_key"),
+            "sk-ant must not double-report as openai: {ks:?}"
+        );
     }
 
     #[test]
     fn github_pat_detected() {
-        assert!(kinds(concat!("ghp_", "0123456789abcdefghijklmnopqrstuvwxyz")).contains(&"github_token"));
-        assert!(kinds(concat!("github_pat_11ABC", "DEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDE")).contains(&"github_token"));
+        assert!(
+            kinds(concat!("ghp_", "0123456789abcdefghijklmnopqrstuvwxyz"))
+                .contains(&"github_token")
+        );
+        assert!(kinds(concat!(
+            "github_pat_11ABC",
+            "DEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDE"
+        ))
+        .contains(&"github_token"));
     }
 
     #[test]
@@ -182,7 +202,10 @@ mod tests {
 
     #[test]
     fn google_api_key_detected() {
-        assert!(kinds(concat!("AIzaSy", "A1234567890abcdefghijklmnopqrstuv")).contains(&"google_api_key"));
+        assert!(
+            kinds(concat!("AIzaSy", "A1234567890abcdefghijklmnopqrstuv"))
+                .contains(&"google_api_key")
+        );
     }
 
     #[test]
@@ -198,8 +221,14 @@ mod tests {
 
     #[test]
     fn private_key_block_matches_whole_block_not_just_marker() {
-        let a = concat!("-----BEGIN RSA ", "PRIVATE KEY-----\nAAAAkeymaterialAAAA\n-----END RSA PRIVATE KEY-----");
-        let b = concat!("-----BEGIN RSA ", "PRIVATE KEY-----\nBBBBdifferentkeyBBBB\n-----END RSA PRIVATE KEY-----");
+        let a = concat!(
+            "-----BEGIN RSA ",
+            "PRIVATE KEY-----\nAAAAkeymaterialAAAA\n-----END RSA PRIVATE KEY-----"
+        );
+        let b = concat!(
+            "-----BEGIN RSA ",
+            "PRIVATE KEY-----\nBBBBdifferentkeyBBBB\n-----END RSA PRIVATE KEY-----"
+        );
         let ma = scan_secrets(a);
         let mb = scan_secrets(b);
         assert_eq!(ma.len(), 1);
@@ -212,7 +241,9 @@ mod tests {
     #[test]
     fn db_connection_string_detected() {
         assert!(kinds("postgres://user:pass@host:5432/db").contains(&"db_connection_string"));
-        assert!(kinds("mongodb+srv://u:p@cluster0.mongodb.net/app").contains(&"db_connection_string"));
+        assert!(
+            kinds("mongodb+srv://u:p@cluster0.mongodb.net/app").contains(&"db_connection_string")
+        );
     }
 
     #[test]
@@ -225,8 +256,14 @@ mod tests {
 
     #[test]
     fn hash_is_stable_and_distinct() {
-        assert_eq!(hash_secret("AKIAIOSFODNN7EXAMPLE"), hash_secret("AKIAIOSFODNN7EXAMPLE"));
-        assert_ne!(hash_secret("AKIAIOSFODNN7EXAMPLE"), hash_secret("AKIAIOSFODNN7EXAMPLF"));
+        assert_eq!(
+            hash_secret("AKIAIOSFODNN7EXAMPLE"),
+            hash_secret("AKIAIOSFODNN7EXAMPLE")
+        );
+        assert_ne!(
+            hash_secret("AKIAIOSFODNN7EXAMPLE"),
+            hash_secret("AKIAIOSFODNN7EXAMPLF")
+        );
         assert_eq!(hash_secret("x").len(), 64);
     }
 
@@ -239,6 +276,9 @@ mod tests {
         let from_result = scan_secrets(&format!("Here is your key: {key}\nkeep it safe"));
         let from_args = scan_secrets(&format!("{{\"authorization\":\"{key}\"}}"));
         assert_eq!(from_result[0].value, from_args[0].value);
-        assert_eq!(hash_secret(&from_result[0].value), hash_secret(&from_args[0].value));
+        assert_eq!(
+            hash_secret(&from_result[0].value),
+            hash_secret(&from_args[0].value)
+        );
     }
 }

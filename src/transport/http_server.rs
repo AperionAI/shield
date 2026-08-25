@@ -70,7 +70,10 @@ pub struct HttpDownstream {
 impl HttpDownstream {
     pub fn new() -> Arc<Self> {
         let (tx, _) = broadcast::channel(super::CHANNEL_DEPTH);
-        Arc::new(Self { pending: Mutex::new(HashMap::new()), broadcast: tx })
+        Arc::new(Self {
+            pending: Mutex::new(HashMap::new()),
+            broadcast: tx,
+        })
     }
 
     /// Route one upstream frame: complete the waiting POST if there is
@@ -113,7 +116,10 @@ pub async fn serve(
         );
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!("[shield] HTTP downstream listening on http://{} (Streamable HTTP MCP)", addr);
+    info!(
+        "[shield] HTTP downstream listening on http://{} (Streamable HTTP MCP)",
+        addr
+    );
     serve_on(listener, gate, to_upstream, state).await
 }
 
@@ -221,7 +227,10 @@ async fn handle_post(
     // Approvals can legitimately take a minute -- be generous.
     match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
         Ok(Ok(resp_frame)) => json_response(resp_frame, is_initialize),
-        Ok(Err(_)) => text(StatusCode::BAD_GATEWAY, "upstream closed without responding"),
+        Ok(Err(_)) => text(
+            StatusCode::BAD_GATEWAY,
+            "upstream closed without responding",
+        ),
         Err(_) => {
             state.pending.lock().await.remove(&key);
             text(StatusCode::GATEWAY_TIMEOUT, "upstream response timeout")
@@ -316,7 +325,9 @@ mod tests {
         let state = HttpDownstream::new();
         let mut sub = state.broadcast.subscribe();
         state
-            .route_upstream_frame(r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#.to_string())
+            .route_upstream_frame(
+                r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#.to_string(),
+            )
             .await;
         let frame = sub.recv().await.unwrap();
         assert!(frame.contains("notifications/progress"));

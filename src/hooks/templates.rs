@@ -28,7 +28,8 @@
 /// installer matches on this line (not on whole-file checksum) so we
 /// can evolve the hook body across versions without losing the ability
 /// to recognise our own footprint.
-pub const APERION_HOOK_MARKER: &str = "# APERION-SHIELD-HOOK v1 -- managed by `aperion-shield --install-hooks`";
+pub const APERION_HOOK_MARKER: &str =
+    "# APERION-SHIELD-HOOK v1 -- managed by `aperion-shield --install-hooks`";
 
 /// Pre-commit hook. Runs the engine against staged changes (lines being
 /// ADDED or MODIFIED) and refuses the commit if any line trips a Block

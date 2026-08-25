@@ -166,28 +166,17 @@ pub fn is_protected(remote_ref: &str, patterns: &[String]) -> Option<String> {
 /// Ask git whether `ancestor_sha` is an ancestor of `descendant_sha`.
 /// Returns `Ok(true)` for a normal fast-forward push, `Ok(false)` for
 /// any history rewrite (= force-push).
-fn is_ancestor(
-    repo_root: &Path,
-    ancestor_sha: &str,
-    descendant_sha: &str,
-) -> Result<bool> {
+fn is_ancestor(repo_root: &Path, ancestor_sha: &str, descendant_sha: &str) -> Result<bool> {
     if ancestor_sha == NULL_SHA {
         // Branch is being created -- there's nothing to rewrite, so
         // it's NOT a force-push.
         return Ok(true);
     }
     let status = Command::new("git")
-        .args([
-            "merge-base",
-            "--is-ancestor",
-            ancestor_sha,
-            descendant_sha,
-        ])
+        .args(["merge-base", "--is-ancestor", ancestor_sha, descendant_sha])
         .current_dir(repo_root)
         .status()
-        .with_context(|| {
-            "git merge-base --is-ancestor failed (is git installed?)"
-        })?;
+        .with_context(|| "git merge-base --is-ancestor failed (is git installed?)")?;
     // Exit 0 = is ancestor, exit 1 = not ancestor. Anything else =
     // error (e.g. unknown sha) and we treat as suspicious (not
     // ancestor) — fail closed.
@@ -313,8 +302,14 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("SHIELD_PROTECTED_BRANCHES");
         let pats = protected_patterns();
-        assert_eq!(is_protected("refs/heads/main", &pats).as_deref(), Some("main"));
-        assert_eq!(is_protected("refs/heads/master", &pats).as_deref(), Some("master"));
+        assert_eq!(
+            is_protected("refs/heads/main", &pats).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            is_protected("refs/heads/master", &pats).as_deref(),
+            Some("master")
+        );
         assert_eq!(
             is_protected("refs/heads/release/2026-05", &pats).as_deref(),
             Some("release/2026-05")

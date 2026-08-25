@@ -22,21 +22,27 @@ fn eval(tool: &str, params: serde_json::Value) -> Decision {
 
 fn assert_block(d: &Decision, rule_id: &str) {
     match d {
-        Decision::Block { rule_id: r, .. } => assert_eq!(r, rule_id, "expected block from {}", rule_id),
+        Decision::Block { rule_id: r, .. } => {
+            assert_eq!(r, rule_id, "expected block from {}", rule_id)
+        }
         other => panic!("expected Block({}), got {}", rule_id, other.label()),
     }
 }
 
 fn assert_approval(d: &Decision, rule_id: &str) {
     match d {
-        Decision::Approval { rule_id: r, .. } => assert_eq!(r, rule_id, "expected approval from {}", rule_id),
+        Decision::Approval { rule_id: r, .. } => {
+            assert_eq!(r, rule_id, "expected approval from {}", rule_id)
+        }
         other => panic!("expected Approval({}), got {}", rule_id, other.label()),
     }
 }
 
 fn assert_warn(d: &Decision, rule_id: &str) {
     match d {
-        Decision::Warn { rule_id: r, .. } => assert_eq!(r, rule_id, "expected warn from {}", rule_id),
+        Decision::Warn { rule_id: r, .. } => {
+            assert_eq!(r, rule_id, "expected warn from {}", rule_id)
+        }
         other => panic!("expected Warn({}), got {}", rule_id, other.label()),
     }
 }
@@ -47,19 +53,28 @@ fn assert_warn(d: &Decision, rule_id: &str) {
 
 #[test]
 fn sql_drop_database_blocks() {
-    let d = eval("execute_sql", json!({"arguments": {"query": "DROP DATABASE prod;"}}));
+    let d = eval(
+        "execute_sql",
+        json!({"arguments": {"query": "DROP DATABASE prod;"}}),
+    );
     assert_block(&d, "sql.drop_database");
 }
 
 #[test]
 fn sql_drop_table_approval() {
-    let d = eval("execute_sql", json!({"arguments": {"query": "DROP TABLE users"}}));
+    let d = eval(
+        "execute_sql",
+        json!({"arguments": {"query": "DROP TABLE users"}}),
+    );
     assert_approval(&d, "sql.drop_table_or_schema");
 }
 
 #[test]
 fn sql_truncate_table_approval() {
-    let d = eval("execute_sql", json!({"arguments": {"query": "TRUNCATE TABLE sessions"}}));
+    let d = eval(
+        "execute_sql",
+        json!({"arguments": {"query": "TRUNCATE TABLE sessions"}}),
+    );
     assert_approval(&d, "sql.drop_table_or_schema");
 }
 
@@ -74,7 +89,10 @@ fn sql_alter_drop_column_approval() {
 
 #[test]
 fn sql_unscoped_delete_approval() {
-    let d = eval("execute_sql", json!({"arguments": {"query": "DELETE FROM users"}}));
+    let d = eval(
+        "execute_sql",
+        json!({"arguments": {"query": "DELETE FROM users"}}),
+    );
     assert_approval(&d, "sql.unscoped_delete");
 }
 
@@ -235,7 +253,8 @@ fn fs_sensitive_path_ssh_approval() {
         Decision::Approval { rule_id, .. } => assert!(
             rule_id == "fs.sensitive_path_write_or_delete"
                 || rule_id == "secret.read_ssh_or_aws_key",
-            "got {}", rule_id
+            "got {}",
+            rule_id
         ),
         other => panic!("expected approval, got {}", other.label()),
     }
@@ -668,7 +687,7 @@ fn workspace_prod_bump_promotes_warn_to_approval() {
     adj.workspace_is_prod = true;
     let ev = e.evaluate("execute_sql", &p, adj);
     match decide(&ev) {
-        Decision::Approval { .. } => {},
+        Decision::Approval { .. } => {}
         other => panic!("expected Approval after prod bump, got {}", other.label()),
     }
 }
@@ -691,8 +710,11 @@ fn recent_deny_escalates_warn_to_approval() {
     adj.fingerprint_recently_denied = true;
     let ev = e.evaluate("execute_sql", &p, adj);
     match decide(&ev) {
-        Decision::Approval { .. } => {},
-        other => panic!("expected Approval after deny escalation, got {}", other.label()),
+        Decision::Approval { .. } => {}
+        other => panic!(
+            "expected Approval after deny escalation, got {}",
+            other.label()
+        ),
     }
 }
 
@@ -704,7 +726,7 @@ fn burst_in_progress_escalates() {
     adj.burst_in_progress = true;
     let ev = e.evaluate("execute_sql", &p, adj);
     match decide(&ev) {
-        Decision::Approval { .. } => {},
+        Decision::Approval { .. } => {}
         other => panic!("expected Approval inside burst, got {}", other.label()),
     }
 }

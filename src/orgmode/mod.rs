@@ -79,11 +79,7 @@ pub struct EnrolledHandles {
 /// On failure to reach Smartflow we fall back to the local engine and
 /// log a warning -- this matches the `cached_policy` default offline
 /// behaviour documented in the strategy memo.
-pub async fn load_initial_engine(
-    state: &OrgState,
-    api: &OrgApi,
-    fallback: Engine,
-) -> Engine {
+pub async fn load_initial_engine(state: &OrgState, api: &OrgApi, fallback: Engine) -> Engine {
     match api.get_shieldset(&state.policy_group).await {
         Ok((yaml, version)) => {
             log::warn!(

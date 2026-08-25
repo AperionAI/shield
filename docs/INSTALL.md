@@ -10,11 +10,11 @@ Downloads the matching GitHub Release tarball, verifies SHA-256, and drops
 `aperion-shield` onto PATH. Pin a version or relocate:
 
 ```bash
-SHIELD_VERSION=shield-v1.5.0 SHIELD_INSTALL_DIR=~/.local/bin \
+SHIELD_VERSION=shield-v1.6.0 SHIELD_INSTALL_DIR=~/.local/bin \
   curl -fsSL https://shield-get.aperion.ai | sh
 ```
 
-Until the `shield-get.aperion.ai` DNS CNAME is live, the same script is:
+Fallback if the hostname is down:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AperionAI/shield/main/install.sh | sh

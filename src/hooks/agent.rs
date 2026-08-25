@@ -37,9 +37,9 @@ impl HookDialect {
             "claude" | "claude-code" | "anthropic" => Ok(Self::Claude),
             "cursor" => Ok(Self::Cursor),
             "auto" => Err(anyhow!("auto is resolved by detect_dialect(), not parse()")),
-            other => anyhow::bail!(
-                "unknown --hook-dialect '{other}' (expected claude | cursor | auto)"
-            ),
+            other => {
+                anyhow::bail!("unknown --hook-dialect '{other}' (expected claude | cursor | auto)")
+            }
         }
     }
 }
@@ -53,7 +53,13 @@ pub struct HookEvent {
     pub hook_event_name: Option<String>,
     #[serde(default, alias = "toolName", alias = "tool")]
     pub tool_name: Option<String>,
-    #[serde(default, alias = "toolInput", alias = "tool_input", alias = "arguments", alias = "args")]
+    #[serde(
+        default,
+        alias = "toolInput",
+        alias = "tool_input",
+        alias = "arguments",
+        alias = "args"
+    )]
     pub tool_input: Option<Value>,
     #[serde(default)]
     pub cwd: Option<String>,
@@ -185,15 +191,9 @@ pub fn canonical_calls(tool_name: &str, input: &Value) -> Vec<(String, Value)> {
                 json!({"name": "execute_sql", "arguments": input}),
             ));
         }
-        out.push((
-            last.to_string(),
-            json!({"name": last, "arguments": input}),
-        ));
+        out.push((last.to_string(), json!({"name": last, "arguments": input})));
         if dotted != last {
-            out.push((
-                dotted.clone(),
-                json!({"name": dotted, "arguments": input}),
-            ));
+            out.push((dotted.clone(), json!({"name": dotted, "arguments": input})));
         }
         return out;
     }
@@ -257,9 +257,7 @@ fn looks_like_sql(tool: &str, input: &Value) -> bool {
     if t.contains("sql") || t.contains("query") || t.contains("postgres") || t.contains("mysql") {
         return true;
     }
-    input.get("query").is_some()
-        || input.get("sql").is_some()
-        || input.get("statement").is_some()
+    input.get("query").is_some() || input.get("sql").is_some() || input.get("statement").is_some()
 }
 
 fn extract_command(input: &Value) -> String {
@@ -275,7 +273,14 @@ fn extract_command(input: &Value) -> String {
 }
 
 fn extract_path(input: &Value) -> String {
-    for key in ["path", "file_path", "filePath", "filename", "file", "target"] {
+    for key in [
+        "path",
+        "file_path",
+        "filePath",
+        "filename",
+        "file",
+        "target",
+    ] {
         if let Some(s) = input.get(key).and_then(|v| v.as_str()) {
             return s.to_string();
         }
@@ -311,7 +316,12 @@ fn decision_rule_id(d: &Decision) -> Option<String> {
     }
 }
 
-fn render_stdout(dialect: HookDialect, decision: &Decision, reason: &str, rule_id: Option<&str>) -> String {
+fn render_stdout(
+    dialect: HookDialect,
+    decision: &Decision,
+    reason: &str,
+    rule_id: Option<&str>,
+) -> String {
     if !decision.is_blocking() {
         return match dialect {
             HookDialect::Claude => String::new(),
@@ -368,7 +378,9 @@ pub fn run(
         .cwd
         .as_deref()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
     let workspace = WorkspaceContext::probe_at(&engine.policy, &cwd);
     let burst = BurstDetector::new(engine.policy.burst_detector.clone());
 
@@ -398,12 +410,7 @@ pub fn run(
 
     let reason = decision_reason(&best);
     let primary_rule_id = decision_rule_id(&best);
-    let stdout = render_stdout(
-        dialect,
-        &best,
-        &reason,
-        primary_rule_id.as_deref(),
-    );
+    let stdout = render_stdout(dialect, &best, &reason, primary_rule_id.as_deref());
 
     Ok(HookReport {
         dialect,
@@ -446,12 +453,12 @@ mod tests {
 
     #[test]
     fn bash_rm_rf_root_blocks_claude() {
-        let report = eval_named(
-            "Bash",
-            json!({"command": "rm -rf /"}),
-            HookDialect::Claude,
+        let report = eval_named("Bash", json!({"command": "rm -rf /"}), HookDialect::Claude);
+        assert!(
+            report.decision.is_blocking(),
+            "decision={:?}",
+            report.decision
         );
-        assert!(report.decision.is_blocking(), "decision={:?}", report.decision);
         assert_eq!(report.exit_code(), 2);
         assert!(report.stdout.contains("permissionDecision"));
         assert!(report.stdout.contains("deny"));
@@ -465,7 +472,11 @@ mod tests {
             json!({"command": "ls -la src"}),
             HookDialect::Claude,
         );
-        assert!(!report.decision.is_blocking(), "decision={:?}", report.decision);
+        assert!(
+            !report.decision.is_blocking(),
+            "decision={:?}",
+            report.decision
+        );
         assert_eq!(report.exit_code(), 0);
         assert!(report.stdout.is_empty());
     }
@@ -477,8 +488,15 @@ mod tests {
             json!({"path": "~/.ssh/id_rsa", "contents": "-----BEGIN"}),
             HookDialect::Cursor,
         );
-        assert!(report.decision.is_blocking(), "decision={:?}", report.decision);
-        assert!(report.stdout.contains("\"permission\":\"deny\"") || report.stdout.contains("\"permission\": \"deny\""));
+        assert!(
+            report.decision.is_blocking(),
+            "decision={:?}",
+            report.decision
+        );
+        assert!(
+            report.stdout.contains("\"permission\":\"deny\"")
+                || report.stdout.contains("\"permission\": \"deny\"")
+        );
         assert!(!report.stdout.contains("hookSpecificOutput"));
     }
 
@@ -548,7 +566,8 @@ mod tests {
 
     #[test]
     fn parse_event_accepts_aliases() {
-        let raw = r#"{"toolName":"Bash","toolInput":{"command":"pwd"},"hookEventName":"preToolUse"}"#;
+        let raw =
+            r#"{"toolName":"Bash","toolInput":{"command":"pwd"},"hookEventName":"preToolUse"}"#;
         let event = HookEvent::from_json(raw).unwrap();
         assert_eq!(event.tool_name(), "Bash");
         assert_eq!(event.input()["command"], "pwd");

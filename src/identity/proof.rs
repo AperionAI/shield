@@ -68,14 +68,18 @@ impl Proof {
         canon.insert("subject".into(), self.subject.clone().into());
         canon.insert(
             "email".into(),
-            self.email.clone().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+            self.email
+                .clone()
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
         );
         canon.insert("loa".into(), self.loa.into());
         canon.insert("scope".into(), self.scope.clone().into());
         canon.insert("verified_at".into(), self.verified_at.into());
         canon.insert("expires_at".into(), self.expires_at.into());
         canon.insert("nonce".into(), self.nonce.clone().into());
-        serde_json::to_vec(&serde_json::Value::Object(canon)).expect("canonical JSON serialisation must succeed")
+        serde_json::to_vec(&serde_json::Value::Object(canon))
+            .expect("canonical JSON serialisation must succeed")
     }
 }
 
@@ -117,9 +121,14 @@ impl ProofSigner {
                             (hex::decode(&stored.private), hex::decode(&stored.public))
                         {
                             if priv_bytes.len() == 32 && pub_bytes.len() == 32 {
-                                let signing = SigningKey::from_bytes(&priv_bytes.try_into().unwrap());
+                                let signing =
+                                    SigningKey::from_bytes(&priv_bytes.try_into().unwrap());
                                 let verifying = signing.verifying_key();
-                                return Ok(Self { signing, verifying, key_path });
+                                return Ok(Self {
+                                    signing,
+                                    verifying,
+                                    key_path,
+                                });
                             }
                         }
                     }
@@ -143,7 +152,11 @@ impl ProofSigner {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
         }
-        Ok(Self { signing, verifying, key_path })
+        Ok(Self {
+            signing,
+            verifying,
+            key_path,
+        })
     }
 
     /// Sign a proof in-place, returning the now-fully-populated value.
@@ -168,11 +181,9 @@ impl ProofSigner {
         if alg != "ed25519" {
             anyhow::bail!("unsupported proof signature alg '{}'", alg);
         }
-        let sig_bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD_NO_PAD,
-            b64,
-        )
-        .map_err(|e| anyhow::anyhow!("base64 decode of proof.sig: {}", e))?;
+        let sig_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, b64)
+                .map_err(|e| anyhow::anyhow!("base64 decode of proof.sig: {}", e))?;
         if sig_bytes.len() != 64 {
             anyhow::bail!("proof.sig wrong length ({} bytes)", sig_bytes.len());
         }
@@ -247,6 +258,7 @@ mod tests {
         let signed = a.sign(proof("sub-a")).unwrap();
         drop(a);
         let b = ProofSigner::load_or_create(tmp.path()).unwrap();
-        b.verify(&signed).expect("regenerated signer must verify proofs from prior session");
+        b.verify(&signed)
+            .expect("regenerated signer must verify proofs from prior session");
     }
 }

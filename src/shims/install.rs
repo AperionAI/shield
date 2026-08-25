@@ -35,7 +35,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::shims::templates::{shim_script, APERION_SHIELD_SHIM_MARKER, DEFAULT_SHIMMED_COMMANDS};
+use crate::shims::templates::{
+    shim_body, shim_filename, APERION_SHIELD_SHIM_MARKER, DEFAULT_SHIMMED_COMMANDS,
+};
 
 /// Outcome categories reported by the installer for a single command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,11 +76,15 @@ pub struct ShimInstallReport {
 
 impl ShimInstallReport {
     pub fn any_foreign(&self) -> bool {
-        self.entries.iter().any(|e| e.outcome == ShimInstallOutcome::ForeignPresent)
+        self.entries
+            .iter()
+            .any(|e| e.outcome == ShimInstallOutcome::ForeignPresent)
     }
 
     pub fn any_missing_upstream(&self) -> bool {
-        self.entries.iter().any(|e| e.outcome == ShimInstallOutcome::UpstreamBinaryNotFound)
+        self.entries
+            .iter()
+            .any(|e| e.outcome == ShimInstallOutcome::UpstreamBinaryNotFound)
     }
 
     pub fn successful(&self) -> usize {
@@ -136,9 +142,9 @@ pub fn resolve_shim_dir(explicit: Option<&Path>) -> Result<PathBuf> {
             return Ok(PathBuf::from(env_dir));
         }
     }
-    let home = std::env::var("HOME")
-        .context("couldn't resolve $HOME (set --shim-dir explicitly)")?;
-    Ok(PathBuf::from(home).join(".aperion-shield").join("bin"))
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow!("couldn't resolve home directory (set --shim-dir explicitly)"))?;
+    Ok(home.join(".aperion-shield").join("bin"))
 }
 
 /// Install (or refresh) shims for each command in `commands`. When
@@ -160,14 +166,17 @@ pub fn install(shim_dir: &Path, commands: &[String]) -> Result<ShimInstallReport
     }
 
     let to_install: Vec<String> = if commands.is_empty() {
-        DEFAULT_SHIMMED_COMMANDS.iter().map(|s| s.to_string()).collect()
+        DEFAULT_SHIMMED_COMMANDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
         commands.to_vec()
     };
 
     let mut entries = Vec::with_capacity(to_install.len());
     for cmd in to_install {
-        let shim_path = shim_dir.join(&cmd);
+        let shim_path = shim_dir.join(shim_filename(&cmd));
         entries.push(install_one(&cmd, &shim_path, shim_dir)?);
     }
 
@@ -178,11 +187,7 @@ pub fn install(shim_dir: &Path, commands: &[String]) -> Result<ShimInstallReport
 }
 
 /// Install (or refresh) the shim for a single command.
-fn install_one(
-    cmd: &str,
-    shim_path: &Path,
-    shim_dir: &Path,
-) -> Result<ShimInstallEntry> {
+fn install_one(cmd: &str, shim_path: &Path, shim_dir: &Path) -> Result<ShimInstallEntry> {
     // Refuse to overwrite a foreign file at the target path.
     if shim_path.exists() {
         let existing = fs::read_to_string(shim_path)
@@ -215,7 +220,7 @@ fn install_one(
         ShimInstallOutcome::Installed
     };
 
-    let body = shim_script(cmd, &real_path.to_string_lossy());
+    let body = shim_body(cmd, &real_path.to_string_lossy());
     write_shim(shim_path, &body)?;
 
     Ok(ShimInstallEntry {
@@ -319,12 +324,11 @@ pub fn list(shim_dir: &Path) -> Result<BTreeMap<String, bool>> {
 // ─────────────────────────────────────────────────────────────────────
 
 fn write_shim(path: &Path, body: &str) -> Result<()> {
-    fs::write(path, body)
-        .with_context(|| format!("couldn't write shim to {}", path.display()))?;
+    fs::write(path, body).with_context(|| format!("couldn't write shim to {}", path.display()))?;
     // Same Unix-only chmod story as src/hooks/install.rs: explicit 0755
     // because fs::write honours the process umask and may produce 0644
-    // which the kernel refuses to exec. On Windows we skip; Windows
-    // doesn't carry an exec bit and command resolution is by extension.
+    // which the kernel refuses to exec. Windows has no exec bit; PATHEXT
+    // `.CMD` is enough for `aws` to resolve to `aws.cmd`.
     #[cfg(unix)]
     {
         let mut perms = fs::metadata(path)?.permissions();
@@ -351,7 +355,10 @@ fn write_shim(path: &Path, body: &str) -> Result<()> {
 /// record `UpstreamBinaryNotFound` rather than baking a broken path).
 fn resolve_real_binary(cmd: &str, shim_dir: &Path) -> Result<Option<PathBuf>> {
     let current_path = std::env::var_os("PATH").unwrap_or_default();
-    let shim_dir_canon = shim_dir.canonicalize().unwrap_or_else(|_| shim_dir.to_path_buf());
+    let shim_dir_canon = shim_dir
+        .canonicalize()
+        .unwrap_or_else(|_| shim_dir.to_path_buf());
+    let candidates = command_candidates(cmd);
 
     for dir in std::env::split_paths(&current_path) {
         if dir.as_os_str().is_empty() {
@@ -361,17 +368,51 @@ fn resolve_real_binary(cmd: &str, shim_dir: &Path) -> Result<Option<PathBuf>> {
         if dir_canon == shim_dir_canon {
             continue;
         }
-        let candidate = dir.join(cmd);
-        if !candidate.is_file() {
-            continue;
+        for name in &candidates {
+            let candidate = dir.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            if !is_executable(&candidate) {
+                continue;
+            }
+            return Ok(Some(candidate));
         }
-        if !is_executable(&candidate) {
-            continue;
-        }
-        return Ok(Some(candidate));
     }
 
     Ok(None)
+}
+
+fn command_candidates(cmd: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let already_ext = Path::new(cmd)
+            .extension()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        if already_ext {
+            return vec![cmd.to_string()];
+        }
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        let mut out = vec![cmd.to_string()];
+        for ext in pathext.split(';') {
+            let ext = ext.trim();
+            if ext.is_empty() {
+                continue;
+            }
+            let ext = if ext.starts_with('.') {
+                ext.to_string()
+            } else {
+                format!(".{ext}")
+            };
+            out.push(format!("{cmd}{ext}"));
+        }
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        vec![cmd.to_string()]
+    }
 }
 
 #[cfg(unix)]
@@ -384,15 +425,12 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(windows)]
-fn is_executable(_path: &Path) -> bool {
-    // Windows: PATH resolution is by file extension (PATHEXT) and
-    // there's no exec bit. If the file exists at the candidate path
-    // with a runnable extension, treat it as executable. We don't
-    // ship shims for Windows in v0.8 -- this branch exists only so
-    // the crate compiles cross-target.
+fn is_executable(path: &Path) -> bool {
+    // PATHEXT is consulted in `command_candidates`. If the file exists
+    // at a candidate path, it is runnable.
+    let _ = path;
     true
 }
-
 
 /// Convenience: parse a comma-separated `--for aws,kubectl,terraform`
 /// argument into a deduplicated, validated command list. Returns an
@@ -466,11 +504,10 @@ mod tests {
         let prev = std::env::var_os("PATH");
         let joined = match &prev {
             Some(existing) => {
-                let mut s = std::ffi::OsString::new();
-                s.push(new_path_prefix);
-                s.push(":");
-                s.push(existing);
-                s
+                let mut paths = vec![new_path_prefix.to_path_buf()];
+                paths.extend(std::env::split_paths(existing));
+                std::env::join_paths(paths)
+                    .unwrap_or_else(|_| new_path_prefix.as_os_str().to_owned())
             }
             None => new_path_prefix.as_os_str().to_owned(),
         };
@@ -520,13 +557,20 @@ mod tests {
         // Pre-seed the target path with a user-authored wrapper.
         fs::create_dir_all(shim_dir.path()).unwrap();
         let path = shim_dir.path().join("terraform");
-        fs::write(&path, "#!/bin/sh\n# my custom wrapper\nexec /opt/tf \"$@\"\n").unwrap();
+        fs::write(
+            &path,
+            "#!/bin/sh\n# my custom wrapper\nexec /opt/tf \"$@\"\n",
+        )
+        .unwrap();
 
         let report = with_path(real_dir.path(), || {
             install(shim_dir.path(), &["terraform".to_string()]).expect("install")
         });
 
-        assert_eq!(report.entries[0].outcome, ShimInstallOutcome::ForeignPresent);
+        assert_eq!(
+            report.entries[0].outcome,
+            ShimInstallOutcome::ForeignPresent
+        );
         // Foreign file must NOT have been rewritten.
         let after = fs::read_to_string(&path).unwrap();
         assert!(after.contains("# my custom wrapper"));
@@ -575,7 +619,10 @@ mod tests {
             .map(|e| (e.command, e.outcome))
             .collect();
         assert_eq!(by_cmd.get("psql"), Some(&ShimUninstallOutcome::Removed));
-        assert_eq!(by_cmd.get("not-ours"), Some(&ShimUninstallOutcome::ForeignPresent));
+        assert_eq!(
+            by_cmd.get("not-ours"),
+            Some(&ShimUninstallOutcome::ForeignPresent)
+        );
         // Foreign file must still be there.
         assert!(foreign.exists());
     }

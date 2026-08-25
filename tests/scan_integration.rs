@@ -42,7 +42,10 @@ fn static_pass_flags_malicious_source() {
         "scan.static.b64_exec",
         "scan.static.install_script",
     ] {
-        assert!(ids.contains(&expected.to_string()), "missing {expected} in {ids:?}");
+        assert!(
+            ids.contains(&expected.to_string()),
+            "missing {expected} in {ids:?}"
+        );
     }
 }
 
@@ -91,7 +94,11 @@ async fn full_scan_offline_verdicts() {
 
 #[tokio::test]
 async fn live_catalog_audit_catches_poisoned_descriptions() {
-    if std::process::Command::new("python3").arg("--version").output().is_err() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("skipping: python3 not available");
         return;
     }
@@ -118,7 +125,10 @@ for line in sys.stdin:
             target: dir.path().to_string_lossy().into_owned(),
             launch: vec![
                 "python3".to_string(),
-                dir.path().join("poisoned_server.py").to_string_lossy().into_owned(),
+                dir.path()
+                    .join("poisoned_server.py")
+                    .to_string_lossy()
+                    .into_owned(),
             ],
             offline: true,
         },

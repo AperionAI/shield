@@ -43,9 +43,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::identity::{
-    Challenge, ChallengeRequest, IdentityProvider, VerifiedIdentity,
-};
+use crate::identity::{Challenge, ChallengeRequest, IdentityProvider, VerifiedIdentity};
 
 /// Reference to the parts of the `identity.yaml` provider block that
 /// the ID.me adapter actually consumes. The full config struct lives
@@ -99,8 +97,17 @@ impl IdentityProvider for IdMeProvider {
     }
 
     fn is_ready(&self) -> bool {
-        self.cfg.client_id.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
-            && self.cfg.client_secret.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+        self.cfg
+            .client_id
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+            && self
+                .cfg
+                .client_secret
+                .as_deref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
     }
 
     async fn begin(&self, req: ChallengeRequest) -> anyhow::Result<Challenge> {
@@ -149,7 +156,11 @@ impl IdentityProvider for IdMeProvider {
         pkce_verifier: Option<&str>,
     ) -> anyhow::Result<VerifiedIdentity> {
         if state != challenge_id {
-            anyhow::bail!("OAuth state mismatch: expected '{}', got '{}'", challenge_id, state);
+            anyhow::bail!(
+                "OAuth state mismatch: expected '{}', got '{}'",
+                challenge_id,
+                state
+            );
         }
         let pkce_verifier = pkce_verifier
             .ok_or_else(|| anyhow::anyhow!("PKCE verifier missing for id_me exchange"))?;
@@ -278,7 +289,9 @@ fn map_loa(verified: bool, method: &str) -> u8 {
 /// | identity verified, liveness passed (no IAL2 tag)    | 2   |
 /// | identity verified + IAL2 (gov-ID + biometric)       | 3   |
 fn map_loa_from_status(status: &[StatusEntry]) -> u8 {
-    let identity = status.iter().find(|s| s.group.as_deref() == Some("identity"));
+    let identity = status
+        .iter()
+        .find(|s| s.group.as_deref() == Some("identity"));
     let liveness_verified = status
         .iter()
         .any(|s| s.group.as_deref() == Some("liveness") && s.verified);
@@ -402,7 +415,9 @@ mod tests {
         };
         let ch = p.begin(req).await.unwrap();
         assert!(ch.verify_url.contains("client_id=CID"));
-        assert!(ch.verify_url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcallback"));
+        assert!(ch
+            .verify_url
+            .contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcallback"));
         assert!(ch.verify_url.contains("state=ch-xyz"));
         assert!(ch.verify_url.contains("code_challenge="));
         assert!(ch.verify_url.contains("code_challenge_method=S256"));

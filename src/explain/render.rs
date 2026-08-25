@@ -175,7 +175,10 @@ fn render_markdown(r: &ExplainReport) -> String {
         .chars()
         .take(120)
         .collect::<String>();
-    out.push_str(&format!("| call | `{}` |\n", md_escape_table(&args_one_line)));
+    out.push_str(&format!(
+        "| call | `{}` |\n",
+        md_escape_table(&args_one_line)
+    ));
     out.push_str(&format!(
         "| decision | **{}** |\n",
         describe_decision(&r.decision).0
@@ -452,10 +455,7 @@ fn sev_rank(s: Severity) -> u8 {
 ///  2. Signals that were present but did NOT alter the outcome --
 ///     useful for "the burst detector was active but didn't matter
 ///     here because there were no rules to bump".
-fn describe_adjustments_text(
-    adj: &Adjustments,
-    applied: &[&'static str],
-) -> Vec<String> {
+fn describe_adjustments_text(adj: &Adjustments, applied: &[&'static str]) -> Vec<String> {
     let mut out = Vec::new();
     for name in applied {
         out.push(format!("APPLIED   {}", name));
@@ -469,10 +469,18 @@ fn describe_adjustments_text(
         }
     };
 
-    if let Some(s) = present_but_unused("workspace_is_prod", "workspace_is_prod", adj.workspace_is_prod) {
+    if let Some(s) = present_but_unused(
+        "workspace_is_prod",
+        "workspace_is_prod",
+        adj.workspace_is_prod,
+    ) {
         out.push(s);
     }
-    if let Some(s) = present_but_unused("burst_in_progress", "burst_in_progress", adj.burst_in_progress) {
+    if let Some(s) = present_but_unused(
+        "burst_in_progress",
+        "burst_in_progress",
+        adj.burst_in_progress,
+    ) {
         out.push(s);
     }
     if let Some(s) = present_but_unused(

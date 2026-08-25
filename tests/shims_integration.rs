@@ -80,7 +80,12 @@ fn install_shim_for(cmd: &str, shim_dir: &Path, real_dir: &Path) -> std::process
 ///    and therefore doesn't need PATH, but on Linux some shells
 ///    resolve it as an external binary; we err on the side of
 ///    "match a real user's PATH").
-fn run_shim(shim: &Path, real_dir: &Path, extra_env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
+fn run_shim(
+    shim: &Path,
+    real_dir: &Path,
+    extra_env: &[(&str, &str)],
+    args: &[&str],
+) -> std::process::Output {
     let aperion = aperion_shield_binary();
     let aperion_dir = aperion.parent().unwrap();
 
@@ -232,7 +237,11 @@ fn install_skips_a_foreign_file_at_the_target_path() {
 
     // User-authored wrapper. We must NEVER overwrite this.
     let target = shim_dir.path().join("aws");
-    fs::write(&target, "#!/bin/sh\n# user wrapper\nexec /weird/aws \"$@\"\n").unwrap();
+    fs::write(
+        &target,
+        "#!/bin/sh\n# user wrapper\nexec /weird/aws \"$@\"\n",
+    )
+    .unwrap();
     let mut perms = fs::metadata(&target).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&target, perms).unwrap();
@@ -281,7 +290,11 @@ fn list_shims_reports_shield_and_foreign_separately() {
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("[shield ] aws"), "got:\n{}", stderr);
-    assert!(stderr.contains("[foreign] custom-thing"), "got:\n{}", stderr);
+    assert!(
+        stderr.contains("[foreign] custom-thing"),
+        "got:\n{}",
+        stderr
+    );
 }
 
 #[test]

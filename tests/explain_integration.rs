@@ -27,7 +27,9 @@ fn aperion_shield_binary() -> PathBuf {
 fn run_explain(payload: &str, extra: &[&str]) -> (String, i32) {
     let mut cmd = Command::new(aperion_shield_binary());
     cmd.args(["--explain", "--input", "-"]).args(extra);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn aperion-shield --explain");
     child
         .stdin
@@ -76,15 +78,19 @@ fn explain_markdown_format_renders_section_tables() {
 fn explain_json_format_is_parseable_and_has_stable_schema() {
     let payload = r#"{"name": "shell", "arguments": {"command": "rm -rf /"}}"#;
     let (stdout, _exit) = run_explain(payload, &["--explain-format", "json"]);
-    let v: serde_json::Value =
-        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("json parse failed: {}\nstdout was:\n{}", e, stdout));
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("json parse failed: {}\nstdout was:\n{}", e, stdout));
     assert_eq!(v["tool"], "shell");
     assert!(v.get("rules_matched").is_some());
     assert!(v.get("decision").is_some());
     assert!(v.get("adjustment_signals").is_some());
     assert_eq!(v["severity_final"], "Critical");
     let dec_kind = v["decision"]["kind"].as_str().unwrap_or("");
-    assert!(matches!(dec_kind, "block" | "approval"), "got: {}", dec_kind);
+    assert!(
+        matches!(dec_kind, "block" | "approval"),
+        "got: {}",
+        dec_kind
+    );
 }
 
 #[test]
@@ -133,7 +139,9 @@ fn explain_rejects_input_without_a_tool_name() {
     let payload = r#"{"arguments": {"command": "rm -rf /"}}"#;
     let mut cmd = Command::new(aperion_shield_binary());
     cmd.args(["--explain", "--input", "-"]);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn");
     child
         .stdin

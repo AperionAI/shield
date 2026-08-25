@@ -74,7 +74,9 @@ impl AuditSink {
             let dropped = q.remove(0);
             log::warn!(
                 "[shield] audit queue full ({} events buffered); dropped oldest rule_id={} ts={}",
-                QUEUE_CAP, dropped.rule_id, dropped.ts
+                QUEUE_CAP,
+                dropped.rule_id,
+                dropped.ts
             );
         }
         q.push(ev);
@@ -146,10 +148,7 @@ impl AuditSink {
         if n == 0 {
             return;
         }
-        log::info!(
-            "[shield] draining {} pending audit events before exit",
-            n
-        );
+        log::info!("[shield] draining {} pending audit events before exit", n);
         // Give the flusher one full cycle.
         tokio::time::sleep(FLUSH_INTERVAL + Duration::from_millis(500)).await;
     }

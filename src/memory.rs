@@ -70,14 +70,20 @@ impl DecisionMemory {
         Self { path, cfg }
     }
 
-    pub fn enabled(&self) -> bool { self.cfg.enabled }
-    pub fn path(&self) -> &PathBuf { &self.path }
+    pub fn enabled(&self) -> bool {
+        self.cfg.enabled
+    }
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
 
     /// Append a new decision to the log. Errors are logged but never
     /// raised -- decision memory is best-effort, must not break the
     /// proxy if disk is full / RO.
     pub fn record(&self, rule_id: &str, fingerprint: &str, outcome: Outcome, tool: &str) {
-        if !self.cfg.enabled { return; }
+        if !self.cfg.enabled {
+            return;
+        }
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -90,7 +96,11 @@ impl DecisionMemory {
         };
         match serde_json::to_string(&entry) {
             Ok(line) => {
-                if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.path) {
+                if let Ok(mut f) = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
+                {
                     let _ = writeln!(f, "{}", line);
                 }
             }
@@ -102,7 +112,9 @@ impl DecisionMemory {
     /// Reads sequentially; we expect the file to stay small (one entry
     /// per high-severity decision per user per project).
     pub fn verdict_for(&self, fingerprint: &str) -> MemoryVerdict {
-        if !self.cfg.enabled { return MemoryVerdict::default(); }
+        if !self.cfg.enabled {
+            return MemoryVerdict::default();
+        }
         let file = match std::fs::File::open(&self.path) {
             Ok(f) => f,
             Err(_) => return MemoryVerdict::default(),
@@ -118,7 +130,9 @@ impl DecisionMemory {
                 Ok(e) => e,
                 Err(_) => continue, // skip malformed
             };
-            if entry.fingerprint != fingerprint { continue; }
+            if entry.fingerprint != fingerprint {
+                continue;
+            }
             match entry.outcome {
                 Outcome::Approve => approve_count += 1,
                 Outcome::Deny => {
@@ -218,7 +232,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mem = DecisionMemory::at_path(cfg(), tmp.path().join("decisions.jsonl"));
         // 5 approvals, then a denial, then 1 more approval.
-        for _ in 0..5 { mem.record("r1", "fp", Outcome::Approve, "t"); }
+        for _ in 0..5 {
+            mem.record("r1", "fp", Outcome::Approve, "t");
+        }
         std::thread::sleep(std::time::Duration::from_millis(2));
         mem.record("r1", "fp", Outcome::Deny, "t");
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -235,7 +251,9 @@ mod tests {
     fn fingerprint_isolation() {
         let tmp = TempDir::new().unwrap();
         let mem = DecisionMemory::at_path(cfg(), tmp.path().join("decisions.jsonl"));
-        for _ in 0..3 { mem.record("r1", "fp_A", Outcome::Approve, "t"); }
+        for _ in 0..3 {
+            mem.record("r1", "fp_A", Outcome::Approve, "t");
+        }
         let other = mem.verdict_for("fp_B");
         assert!(!other.repeated_approve);
         let same = mem.verdict_for("fp_A");

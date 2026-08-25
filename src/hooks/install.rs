@@ -32,9 +32,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::hooks::templates::{
-    pre_commit_script, pre_push_script, APERION_HOOK_MARKER,
-};
+use crate::hooks::templates::{pre_commit_script, pre_push_script, APERION_HOOK_MARKER};
 
 /// Outcome categories the installer reports back to the CLI. Kept
 /// granular so the `--install-hooks` log line is informative without
@@ -148,9 +146,8 @@ pub fn resolve_hooks_dir(start: &Path) -> Result<PathBuf> {
 /// pre-push hooks for the repository at `start`.
 pub fn install(start: &Path, chain_existing: bool) -> Result<InstallReport> {
     let hooks_dir = resolve_hooks_dir(start)?;
-    fs::create_dir_all(&hooks_dir).with_context(|| {
-        format!("couldn't create hooks dir {}", hooks_dir.display())
-    })?;
+    fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("couldn't create hooks dir {}", hooks_dir.display()))?;
 
     let pre_commit = install_one(&hooks_dir, HookKind::PreCommit, chain_existing)?;
     let pre_push = install_one(&hooks_dir, HookKind::PrePush, chain_existing)?;
@@ -169,8 +166,7 @@ pub fn uninstall(start: &Path) -> Result<UninstallReport> {
 
     let (pre_commit_removed, pre_commit_chain_restored) =
         uninstall_one(&hooks_dir, HookKind::PreCommit)?;
-    let (pre_push_removed, pre_push_chain_restored) =
-        uninstall_one(&hooks_dir, HookKind::PrePush)?;
+    let (pre_push_removed, pre_push_chain_restored) = uninstall_one(&hooks_dir, HookKind::PrePush)?;
 
     Ok(UninstallReport {
         hooks_dir,
@@ -195,9 +191,8 @@ fn install_one(
     }
 
     // Hook file exists -- is it ours?
-    let existing = fs::read_to_string(&path).with_context(|| {
-        format!("couldn't read existing hook at {}", path.display())
-    })?;
+    let existing = fs::read_to_string(&path)
+        .with_context(|| format!("couldn't read existing hook at {}", path.display()))?;
     if existing.contains(APERION_HOOK_MARKER) {
         // Our own hook; refresh body in case the template evolved.
         write_hook(&path, &body)?;
@@ -233,9 +228,8 @@ fn uninstall_one(hooks_dir: &Path, kind: HookKind) -> Result<(bool, bool)> {
     if !path.exists() {
         return Ok((false, false));
     }
-    let body = fs::read_to_string(&path).with_context(|| {
-        format!("couldn't read hook at {}", path.display())
-    })?;
+    let body = fs::read_to_string(&path)
+        .with_context(|| format!("couldn't read hook at {}", path.display()))?;
     if !body.contains(APERION_HOOK_MARKER) {
         return Err(anyhow!(
             "refusing to remove {}: it isn't an Aperion-installed hook (no marker line found). \
@@ -243,8 +237,7 @@ fn uninstall_one(hooks_dir: &Path, kind: HookKind) -> Result<(bool, bool)> {
             path.display()
         ));
     }
-    fs::remove_file(&path)
-        .with_context(|| format!("couldn't remove hook {}", path.display()))?;
+    fs::remove_file(&path).with_context(|| format!("couldn't remove hook {}", path.display()))?;
 
     // Was a chain partner left aside? Restore it.
     let backup_path = path.with_extension("aperion-backup");
@@ -263,8 +256,7 @@ fn uninstall_one(hooks_dir: &Path, kind: HookKind) -> Result<(bool, bool)> {
 }
 
 fn write_hook(path: &Path, body: &str) -> Result<()> {
-    fs::write(path, body)
-        .with_context(|| format!("couldn't write hook to {}", path.display()))?;
+    fs::write(path, body).with_context(|| format!("couldn't write hook to {}", path.display()))?;
     // git-for-windows runs hooks via msys bash and treats any file in
     // `.git/hooks/` as executable regardless of NTFS bits, so the chmod
     // is a Unix-only concern. On Windows we skip it entirely; on Unix

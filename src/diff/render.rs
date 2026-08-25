@@ -34,7 +34,10 @@ pub(crate) fn short_input(input: &serde_json::Value, maxlen: usize) -> String {
             .find_map(|k| params.get(k));
         match key_hit {
             Some(v) => {
-                let val_str = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+                let val_str = v
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.to_string());
                 format!("{}: {}", tool, val_str)
             }
             None => {
@@ -93,7 +96,11 @@ pub fn render_text(
     let _ = writeln!(buf, "corpus:      {} commands\n", fmt_n(corpus_lines));
 
     let _ = writeln!(buf, "DECISION DISTRIBUTION");
-    let _ = writeln!(buf, "{:<12}{:>10}{:>10}{:>14}", "", "before", "after", "delta");
+    let _ = writeln!(
+        buf,
+        "{:<12}{:>10}{:>10}{:>14}",
+        "", "before", "after", "delta"
+    );
     for d in DECISIONS {
         let b = *decision_before.get(d).unwrap_or(&0);
         let a = *decision_after.get(d).unwrap_or(&0);
@@ -120,7 +127,11 @@ pub fn render_text(
             buf,
             "  added    ({}): {}",
             added.len(),
-            added.iter().map(|d| d.rule_id.as_str()).collect::<Vec<_>>().join(", "),
+            added
+                .iter()
+                .map(|d| d.rule_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
         );
     }
     if !removed.is_empty() {
@@ -128,7 +139,11 @@ pub fn render_text(
             buf,
             "  removed  ({}): {}",
             removed.len(),
-            removed.iter().map(|d| d.rule_id.as_str()).collect::<Vec<_>>().join(", "),
+            removed
+                .iter()
+                .map(|d| d.rule_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
         );
     }
     if !modified.is_empty() {
@@ -136,7 +151,11 @@ pub fn render_text(
             buf,
             "  modified ({}): {}",
             modified.len(),
-            modified.iter().map(|d| d.rule_id.as_str()).collect::<Vec<_>>().join(", "),
+            modified
+                .iter()
+                .map(|d| d.rule_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
         );
     }
     let _ = writeln!(buf, "  unchanged: {} rules\n", unchanged_n);
@@ -159,7 +178,10 @@ pub fn render_text(
         -((d.fires_after as i64 - d.fires_before as i64).abs())
     });
     if behavioral.is_empty() {
-        let _ = writeln!(buf, "  (no rules changed their fire counts in this corpus)\n");
+        let _ = writeln!(
+            buf,
+            "  (no rules changed their fire counts in this corpus)\n"
+        );
     } else {
         for d in &behavioral {
             let delta = d.fires_after as i64 - d.fires_before as i64;
@@ -335,7 +357,10 @@ pub fn render_markdown(
         .filter(|d| d.fires_before != d.fires_after || !d.flipped_lines_caused.is_empty())
         .collect();
     if !behavioral.is_empty() {
-        let _ = writeln!(buf, "<details><summary>Rules with changed behavior on this corpus</summary>\n");
+        let _ = writeln!(
+            buf,
+            "<details><summary>Rules with changed behavior on this corpus</summary>\n"
+        );
         for d in &behavioral {
             let delta = d.fires_after as i64 - d.fires_before as i64;
             let _ = writeln!(
@@ -352,13 +377,7 @@ pub fn render_markdown(
                     d.flipped_lines_caused.len()
                 );
                 for (db, da, inp) in d.flipped_lines_caused.iter().take(take_n) {
-                    let _ = writeln!(
-                        buf,
-                        "- `{} -> {}`: `{}`",
-                        db,
-                        da,
-                        short_input(inp, 110)
-                    );
+                    let _ = writeln!(buf, "- `{} -> {}`: `{}`", db, da, short_input(inp, 110));
                 }
                 buf.push('\n');
             }
@@ -368,7 +387,10 @@ pub fn render_markdown(
 
     let flipped_total: usize = flips.values().sum();
     if flipped_total == 0 {
-        let _ = writeln!(buf, "**Behavioral impact:** no flipped decisions on this corpus.");
+        let _ = writeln!(
+            buf,
+            "**Behavioral impact:** no flipped decisions on this corpus."
+        );
     } else {
         let pct = if corpus_lines > 0 {
             (flipped_total as f64) / (corpus_lines as f64) * 100.0

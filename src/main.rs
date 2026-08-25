@@ -43,11 +43,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use aperion_shield::{
-    decide, fingerprint, identity, orgmode, Adjustments, BurstDetector, CloakVault, Decision,
-    DecisionMemory, Engine, IdMeProvider, IdentityConfig, IdentityGate, IdentityProvider,
-    MockProvider, Outcome, ProviderKind, TaintLedger, WorkspaceContext,
-};
 use aperion_shield::engine::{Scope, Severity};
 use aperion_shield::orgmode::{
     smartflow_provider::ResolveOutcome, AuditEvent, AuditSink, EnrolledHandles, OrgApi, OrgState,
@@ -56,6 +51,11 @@ use aperion_shield::orgmode::{
 use aperion_shield::sandbox;
 use aperion_shield::supply;
 use aperion_shield::transport;
+use aperion_shield::{
+    decide, fingerprint, identity, orgmode, Adjustments, BurstDetector, CloakVault, Decision,
+    DecisionMemory, Engine, IdMeProvider, IdentityConfig, IdentityGate, IdentityProvider,
+    MockProvider, Outcome, ProviderKind, TaintLedger, WorkspaceContext,
+};
 
 /// Aperion Shield -- local MCP guardrail.
 ///
@@ -80,8 +80,8 @@ struct Cli {
     /// but deny reads/writes of credential material (~/.ssh, ~/.aws,
     /// ~/.gnupg, kube/gcloud/azure configs, ~/.netrc, Docker creds);
     /// `strict` = deny-by-default (working dir + system runtime only;
-    /// network needs --sandbox-allow-network). macOS Seatbelt today;
-    /// other platforms warn and run unconfined (strict refuses).
+    /// network needs --sandbox-allow-network). macOS Seatbelt, Linux
+    /// Landlock; other platforms warn and run unconfined (strict refuses).
     #[arg(long, value_name = "LEVEL", default_value = "off")]
     sandbox: String,
 
@@ -95,6 +95,11 @@ struct Cli {
     #[arg(long)]
     sandbox_allow_network: bool,
 
+    /// Linux helper: apply Landlock then exec the command after `--`.
+    /// Spawned by `wrap_command`; not a user-facing flag.
+    #[arg(long = "internal-sandbox-exec", value_name = "JSON", hide = true)]
+    internal_sandbox_exec: Option<String>,
+
     // ── Pre-install audit (v1.0) ──────────────────────────────────
     //
     // `--scan` audits an MCP server BEFORE it is wired into the IDE:
@@ -105,7 +110,6 @@ struct Cli {
     // `-- <cmd...>` and the server is launched (under `--sandbox`, if
     // set), sent `tools/list`, and its catalog is run through the
     // `tool_description` rules without ever reaching an agent.
-
     /// Pre-install audit of an MCP server: a local path, a GitHub
     /// URL, or an npm package name (optionally `npm:` prefixed).
     /// Exit code: 0 = pass, 1 = caution, 2 = fail.
@@ -216,7 +220,6 @@ struct Cli {
     // native Rust port of `scripts/shield-diff.py` (which now just
     // wraps this mode). See docs/shieldset-as-code.md for the full
     // PR-review pattern this enables.
-
     /// Behavior-diff mode: run the engine twice over the same corpus
     /// (once with `--rules-before`, once with `--rules-after`) and
     /// emit a report describing which decisions changed and why.
@@ -300,7 +303,6 @@ struct Cli {
     // call `--check-staged` / `--check-pushed-refs` respectively. The
     // hooks honour `git --no-verify` and `SHIELD_HOOKS_DISABLE=1`.
     // See `docs/hooks.md` for the full contract.
-
     /// Install `pre-commit` and `pre-push` hooks into the git repo at
     /// the current working directory (or `--repo PATH`). Idempotent --
     /// re-running refreshes our hooks but never clobbers an
@@ -375,7 +377,6 @@ struct Cli {
     // and emits tuning recommendations (RULE_NEVER_FIRES,
     // CONSISTENTLY_DEMOTED, NOISY_WARN). Default output is human text;
     // markdown and yaml-patch are also available via --suggest-format.
-
     /// Read an audit log (JSON-Lines stderr capture from a real run
     /// of `aperion-shield`) and emit tuning suggestions for your
     /// shieldset. Requires `--audit-log PATH`.
@@ -403,7 +404,12 @@ struct Cli {
 
     /// Minimum number of fires required to trigger CONSISTENTLY_DEMOTED
     /// or NOISY_WARN suggestions. Default: 5.
-    #[arg(long, value_name = "N", default_value_t = 5, requires = "suggest_rules")]
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 5,
+        requires = "suggest_rules"
+    )]
     suggest_min_occurrences: usize,
 
     /// Output format for `--suggest-rules`. Default: text.
@@ -423,7 +429,6 @@ struct Cli {
     // commands (`aws`, `kubectl`, `terraform`, `rm`, ...); the user
     // puts that dir first on `$PATH` and every invocation goes
     // through `--check-cmd` before reaching the real binary.
-
     /// Install per-command shell shims in `--shim-dir` (default
     /// `$HOME/.aperion-shield/bin`). Wrappers route every invocation
     /// of `aws`, `kubectl`, `terraform`, etc. through the active
@@ -479,11 +484,7 @@ struct Cli {
     /// Comma-separated subset of commands to shim (e.g.
     /// `--for aws,kubectl,terraform`). When omitted, installs the
     /// full Shield-supported list. See `templates::DEFAULT_SHIMMED_COMMANDS`.
-    #[arg(
-        long = "for",
-        value_name = "CMD,CMD,...",
-        requires = "install_shims"
-    )]
+    #[arg(long = "for", value_name = "CMD,CMD,...", requires = "install_shims")]
     shim_for: Option<String>,
 
     /// Override the shim directory (default
@@ -538,10 +539,10 @@ struct Cli {
     )]
     hook_dialect: String,
 
-    /// Install user-level Claude Code `PreToolUse` and Cursor
-    /// `preToolUse` hooks (fail-closed wrappers under
-    /// `~/.aperion-shield/hooks/`). Does not touch project-level
-    /// hook files (TrustFall is project-injected).
+    /// Install user-level PreToolUse hooks for Claude Code, Cursor,
+    /// Codex, Gemini CLI, and Copilot CLI (fail-closed wrappers under
+    /// `~/.aperion-shield/hooks/`). Does not touch project-level hook
+    /// files; those are reported (TrustFall) and flagged by `--scan-ide`.
     #[arg(
         long,
         conflicts_with = "check",
@@ -553,7 +554,7 @@ struct Cli {
     install_agent_hooks: bool,
 
     /// Remove Aperion-installed agent-hook wrappers and their entries
-    /// in `~/.claude/settings.json` / `~/.cursor/hooks.json`.
+    /// in user-level Claude / Cursor / Codex / Gemini / Copilot config.
     #[arg(
         long,
         conflicts_with = "install_agent_hooks",
@@ -572,7 +573,6 @@ struct Cli {
     // --input and prints a full decision walkthrough: which rules
     // matched, what signals were applied, how severity tiers chained,
     // and the safer alternative if anything was gated.
-
     /// Print a full decision walkthrough for a single tool-call
     /// descriptor read from `--input` (or stdin via `--input -`).
     /// Output is text by default; `--explain-format markdown` is
@@ -644,7 +644,6 @@ struct Cli {
     // Enroll this Shield against a Smartflow control plane so policy,
     // identity, and audit are managed centrally. See
     // docs/strategy/shield-org-tier-plan.md for the full design.
-
     /// Enroll this Shield against a Smartflow control plane. Requires
     /// `--smartflow-url` and `--token`. Persists the resulting vkey at
     /// `~/.aperion-shield/orgmode.json` (mode 0600). Subsequent runs
@@ -655,13 +654,23 @@ struct Cli {
 
     /// Print the current org-mode enrollment status (or "standalone")
     /// and exit. Probes the Smartflow control plane for liveness.
-    #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "enroll")]
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "enroll"
+    )]
     status: bool,
 
     /// Remove the local org-mode enrollment record (turns this Shield
     /// back into a standalone). Use `--revoke` to also revoke the vkey
     /// server-side.
-    #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "enroll")]
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "enroll"
+    )]
     disenroll: bool,
 
     /// When used with `--disenroll`, also calls
@@ -698,7 +707,6 @@ struct Cli {
     // Shield at a REMOTE MCP server (closing the hosted-server bypass),
     // and `--http-listen` makes Shield itself listen as a Streamable
     // HTTP server for hosts that don't speak stdio.
-
     /// Connect to a remote MCP server over Streamable HTTP (JSON-RPC
     /// over POST + SSE response streams) instead of spawning a local
     /// stdio child. Example:
@@ -719,7 +727,6 @@ struct Cli {
     http_listen: Option<std::net::SocketAddr>,
 
     // ── MCP supply-chain protection (v0.9+) ───────────────────────
-
     /// Disable TOFU tool-catalog pinning (`policy.supply_chain.pinning`
     /// stays authoritative when this flag is absent). Description /
     /// result scanning rules still run.
@@ -754,7 +761,6 @@ struct Cli {
     // Approval -- catching the cross-tool "confused deputy" relay that
     // single-server, point-in-time guardrails miss. Never stores the raw
     // secret, only a SHA-256 hash. See SECURITY.md for the known limits.
-
     /// How long (seconds) a tagged secret stays "in flight" for cross-tool
     /// taint correlation before it expires from the ledger. Default 600.
     #[arg(long, default_value_t = 600)]
@@ -782,11 +788,15 @@ struct Cli {
     // real value ONLY on the copy forwarded to the MCP server, so the
     // secret never lives in the agent / LLM context; results are scrubbed
     // in reverse. The vault is stored 0600 at ~/.aperion-shield/cloak-vault.json.
-
     /// Register a cloak secret under NAME and exit. The value is read from
     /// the SHIELD_CLOAK_VALUE env var (preferred) or, if unset, from stdin.
     /// Reference it in tool-call arguments as `{{cloak:NAME}}`.
-    #[arg(long, value_name = "NAME", conflicts_with = "upstream", conflicts_with = "check")]
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "upstream",
+        conflicts_with = "check"
+    )]
     cloak_add: Option<String>,
 
     /// List registered cloak secret NAMEs (never values) and exit.
@@ -794,7 +804,12 @@ struct Cli {
     cloak_list: bool,
 
     /// Remove the cloak secret registered under NAME and exit.
-    #[arg(long, value_name = "NAME", conflicts_with = "upstream", conflicts_with = "check")]
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "upstream",
+        conflicts_with = "check"
+    )]
     cloak_remove: Option<String>,
 
     /// Disable reversible secret cloaking for this run: `{{cloak:NAME}}`
@@ -856,7 +871,9 @@ struct Shield {
 #[derive(Debug, Clone)]
 enum PendingKind {
     ToolsList,
-    ToolCall { tool: String },
+    ToolCall {
+        tool: String,
+    },
     /// v1.2: a `tools/list` Shield sent itself, on a timer, to catch a
     /// mid-session rug pull. The response runs through the exact same
     /// detection + quarantine logic as a real `tools/list`, but is
@@ -899,7 +916,10 @@ mod drift_check_tests {
             assert!(!lower.contains("drift"), "id leaks a static marker: {id}");
             // A bare UUIDv4 (simple, no hyphens) is exactly 32 hex chars.
             assert_eq!(id.len(), 32, "expected a bare simple UUID: {id}");
-            assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "expected only hex chars: {id}");
+            assert!(
+                id.chars().all(|c| c.is_ascii_hexdigit()),
+                "expected only hex chars: {id}"
+            );
         }
     }
 
@@ -916,7 +936,10 @@ mod drift_check_tests {
             for _ in 0..200 {
                 let d = jittered_drift_interval(base);
                 let secs = d.as_secs_f64();
-                assert!(secs >= 1.0, "jitter floor violated for base {base}: got {secs}");
+                assert!(
+                    secs >= 1.0,
+                    "jitter floor violated for base {base}: got {secs}"
+                );
                 let lower_bound = (base as f64 * 0.8).max(1.0) - 0.01;
                 let upper_bound = base as f64 * 1.2 + 0.01;
                 assert!(
@@ -961,6 +984,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    if let Some(spec) = cli.internal_sandbox_exec.as_deref() {
+        sandbox::exec_sandboxed(spec, &cli.upstream)?;
+        std::process::exit(1);
+    }
 
     if let Some(mode) = cli.telemetry.as_deref() {
         eprintln!("[shield] --telemetry {} requested.", mode);
@@ -1071,12 +1099,14 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Org-mode subcommands ──────────────────────────────────────
     if cli.enroll {
-        let url = cli.smartflow_url.as_deref().ok_or_else(|| {
-            anyhow!("--enroll requires --smartflow-url <URL>")
-        })?;
-        let token = cli.token.as_deref().ok_or_else(|| {
-            anyhow!("--enroll requires --token <TOKEN>")
-        })?;
+        let url = cli
+            .smartflow_url
+            .as_deref()
+            .ok_or_else(|| anyhow!("--enroll requires --smartflow-url <URL>"))?;
+        let token = cli
+            .token
+            .as_deref()
+            .ok_or_else(|| anyhow!("--enroll requires --token <TOKEN>"))?;
         return orgmode::run_enroll(
             url,
             token,
@@ -1117,10 +1147,14 @@ async fn main() -> anyhow::Result<()> {
         WorkspaceContext::probe(&engine.policy)
     };
     let mut mem_cfg = engine.policy.decision_memory.clone();
-    if cli.no_memory { mem_cfg.enabled = false; }
+    if cli.no_memory {
+        mem_cfg.enabled = false;
+    }
     let memory = DecisionMemory::open(mem_cfg);
     let mut burst_cfg = engine.policy.burst_detector.clone();
-    if cli.no_burst { burst_cfg.enabled = false; }
+    if cli.no_burst {
+        burst_cfg.enabled = false;
+    }
     let burst = BurstDetector::new(burst_cfg);
     let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
     let cloak = CloakVault::load(!cli.no_cloak);
@@ -1133,7 +1167,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Startup banner -- make the adaptive surface visible ────────
-    let mode_label = if cli.shadow { "SHADOW (warn only)" } else { "ENFORCE" };
+    let mode_label = if cli.shadow {
+        "SHADOW (warn only)"
+    } else {
+        "ENFORCE"
+    };
     let upstream_label_banner = match &cli.upstream_url {
         Some(url) => url.clone(),
         None => cli.upstream.join(" "),
@@ -1160,12 +1198,17 @@ async fn main() -> anyhow::Result<()> {
             workspace.matched_signals.join(", ")
         );
     } else {
-        info!("[shield] workspace probe: no prod signals matched in {}", workspace.root.display());
+        info!(
+            "[shield] workspace probe: no prod signals matched in {}",
+            workspace.root.display()
+        );
     }
 
     // ── Identity gate (only built if at least one rule needs it) ──
     let identity_gate = if cli.no_identity {
-        warn!("[shield] --no-identity: identity-gated rules will fall back to plain Approval/Block");
+        warn!(
+            "[shield] --no-identity: identity-gated rules will fall back to plain Approval/Block"
+        );
         None
     } else if engine.rules.iter().any(|r| r.identity.is_some()) {
         match build_identity_gate(cli.identity_config.as_deref()).await {
@@ -1178,10 +1221,15 @@ async fn main() -> anyhow::Result<()> {
                         .map(|p| format!(
                             "{}:{}{}",
                             p.id,
-                            match p.kind { ProviderKind::IdMe => "id_me", ProviderKind::Mock => "mock" },
-                            if matches!(p.kind, ProviderKind::IdMe)
-                                && !is_idme_ready(p)
-                            { "(unready)" } else { "" }
+                            match p.kind {
+                                ProviderKind::IdMe => "id_me",
+                                ProviderKind::Mock => "mock",
+                            },
+                            if matches!(p.kind, ProviderKind::IdMe) && !is_idme_ready(p) {
+                                "(unready)"
+                            } else {
+                                ""
+                            }
                         ))
                         .collect::<Vec<_>>()
                         .join(", "),
@@ -1317,7 +1365,11 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             tokio::time::sleep(jittered_drift_interval(base_interval_secs)).await;
             loop {
-                if !drift_shield.supply.primed.load(std::sync::atomic::Ordering::Relaxed) {
+                if !drift_shield
+                    .supply
+                    .primed
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
                     tokio::time::sleep(jittered_drift_interval(base_interval_secs)).await;
                     continue; // no baseline pinned yet -- nothing to diff against
                 }
@@ -1370,8 +1422,7 @@ async fn main() -> anyhow::Result<()> {
 
         let gate: Arc<dyn transport::http_server::RequestGate> =
             Arc::new(ShieldGate(shield.clone()));
-        let serve_result =
-            transport::http_server::serve(addr, gate, to_upstream, http_state).await;
+        let serve_result = transport::http_server::serve(addr, gate, to_upstream, http_state).await;
         let _ = from_upstream_handle.await;
         if let Err(e) = serve_result {
             error!("[shield] http downstream server error: {}", e);
@@ -1389,12 +1440,20 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
-                    Ok(0) => { debug!("[shield] client EOF"); break; }
+                    Ok(0) => {
+                        debug!("[shield] client EOF");
+                        break;
+                    }
                     Ok(_) => {}
-                    Err(e) => { error!("[shield] client read error: {}", e); break; }
+                    Err(e) => {
+                        error!("[shield] client read error: {}", e);
+                        break;
+                    }
                 }
                 let frame = line.trim_end();
-                if frame.is_empty() { continue; }
+                if frame.is_empty() {
+                    continue;
+                }
                 debug!("[shield] client -> {}", frame);
 
                 let parsed: Option<Value> = serde_json::from_str(frame).ok();
@@ -1435,8 +1494,12 @@ async fn main() -> anyhow::Result<()> {
                     continue; // swallowed: a v1.2 drift-check response, not for the client
                 };
                 let mut out = stdout_clone2.lock().await;
-                if out.write_all(frame.as_bytes()).await.is_err() { break; }
-                if out.write_all(b"\n").await.is_err() { break; }
+                if out.write_all(frame.as_bytes()).await.is_err() {
+                    break;
+                }
+                if out.write_all(b"\n").await.is_err() {
+                    break;
+                }
                 let _ = out.flush().await;
             }
             debug!("[shield] upstream channel closed");
@@ -1607,7 +1670,10 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
         };
 
         // Two input shapes: tool-call OR llm_response text.
-        let expect = input.get("expect").and_then(|v| v.as_str()).map(str::to_string);
+        let expect = input
+            .get("expect")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
 
         // v1.3 taint (corpus mode = both tag + check for testability):
         // an explicit `"tool_result"` string on a line tags any secrets it
@@ -1615,7 +1681,10 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
         // treated as taggable output; tool-call lines are *checked* so a
         // later corpus line relaying a previously-tagged secret escalates.
         if let Some(tr) = input.get("tool_result").and_then(|v| v.as_str()) {
-            let src_tool = input.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let src_tool = input
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             taint.tag_all_in(tr, "check_corpus", src_tool);
         }
 
@@ -1693,8 +1762,20 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
             "adjustments": eval.adjustments_applied,
         });
         match &decision {
-            Decision::Block { rule_id, reason, safer_alternative, contributing_rules, .. }
-            | Decision::Approval { rule_id, reason, safer_alternative, contributing_rules, .. } => {
+            Decision::Block {
+                rule_id,
+                reason,
+                safer_alternative,
+                contributing_rules,
+                ..
+            }
+            | Decision::Approval {
+                rule_id,
+                reason,
+                safer_alternative,
+                contributing_rules,
+                ..
+            } => {
                 record["primary_rule_id"] = json!(rule_id);
                 record["reason"] = json!(reason);
                 if let Some(s) = safer_alternative {
@@ -1703,7 +1784,12 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
                 record["contributing_rules"] = json!(contributing_rules);
             }
             Decision::IdentityVerification {
-                rule_id, reason, safer_alternative, contributing_rules, requirement, ..
+                rule_id,
+                reason,
+                safer_alternative,
+                contributing_rules,
+                requirement,
+                ..
             } => {
                 record["primary_rule_id"] = json!(rule_id);
                 record["reason"] = json!(reason);
@@ -1719,7 +1805,12 @@ async fn run_check_mode(cli: &Cli) -> anyhow::Result<()> {
                     "loa": requirement.loa,
                 });
             }
-            Decision::Warn { rule_id, banner, safer_alternative, .. } => {
+            Decision::Warn {
+                rule_id,
+                banner,
+                safer_alternative,
+                ..
+            } => {
                 record["primary_rule_id"] = json!(rule_id);
                 record["banner"] = json!(banner);
                 if let Some(s) = safer_alternative {
@@ -1802,10 +1893,7 @@ fn run_install_hooks(cli: &Cli) -> anyhow::Result<i32> {
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
     let report = install(&repo, cli.chain_existing)?;
 
-    eprintln!(
-        "[shield] hooks dir: {}",
-        report.hooks_dir.display()
-    );
+    eprintln!("[shield] hooks dir: {}", report.hooks_dir.display());
     let mut had_unknown = false;
     for (name, outcome) in [
         ("pre-commit", report.pre_commit),
@@ -1840,12 +1928,8 @@ fn run_install_hooks(cli: &Cli) -> anyhow::Result<i32> {
     if had_unknown {
         return Ok(1);
     }
-    eprintln!(
-        "[shield] done. Bypass any single commit with: git commit --no-verify"
-    );
-    eprintln!(
-        "[shield] bypass for an automation run: SHIELD_HOOKS_DISABLE=1 git commit ..."
-    );
+    eprintln!("[shield] done. Bypass any single commit with: git commit --no-verify");
+    eprintln!("[shield] bypass for an automation run: SHIELD_HOOKS_DISABLE=1 git commit ...");
     Ok(0)
 }
 
@@ -2100,7 +2184,8 @@ fn run_install_shims(cli: &Cli) -> anyhow::Result<i32> {
             Some(p) => format!("-> {}", p.display()),
             None => match e.outcome {
                 ShimInstallOutcome::ForeignPresent => {
-                    "existing file at target is not Shield-managed; refusing to overwrite".to_string()
+                    "existing file at target is not Shield-managed; refusing to overwrite"
+                        .to_string()
                 }
                 ShimInstallOutcome::UpstreamBinaryNotFound => {
                     "real binary not found on $PATH; skipped".to_string()
@@ -2118,9 +2203,19 @@ fn run_install_shims(cli: &Cli) -> anyhow::Result<i32> {
     );
     eprintln!();
     eprintln!("Next step: put this directory FIRST on your $PATH so shims win lookup.");
-    eprintln!("  zsh   : echo 'export PATH=\"{}:$PATH\"' >> ~/.zshrc", report.shim_dir.display());
-    eprintln!("  bash  : echo 'export PATH=\"{}:$PATH\"' >> ~/.bashrc", report.shim_dir.display());
+    eprintln!(
+        "  zsh   : echo 'export PATH=\"{}:$PATH\"' >> ~/.zshrc",
+        report.shim_dir.display()
+    );
+    eprintln!(
+        "  bash  : echo 'export PATH=\"{}:$PATH\"' >> ~/.bashrc",
+        report.shim_dir.display()
+    );
     eprintln!("  fish  : fish_add_path -p '{}'", report.shim_dir.display());
+    eprintln!(
+        "  cmd   : setx PATH \"{};%PATH%\"   (new terminals only; shims are *.cmd)",
+        report.shim_dir.display()
+    );
     eprintln!();
     eprintln!("Bypass for a single invocation:  SHIELD_SHIMS_DISABLE=1 <command> ...");
     eprintln!("Uninstall later:                 aperion-shield --uninstall-shims");
@@ -2193,7 +2288,9 @@ fn run_list_shims(cli: &Cli) -> anyhow::Result<i32> {
 /// Exit code mirrors `--check-cmd` so the same CI plumbing works.
 fn run_explain(cli: &Cli) -> anyhow::Result<i32> {
     use aperion_shield::explain::{
-        explain, read_descriptor_from, render::{render, ExplainFormat}, ExplainOptions,
+        explain, read_descriptor_from,
+        render::{render, ExplainFormat},
+        ExplainOptions,
     };
 
     let input = cli
@@ -2230,9 +2327,7 @@ fn run_check_cmd(cli: &Cli) -> anyhow::Result<i32> {
     use aperion_shield::shims::check_cmd::{refusal_banner, run};
 
     if cli.upstream.is_empty() {
-        eprintln!(
-            "[shield-check-cmd] usage: aperion-shield --check-cmd -- <command> [args...]"
-        );
+        eprintln!("[shield-check-cmd] usage: aperion-shield --check-cmd -- <command> [args...]");
         return Ok(3);
     }
 
@@ -2300,39 +2395,44 @@ fn run_install_agent_hooks(cli: &Cli) -> anyhow::Result<i32> {
     use aperion_shield::hooks::agent_install::{install, AgentInstallOutcome};
 
     let report = install(cli.agent_home.as_deref(), cli.chain_existing)?;
-    eprintln!(
-        "[shield] agent-hooks dir: {}",
-        report.hooks_dir.display()
-    );
+    eprintln!("[shield] agent-hooks dir: {}", report.hooks_dir.display());
     if let Some(bin) = &report.shield_bin {
         eprintln!("[shield] baked binary: {}", bin.display());
     } else {
         eprintln!("[shield] no aperion-shield on PATH -- wrappers will fail closed until it is");
     }
     let mut blocked = false;
-    for (name, outcome) in [
-        ("claude wrapper", report.claude_wrapper),
-        ("cursor wrapper", report.cursor_wrapper),
-        ("~/.claude/settings.json", report.claude_settings),
-        ("~/.cursor/hooks.json", report.cursor_settings),
-    ] {
-        match outcome {
-            AgentInstallOutcome::Installed => eprintln!("[shield] installed: {name}"),
-            AgentInstallOutcome::Refreshed => eprintln!("[shield] refreshed: {name}"),
-            AgentInstallOutcome::Merged => eprintln!("[shield] merged: {name}"),
-            AgentInstallOutcome::UnknownPresent => {
-                eprintln!(
-                    "[shield] {name}: existing unmanaged hooks present. Re-run with --chain-existing to append."
-                );
-                blocked = true;
+    for host in &report.hosts {
+        let slug = host.kind.slug();
+        for (name, outcome) in [
+            (format!("{slug} wrapper"), host.wrapper),
+            (format!("~/{}", host.kind.settings_rel()), host.settings),
+        ] {
+            match outcome {
+                AgentInstallOutcome::Installed => eprintln!("[shield] installed: {name}"),
+                AgentInstallOutcome::Refreshed => eprintln!("[shield] refreshed: {name}"),
+                AgentInstallOutcome::Merged => eprintln!("[shield] merged: {name}"),
+                AgentInstallOutcome::UnknownPresent => {
+                    eprintln!(
+                        "[shield] {name}: existing unmanaged hooks present. Re-run with --chain-existing to append."
+                    );
+                    blocked = true;
+                }
             }
         }
+    }
+    if !report.project_hooks.is_empty() {
+        eprintln!("[shield] TrustFall: project-level hook file(s) found (not modified):");
+        for p in &report.project_hooks {
+            eprintln!("[shield]   {}", p.display());
+        }
+        eprintln!("[shield] next: aperion-shield --scan-ide");
     }
     if blocked {
         eprintln!("[shield] next: aperion-shield --install-agent-hooks --chain-existing");
         return Ok(2);
     }
-    eprintln!("[shield] agent hooks are user-level. Project .cursor/hooks.json is not touched.");
+    eprintln!("[shield] agent hooks are user-level. Project hook files are not touched.");
     Ok(0)
 }
 
@@ -2340,14 +2440,14 @@ fn run_uninstall_agent_hooks(cli: &Cli) -> anyhow::Result<i32> {
     use aperion_shield::hooks::agent_install::uninstall;
 
     let report = uninstall(cli.agent_home.as_deref())?;
-    eprintln!(
-        "[shield] removed wrappers: claude={} cursor={}",
-        report.claude_wrapper_removed, report.cursor_wrapper_removed
-    );
-    eprintln!(
-        "[shield] cleared settings: claude={} cursor={}",
-        report.claude_settings_cleared, report.cursor_settings_cleared
-    );
+    for (kind, wrapper, settings) in &report.removed {
+        eprintln!(
+            "[shield] {}: wrapper_removed={} settings_cleared={}",
+            kind.slug(),
+            wrapper,
+            settings
+        );
+    }
     Ok(0)
 }
 
@@ -2446,7 +2546,9 @@ async fn process_client_frame(req: &Value, shield: &Arc<Shield>) -> Option<Value
             "tools/call" => req
                 .pointer("/params/name")
                 .and_then(|v| v.as_str())
-                .map(|t| PendingKind::ToolCall { tool: t.to_string() }),
+                .map(|t| PendingKind::ToolCall {
+                    tool: t.to_string(),
+                }),
             _ => None,
         };
         if let Some(kind) = kind {
@@ -2500,7 +2602,9 @@ async fn intercept_upstream_frame(frame: String, shield: &Arc<Shield>) -> Option
         .await
         .remove(&transport::http_server::canonical_id(&id));
     match kind {
-        Some(PendingKind::ToolsList) => Some(inspect_tools_list_response(frame, parsed, shield).await),
+        Some(PendingKind::ToolsList) => {
+            Some(inspect_tools_list_response(frame, parsed, shield).await)
+        }
         Some(PendingKind::ToolCall { tool }) => {
             Some(inspect_tool_call_response(frame, parsed, &tool, shield).await)
         }
@@ -2583,14 +2687,23 @@ async fn inspect_tools_list_response(
                     tool.name,
                     primary,
                     eval.final_severity.as_str(),
-                    if shield.shadow { "shadow: forwarding anyway" } else { "stripping tool from catalog" }
+                    if shield.shadow {
+                        "shadow: forwarding anyway"
+                    } else {
+                        "stripping tool from catalog"
+                    }
                 );
-                strip.insert(tool.name.clone(), format!("description matched rule {}", primary));
+                strip.insert(
+                    tool.name.clone(),
+                    format!("description matched rule {}", primary),
+                );
             }
             Decision::Warn { .. } => {
                 warn!(
                     "[shield] WARN: description of '{}' matched rule {} ({})",
-                    tool.name, primary, eval.final_severity.as_str()
+                    tool.name,
+                    primary,
+                    eval.final_severity.as_str()
                 );
             }
             _ => {}
@@ -2650,7 +2763,8 @@ async fn inspect_tools_list_response(
                                  policy (supply_chain.on_new_tool: block)",
                                 name
                             );
-                            strip.insert(name.to_string(), "new tool blocked by policy".to_string());
+                            strip
+                                .insert(name.to_string(), "new tool blocked by policy".to_string());
                         }
                         _ => warn!(
                             "[shield] new tool '{}' appeared after first pin -- pinned and allowed \
@@ -2660,12 +2774,18 @@ async fn inspect_tools_list_response(
                     }
                 }
                 for name in &check.removed {
-                    info!("[shield] pinned tool '{}' no longer offered by the upstream", name);
+                    info!(
+                        "[shield] pinned tool '{}' no longer offered by the upstream",
+                        name
+                    );
                 }
                 // A catalog has now been pinned (first contact or not)
                 // -- safe for the v1.2 drift-check timer to start
                 // sending its own proactive tools/list polls.
-                shield.supply.primed.store(true, std::sync::atomic::Ordering::Relaxed);
+                shield
+                    .supply
+                    .primed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Err(e) => error!("[shield] catalog pin check failed: {}", e),
         }
@@ -2801,14 +2921,18 @@ async fn inspect_tool_call_response(
             if shield.shadow {
                 warn!(
                     "[shield][shadow] would have BLOCKED result of '{}' -- rule {} ({})",
-                    tool, primary, eval.final_severity.as_str()
+                    tool,
+                    primary,
+                    eval.final_severity.as_str()
                 );
                 return frame;
             }
             error!(
                 "[shield] BLOCKED tool result from '{}' -- rule {} ({}): suspected prompt \
                  injection in returned content",
-                tool, primary, eval.final_severity.as_str()
+                tool,
+                primary,
+                eval.final_severity.as_str()
             );
             let id = parsed.get("id").cloned().unwrap_or(Value::Null);
             jsonrpc_error(
@@ -2832,7 +2956,9 @@ async fn inspect_tool_call_response(
         Decision::Warn { .. } => {
             warn!(
                 "[shield] WARN: result of '{}' matched rule {} ({}) -- forwarded",
-                tool, primary, eval.final_severity.as_str()
+                tool,
+                primary,
+                eval.final_severity.as_str()
             );
             frame
         }
@@ -2894,10 +3020,7 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
     }
 
     let params = req.get("params").cloned().unwrap_or(Value::Null);
-    let tool_name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let canonical_params = json!({ "name": tool_name, "arguments": arguments });
 
@@ -3044,27 +3167,47 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
             )
             .await
         }
-        Decision::Warn { rule_id, severity, banner, safer_alternative } => {
+        Decision::Warn {
+            rule_id,
+            severity,
+            banner,
+            safer_alternative,
+        } => {
             warn!(
                 "[shield] WARN rule={} severity={} tool={}: {}",
-                rule_id, severity.as_str(), tool_name, banner
+                rule_id,
+                severity.as_str(),
+                tool_name,
+                banner
             );
             if let Some(s) = safer_alternative {
                 warn!("[shield]   safer alternative: {}", s);
             }
             None
         }
-        Decision::Block { rule_id, severity, reason, safer_alternative, contributing_rules } => {
+        Decision::Block {
+            rule_id,
+            severity,
+            reason,
+            safer_alternative,
+            contributing_rules,
+        } => {
             if shield.shadow {
                 warn!(
                     "[shield][shadow] would have BLOCKED rule={} severity={} tool={}: {}",
-                    rule_id, severity.as_str(), tool_name, reason
+                    rule_id,
+                    severity.as_str(),
+                    tool_name,
+                    reason
                 );
                 None
             } else {
                 error!(
                     "[shield] BLOCK rule={} severity={} tool={}: {}",
-                    rule_id, severity.as_str(), tool_name, reason
+                    rule_id,
+                    severity.as_str(),
+                    tool_name,
+                    reason
                 );
                 if let Some(ref s) = safer_alternative {
                     error!("[shield]   safer alternative: {}", s);
@@ -3085,7 +3228,13 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
                 ))
             }
         }
-        Decision::Approval { rule_id, severity, reason, safer_alternative, contributing_rules } => {
+        Decision::Approval {
+            rule_id,
+            severity,
+            reason,
+            safer_alternative,
+            contributing_rules,
+        } => {
             if shield.shadow {
                 warn!(
                     "[shield][shadow] would have queued APPROVAL rule={} tool={}: {}",
@@ -3099,7 +3248,9 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
                     "[shield] AUTO-DENY (--auto-deny-high) rule={} ticket={} tool={}",
                     rule_id, ticket, tool_name
                 );
-                shield.memory.record(&rule_id, &fp, Outcome::Deny, tool_name);
+                shield
+                    .memory
+                    .record(&rule_id, &fp, Outcome::Deny, tool_name);
                 return Some(jsonrpc_error(
                     id,
                     -32098,
@@ -3130,12 +3281,16 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
             match wait_for_approval(&ticket).await {
                 Ok(true) => {
                     info!("[shield] APPROVED ticket={} -- allowing call", ticket);
-                    shield.memory.record(&rule_id, &fp, Outcome::Approve, tool_name);
+                    shield
+                        .memory
+                        .record(&rule_id, &fp, Outcome::Approve, tool_name);
                     None
                 }
                 Ok(false) => {
                     info!("[shield] DENIED ticket={} -- blocking call", ticket);
-                    shield.memory.record(&rule_id, &fp, Outcome::Deny, tool_name);
+                    shield
+                        .memory
+                        .record(&rule_id, &fp, Outcome::Deny, tool_name);
                     Some(jsonrpc_error(
                         id,
                         -32098,
@@ -3188,17 +3343,24 @@ async fn wait_for_approval(ticket: &str) -> anyhow::Result<bool> {
             if let Ok(body) = std::fs::read_to_string(&inbox) {
                 for line in body.lines() {
                     let l = line.trim();
-                    if l.is_empty() { continue; }
+                    if l.is_empty() {
+                        continue;
+                    }
                     if let Some(rest) = l.strip_prefix("approve") {
-                        if rest.trim() == ticket { return Ok::<bool, std::io::Error>(true); }
+                        if rest.trim() == ticket {
+                            return Ok::<bool, std::io::Error>(true);
+                        }
                     }
                     if let Some(rest) = l.strip_prefix("deny") {
-                        if rest.trim() == ticket { return Ok::<bool, std::io::Error>(false); }
+                        if rest.trim() == ticket {
+                            return Ok::<bool, std::io::Error>(false);
+                        }
                     }
                 }
             }
         }
-    }).await?;
+    })
+    .await?;
     Ok(res?)
 }
 
@@ -3219,10 +3381,14 @@ fn jsonrpc_error(id: Value, code: i64, msg: &str, data: Value) -> Value {
 // ────────────────────────────────────────────────────────────────────
 
 fn is_idme_ready(p: &aperion_shield::ProviderConfig) -> bool {
-    let cid = p.client_id_env.as_deref()
+    let cid = p
+        .client_id_env
+        .as_deref()
         .and_then(|v| std::env::var(v).ok())
         .filter(|s| !s.is_empty());
-    let csec = p.client_secret_env.as_deref()
+    let csec = p
+        .client_secret_env
+        .as_deref()
         .and_then(|v| std::env::var(v).ok())
         .filter(|s| !s.is_empty());
     cid.is_some() && csec.is_some()
@@ -3237,18 +3403,29 @@ async fn build_identity_gate(explicit: Option<&std::path::Path>) -> anyhow::Resu
             ProviderKind::Mock => {
                 providers.push(Arc::new(MockProvider::new(
                     p.id.clone(),
-                    p.subject.clone().unwrap_or_else(|| format!("{}-subject", p.id)),
+                    p.subject
+                        .clone()
+                        .unwrap_or_else(|| format!("{}-subject", p.id)),
                     p.email.clone(),
                     p.loa,
                 )));
             }
             ProviderKind::IdMe => {
-                let (a_def, t_def, u_def) = aperion_shield::identity::providers::idme::IdMeConfig::endpoint_defaults(p.sandbox);
+                let (a_def, t_def, u_def) =
+                    aperion_shield::identity::providers::idme::IdMeConfig::endpoint_defaults(
+                        p.sandbox,
+                    );
                 let cfg_idme = aperion_shield::identity::providers::idme::IdMeConfig {
                     id: p.id.clone(),
                     sandbox: p.sandbox,
-                    client_id: p.client_id_env.as_deref().and_then(|v| std::env::var(v).ok()),
-                    client_secret: p.client_secret_env.as_deref().and_then(|v| std::env::var(v).ok()),
+                    client_id: p
+                        .client_id_env
+                        .as_deref()
+                        .and_then(|v| std::env::var(v).ok()),
+                    client_secret: p
+                        .client_secret_env
+                        .as_deref()
+                        .and_then(|v| std::env::var(v).ok()),
                     scopes: p.scopes.clone(),
                     authorize_url: p.authorize_url.clone().unwrap_or(a_def),
                     token_url: p.token_url.clone().unwrap_or(t_def),
@@ -3413,7 +3590,12 @@ async fn handle_identity_decision(
         }
     };
     if let Err(e) = gate
-        .register_inflight(&challenge, requirement.clone(), provider.id().to_string(), rule_id.clone())
+        .register_inflight(
+            &challenge,
+            requirement.clone(),
+            provider.id().to_string(),
+            rule_id.clone(),
+        )
         .await
     {
         error!("[shield] failed to register inflight: {}", e);
@@ -3509,12 +3691,21 @@ async fn run_identity_list(cli: &Cli) -> anyhow::Result<()> {
     for p in &cfg.providers {
         let ready = match p.kind {
             ProviderKind::Mock => "ready",
-            ProviderKind::IdMe => if is_idme_ready(p) { "ready" } else { "unready (set client_id_env/client_secret_env)" },
+            ProviderKind::IdMe => {
+                if is_idme_ready(p) {
+                    "ready"
+                } else {
+                    "unready (set client_id_env/client_secret_env)"
+                }
+            }
         };
         println!(
             "  - id={:<10} kind={:<6} sandbox={:<5} -- {}",
             p.id,
-            match p.kind { ProviderKind::IdMe => "id_me", ProviderKind::Mock => "mock" },
+            match p.kind {
+                ProviderKind::IdMe => "id_me",
+                ProviderKind::Mock => "mock",
+            },
             p.sandbox,
             ready
         );
@@ -3541,12 +3732,23 @@ fn run_taint_list(cli: &Cli) -> anyhow::Result<()> {
     let ledger = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
     let entries = ledger.list();
     println!("cross-tool taint ledger: {}", ledger.path().display());
-    println!("ttl: {}s | tracking: {}", ledger.ttl_secs(), if cli.no_taint_tracking { "disabled" } else { "enabled" });
+    println!(
+        "ttl: {}s | tracking: {}",
+        ledger.ttl_secs(),
+        if cli.no_taint_tracking {
+            "disabled"
+        } else {
+            "enabled"
+        }
+    );
     println!("active (non-expired) entries: {}", entries.len());
     if !entries.is_empty() {
         println!();
         for e in &entries {
-            let age = chrono::Utc::now().signed_duration_since(e.ts).num_seconds().max(0);
+            let age = chrono::Utc::now()
+                .signed_duration_since(e.ts)
+                .num_seconds()
+                .max(0);
             println!(
                 "  - kind={:<22} source={}/{:<16} age={}s hash={}…",
                 e.entity_kind,
@@ -3714,7 +3916,12 @@ async fn bootstrap_orgmode(
         _heartbeat_task: heartbeat_task,
     });
 
-    Ok((Some(state), Some(handles), Some(smartflow_identity), engine_rx))
+    Ok((
+        Some(state),
+        Some(handles),
+        Some(smartflow_identity),
+        engine_rx,
+    ))
 }
 
 /// Handle [`Decision::IdentityVerification`] when running in org mode.

@@ -95,12 +95,17 @@ fn strict_level_confines_writes_to_granted_prefixes() {
 
     // Credential reads stay denied in strict.
     let denied_read = run_sandboxed(&profile, &["/bin/cat", secret.to_str().unwrap()]);
-    assert!(!denied_read.status.success(), "strict must deny credential reads");
+    assert!(
+        !denied_read.status.success(),
+        "strict must deny credential reads"
+    );
 
     // Write OUTSIDE cwd/tmp: the real $HOME is user-writable, so a
     // failure here can only come from the sandbox.
-    let target = PathBuf::from(std::env::var("HOME").unwrap())
-        .join(format!(".aperion-shield-sandbox-test-{}", std::process::id()));
+    let target = PathBuf::from(std::env::var("HOME").unwrap()).join(format!(
+        ".aperion-shield-sandbox-test-{}",
+        std::process::id()
+    ));
     let denied_write = run_sandboxed(&profile, &["/usr/bin/touch", target.to_str().unwrap()]);
     let leaked = target.exists();
     let _ = std::fs::remove_file(&target);
@@ -143,7 +148,10 @@ fn strict_level_blocks_network_unless_allowed() {
         "import socket; socket.create_connection(('127.0.0.1', {port}), timeout=3); print('CONNECTED')"
     );
 
-    let denied = run_sandboxed(&seatbelt_profile(&base), &["/usr/bin/python3", "-c", &script]);
+    let denied = run_sandboxed(
+        &seatbelt_profile(&base),
+        &["/usr/bin/python3", "-c", &script],
+    );
     assert!(
         !denied.status.success(),
         "strict without --sandbox-allow-network must block sockets, got: {}",
@@ -152,7 +160,10 @@ fn strict_level_blocks_network_unless_allowed() {
 
     let mut allow = base.clone();
     allow.allow_network = true;
-    let allowed = run_sandboxed(&seatbelt_profile(&allow), &["/usr/bin/python3", "-c", &script]);
+    let allowed = run_sandboxed(
+        &seatbelt_profile(&allow),
+        &["/usr/bin/python3", "-c", &script],
+    );
     assert!(
         allowed.status.success(),
         "--sandbox-allow-network must permit the connect: {}",

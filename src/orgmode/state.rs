@@ -60,8 +60,8 @@ impl OrgState {
         let dir = if let Ok(custom) = std::env::var("APERION_SHIELD_HOME") {
             PathBuf::from(custom)
         } else {
-            let mut home = dirs::home_dir()
-                .ok_or_else(|| anyhow!("could not resolve home directory"))?;
+            let mut home =
+                dirs::home_dir().ok_or_else(|| anyhow!("could not resolve home directory"))?;
             home.push(".aperion-shield");
             home
         };
@@ -76,8 +76,8 @@ impl OrgState {
         if !path.exists() {
             return Ok(None);
         }
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let state: OrgState =
             serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
         Ok(Some(state))
@@ -104,8 +104,7 @@ impl OrgState {
     pub fn remove() -> anyhow::Result<()> {
         let path = Self::default_path()?;
         if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("remove {}", path.display()))?;
+            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
         }
         Ok(())
     }

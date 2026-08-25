@@ -37,7 +37,10 @@ pub enum ResolveOutcome {
     /// User needs to verify. The standalone surfaces the `verify_url`
     /// to the developer and polls until either the proof lands or
     /// `hold_seconds` elapses (then returns [`ResolveOutcome::HoldExpired`]).
-    HoldExpired { verify_url: String, challenge_id: String },
+    HoldExpired {
+        verify_url: String,
+        challenge_id: String,
+    },
 
     /// Provider is not configured on Smartflow's side (e.g. id_me with
     /// no sandbox creds). Treated as a deny.
@@ -175,10 +178,7 @@ impl SmartflowProvider {
     }
 }
 
-fn proof_from_response(
-    req: &IdentityRequirement,
-    resp: &IdentityCheckResponse,
-) -> SmartflowProof {
+fn proof_from_response(req: &IdentityRequirement, resp: &IdentityCheckResponse) -> SmartflowProof {
     SmartflowProof {
         provider: req.provider.clone(),
         subject: resp.subject.clone().unwrap_or_default(),

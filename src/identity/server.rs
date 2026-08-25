@@ -262,16 +262,30 @@ async fn handle_verify(
         // Find the matching provider and run an in-process exchange,
         // then redirect to /callback?code=...&state=... so the rest of
         // the pipeline runs identically to the real OAuth flow.
-        let provider = providers.iter().find(|p| p.id() == inflight.provider).cloned();
+        let provider = providers
+            .iter()
+            .find(|p| p.id() == inflight.provider)
+            .cloned();
         let Some(p) = provider else {
             return html(StatusCode::INTERNAL_SERVER_ERROR, "no matching provider");
         };
-        match p.exchange(challenge_id, "synthetic-code", challenge_id, challenge.pkce_verifier.as_deref()).await {
+        match p
+            .exchange(
+                challenge_id,
+                "synthetic-code",
+                challenge_id,
+                challenge.pkce_verifier.as_deref(),
+            )
+            .await
+        {
             Ok(_vi) => {
                 // We could mint+cache here, but to keep the
                 // happy-path identical between mock and real, redirect
                 // to /callback which will go through the same code.
-                let location = format!("/callback?code=synthetic-code&state={}&mock=1", challenge_id);
+                let location = format!(
+                    "/callback?code=synthetic-code&state={}&mock=1",
+                    challenge_id
+                );
                 let mut resp = Response::new(empty_body());
                 *resp.status_mut() = StatusCode::FOUND;
                 resp.headers_mut().insert(
@@ -282,7 +296,10 @@ async fn handle_verify(
             }
             Err(e) => html(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("<h1>Mock exchange failed</h1><pre>{}</pre>", html_escape(&e.to_string())),
+                &format!(
+                    "<h1>Mock exchange failed</h1><pre>{}</pre>",
+                    html_escape(&e.to_string())
+                ),
             ),
         }
     } else {
@@ -320,13 +337,21 @@ async fn handle_callback(
         }
     };
 
-    let provider = providers.iter().find(|p| p.id() == inflight.provider).cloned();
+    let provider = providers
+        .iter()
+        .find(|p| p.id() == inflight.provider)
+        .cloned();
     let Some(p) = provider else {
         return html(StatusCode::INTERNAL_SERVER_ERROR, "<h1>Provider gone</h1>");
     };
 
     let vi = match p
-        .exchange(&cb_state, &code, &cb_state, challenge.pkce_verifier.as_deref())
+        .exchange(
+            &cb_state,
+            &code,
+            &cb_state,
+            challenge.pkce_verifier.as_deref(),
+        )
         .await
     {
         Ok(v) => v,
@@ -334,7 +359,10 @@ async fn handle_callback(
             warn!("[shield-identity] exchange failed: {}", e);
             return html(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("<h1>Verification failed</h1><pre>{}</pre>", html_escape(&e.to_string())),
+                &format!(
+                    "<h1>Verification failed</h1><pre>{}</pre>",
+                    html_escape(&e.to_string())
+                ),
             );
         }
     };
@@ -379,12 +407,18 @@ async fn handle_callback(
         Ok(p) => p,
         Err(e) => {
             error!("[shield-identity] sign failed: {}", e);
-            return html(StatusCode::INTERNAL_SERVER_ERROR, "<h1>Internal signing error</h1>");
+            return html(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "<h1>Internal signing error</h1>",
+            );
         }
     };
     if let Err(e) = cache.insert(signed) {
         error!("[shield-identity] cache insert failed: {}", e);
-        return html(StatusCode::INTERNAL_SERVER_ERROR, "<h1>Internal cache error</h1>");
+        return html(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "<h1>Internal cache error</h1>",
+        );
     }
 
     // Clean up the in-flight slot so an expired state can't be reused.
@@ -399,7 +433,10 @@ async fn handle_callback(
     );
 
     let display = vi.email.unwrap_or_else(|| vi.subject.clone());
-    html(StatusCode::OK, &success_page(&display, &inflight.rule_id, &inflight.requirement.scope))
+    html(
+        StatusCode::OK,
+        &success_page(&display, &inflight.rule_id, &inflight.requirement.scope),
+    )
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -445,7 +482,9 @@ fn html(status: StatusCode, body: &str) -> Response<ResponseBody> {
     );
     resp.headers_mut().insert(
         hyper::header::HeaderName::from_static("content-security-policy"),
-        hyper::header::HeaderValue::from_static("default-src 'self'; script-src 'none'; style-src 'unsafe-inline'"),
+        hyper::header::HeaderValue::from_static(
+            "default-src 'self'; script-src 'none'; style-src 'unsafe-inline'",
+        ),
     );
     resp
 }
@@ -497,7 +536,9 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn success_page(who: &str, rule_id: &str, scope: &str) -> String {
@@ -513,10 +554,12 @@ fn success_page(who: &str, rule_id: &str, scope: &str) -> String {
     )
 }
 
-const INDEX_HTML: &str = "<h1>Aperion Shield</h1><p>This server handles identity verification callbacks. \
+const INDEX_HTML: &str =
+    "<h1>Aperion Shield</h1><p>This server handles identity verification callbacks. \
 Open a verification URL emitted by Shield to continue.</p>";
 
-const EXPIRED_HTML: &str = "<h1>Verification expired</h1><p>This challenge is no longer in flight. \
+const EXPIRED_HTML: &str =
+    "<h1>Verification expired</h1><p>This challenge is no longer in flight. \
 Re-run the gated tool call to start a new verification.</p>";
 
 const PAGE_CSS: &str = "body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; margin: 0; padding: 40px 20px; }
@@ -550,7 +593,10 @@ mod tests {
         assert_eq!(query_param("a=1&b=hi", "b"), Some("hi".into()));
         assert_eq!(query_param("a=1&b=hi", "c"), None);
         assert_eq!(query_param("mock=1", "mock"), Some("1".into()));
-        assert_eq!(query_param("code=abc&state=xyz", "state"), Some("xyz".into()));
+        assert_eq!(
+            query_param("code=abc&state=xyz", "state"),
+            Some("xyz".into())
+        );
     }
 
     #[test]

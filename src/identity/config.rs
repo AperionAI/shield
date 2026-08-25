@@ -141,10 +141,18 @@ pub enum ProviderKind {
     Mock,
 }
 
-fn default_true() -> bool { true }
-fn default_callback_host() -> String { "127.0.0.1".to_string() }
-fn default_hold() -> u64 { 120 }
-fn default_scopes() -> Vec<String> { vec!["openid".to_string()] }
+fn default_true() -> bool {
+    true
+}
+fn default_callback_host() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_hold() -> u64 {
+    120
+}
+fn default_scopes() -> Vec<String> {
+    vec!["openid".to_string()]
+}
 
 impl IdentityConfig {
     /// Parse YAML text.
@@ -231,7 +239,10 @@ identity:
         assert_eq!(c.providers.len(), 2);
         assert_eq!(c.providers[0].kind, ProviderKind::IdMe);
         assert!(c.providers[0].sandbox);
-        assert_eq!(c.providers[0].scopes, vec!["openid".to_string(), "ial2".into()]);
+        assert_eq!(
+            c.providers[0].scopes,
+            vec!["openid".to_string(), "ial2".into()]
+        );
         assert_eq!(c.providers[1].kind, ProviderKind::Mock);
     }
 }

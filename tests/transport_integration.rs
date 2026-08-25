@@ -183,7 +183,9 @@ async fn http_downstream_streams_server_initiated_frames_over_sse() {
 
     // Push a notification through the broadcast path (no waiting POST).
     state
-        .route_upstream_frame(r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"p":1}}"#.into())
+        .route_upstream_frame(
+            r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"p":1}}"#.into(),
+        )
         .await;
 
     // Read the first SSE chunk off the live stream.
@@ -277,7 +279,8 @@ async fn fake_remote_handler(
         }
         "tools/list" => {
             // Respond over SSE: one notification event, then the response.
-            let note = json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"p": 1}});
+            let note =
+                json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"p": 1}});
             let resp = json!({"jsonrpc": "2.0", "id": id,
                               "result": {"tools": [{"name": "fetch", "description": "Fetch a URL"}]}});
             let sse = format!("data: {}\n\ndata: {}\n\n", note, resp);
@@ -295,7 +298,8 @@ async fn fake_remote_handler(
                 .unwrap()
         }
         _ => {
-            let resp = json!({"jsonrpc": "2.0", "id": id, "result": {"ok": true, "method": method}});
+            let resp =
+                json!({"jsonrpc": "2.0", "id": id, "result": {"ok": true, "method": method}});
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/json")
@@ -342,7 +346,10 @@ async fn http_upstream_relays_json_and_sse_responses() {
     // 3. The tools/list POST must have echoed the session id from init.
     let seen = seen.lock().await;
     assert!(seen.session_headers.len() >= 2);
-    assert_eq!(seen.session_headers[0], None, "initialize has no session yet");
+    assert_eq!(
+        seen.session_headers[0], None,
+        "initialize has no session yet"
+    );
     assert_eq!(
         seen.session_headers[1].as_deref(),
         Some("sess-123"),

@@ -103,8 +103,14 @@ fn loosen_drops_drop_database_and_flips_block_to_allow() {
 
     // sql.drop_database is gone in the after-state.
     let dropped = find_rule(&p, "sql.drop_database").expect("sql.drop_database in rules[]");
-    assert_eq!(dropped.get("status").and_then(|v| v.as_str()), Some("removed"));
-    assert_eq!(dropped.get("fires_before").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(
+        dropped.get("status").and_then(|v| v.as_str()),
+        Some("removed")
+    );
+    assert_eq!(
+        dropped.get("fires_before").and_then(|v| v.as_i64()),
+        Some(1)
+    );
     assert_eq!(dropped.get("fires_after").and_then(|v| v.as_i64()), Some(0));
     assert_eq!(
         dropped.get("flipped_caused").and_then(|v| v.as_i64()),
@@ -114,7 +120,10 @@ fn loosen_drops_drop_database_and_flips_block_to_allow() {
 
     // sql.drop_table is unchanged and still fires.
     let kept = find_rule(&p, "sql.drop_table").expect("sql.drop_table in rules[]");
-    assert_eq!(kept.get("status").and_then(|v| v.as_str()), Some("unchanged"));
+    assert_eq!(
+        kept.get("status").and_then(|v| v.as_str()),
+        Some("unchanged")
+    );
     assert_eq!(kept.get("fires_before"), kept.get("fires_after"));
 
     // Exactly one block -> allow flip.
@@ -331,7 +340,10 @@ fn markdown_format_contains_expected_sections() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("shieldset behavior diff"), "missing header");
     assert!(stdout.contains("| decision |"), "missing decision table");
-    assert!(stdout.contains("Behavioral impact"), "missing behavioral section");
+    assert!(
+        stdout.contains("Behavioral impact"),
+        "missing behavioral section"
+    );
     assert!(stdout.contains("loosened"), "missing loosening warning");
 }
 

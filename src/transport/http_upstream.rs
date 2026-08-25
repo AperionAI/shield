@@ -147,9 +147,7 @@ pub fn spawn_http_upstream(
         tokio::spawn(async move {
             // Give initialize a moment to establish the session first.
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            let mut req = client
-                .get(&url)
-                .header("accept", "text/event-stream");
+            let mut req = client.get(&url).header("accept", "text/event-stream");
             if let Some(sid) = session.lock().await.clone() {
                 req = req.header("mcp-session-id", sid);
             }
@@ -190,10 +188,7 @@ pub fn spawn_http_upstream(
 /// Drain one SSE response: parse `data:` payloads out of the byte stream
 /// and forward each as a frame. Multi-line `data:` fields are joined per
 /// the SSE spec.
-async fn pump_sse(
-    resp: reqwest::Response,
-    from_tx: &mpsc::Sender<String>,
-) -> anyhow::Result<()> {
+async fn pump_sse(resp: reqwest::Response, from_tx: &mpsc::Sender<String>) -> anyhow::Result<()> {
     use futures_util::StreamExt;
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
@@ -202,7 +197,9 @@ async fn pump_sse(
         buf.extend_from_slice(&chunk);
         // Process complete events (separated by a blank line).
         loop {
-            let Some(pos) = find_event_boundary(&buf) else { break };
+            let Some(pos) = find_event_boundary(&buf) else {
+                break;
+            };
             let event_bytes: Vec<u8> = buf.drain(..pos.end).collect();
             let event = String::from_utf8_lossy(&event_bytes[..pos.start]).to_string();
             let mut data_lines: Vec<&str> = Vec::new();
@@ -241,9 +238,18 @@ fn find_event_boundary(buf: &[u8]) -> Option<EventBoundary> {
     let lf = buf.windows(2).position(|w| w == b"\n\n");
     let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
     match (lf, crlf) {
-        (Some(a), Some(b)) if b < a => Some(EventBoundary { start: b, end: b + 4 }),
-        (Some(a), _) => Some(EventBoundary { start: a, end: a + 2 }),
-        (None, Some(b)) => Some(EventBoundary { start: b, end: b + 4 }),
+        (Some(a), Some(b)) if b < a => Some(EventBoundary {
+            start: b,
+            end: b + 4,
+        }),
+        (Some(a), _) => Some(EventBoundary {
+            start: a,
+            end: a + 2,
+        }),
+        (None, Some(b)) => Some(EventBoundary {
+            start: b,
+            end: b + 4,
+        }),
         (None, None) => None,
     }
 }

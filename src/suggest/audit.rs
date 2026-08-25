@@ -48,8 +48,8 @@ pub struct AuditRecord {
 /// important: we don't want the analyzer to crash mid-run because the
 /// operator concatenated two different log files together.
 pub fn read_audit_file(path: &Path) -> Result<(Vec<AuditRecord>, usize)> {
-    let file = File::open(path)
-        .with_context(|| format!("can't open audit log {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("can't open audit log {}", path.display()))?;
     read_audit_reader(BufReader::new(file))
 }
 
@@ -66,7 +66,7 @@ pub fn read_audit_reader<R: BufRead>(reader: R) -> Result<(Vec<AuditRecord>, usi
         }
         match serde_json::from_str::<AuditRecord>(trimmed) {
             Ok(r) if r.kind == "shield_eval" => out.push(r),
-            Ok(_) => skipped += 1, // wrong kind
+            Ok(_) => skipped += 1,  // wrong kind
             Err(_) => skipped += 1, // not parseable as our schema
         }
     }

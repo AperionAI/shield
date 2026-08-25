@@ -59,6 +59,28 @@ the relying party — no rewrite, no re-install.
 
 ---
 
+## What's new in v1.6
+
+v1.5 covered the IDE hook seam and `curl | sh`. v1.6 fills the leftover
+holes from that pass:
+
+1. **Linux Landlock sandbox.** `--sandbox secrets` / `--sandbox strict`
+   now confine the stdio upstream on Linux the way Seatbelt already does
+   on macOS. `strict` without `--sandbox-allow-network` refuses to start
+   if the kernel cannot deny TCP. Helper flag `--internal-sandbox-exec`
+   is not user-facing.
+2. **Windows PATH shims.** `--install-shims` writes `aws.cmd` (and friends)
+   so PATHEXT resolves them. Same fail-open / `SHIELD_SHIMS_DISABLE=1`
+   contract as the POSIX shims.
+3. **Codex / Gemini CLI / Copilot CLI hooks.** `--install-agent-hooks`
+   merges user-level config for those hosts too (Cursor dialect for
+   Codex and Copilot, Claude dialect for Gemini).
+4. **TrustFall follow-through.** Install prints project-level hook files
+   it finds (and does not modify them). `--scan-ide` flags
+   `scan.ide.project_hooks`.
+
+---
+
 ## What's new in v1.5
 
 The August 2026 market moved the real attack surface off MCP wrappers.
@@ -1102,7 +1124,10 @@ wins lookup against the system binaries:
 zsh   : echo 'export PATH="$HOME/.aperion-shield/bin:$PATH"' >> ~/.zshrc
 bash  : echo 'export PATH="$HOME/.aperion-shield/bin:$PATH"' >> ~/.bashrc
 fish  : fish_add_path -p '$HOME/.aperion-shield/bin'
+cmd   : setx PATH "%USERPROFILE%\.aperion-shield\bin;%PATH%"
 ```
+
+On Windows the shims are `aws.cmd` (PATHEXT). Same `--install-shims`.
 
 ### Supported commands (out of the box)
 
@@ -1736,13 +1761,13 @@ aperion-shield --sandbox strict --sandbox-allow-network -- npx -y some-mcp-serve
 aperion-shield --sandbox secrets --sandbox-allow ~/.ssh -- npx -y git-mcp-server
 ```
 
-Levels: `off` (default) | `secrets` | `strict`. Backend: macOS
-Seatbelt (`sandbox-exec`) today — no daemon, no privileges, nothing to
-install. Linux (Landlock/seccomp) is on the roadmap; on platforms
-without a backend, `secrets` warns loudly and runs unconfined, while
-`strict` refuses to start rather than silently lie about confinement.
-Only applies to stdio upstreams — an HTTP upstream is a remote
-process with nothing local to confine.
+Levels: `off` (default) | `secrets` | `strict`. Backends: macOS
+Seatbelt (`sandbox-exec`) and Linux Landlock (kernel 5.13+; TCP
+deny in `strict` needs ABI v4 / Linux 6.7+). No daemon, no
+privileges. On platforms without a backend, `secrets` warns and
+runs unconfined, while `strict` refuses to start rather than
+silently lie about confinement. Only applies to stdio upstreams —
+an HTTP upstream is a remote process with nothing local to confine.
 
 The integration tests run real processes under the rendered profiles
 and assert ssh-key reads fail, exemptions work, stray writes fail,

@@ -84,7 +84,11 @@ impl CheckCmdReport {
 /// calls, which is good enough for v0.8's precision target. v0.9 may
 /// add per-CLI argument-tree parsers (proper `aws`, `kubectl`, `gcloud`
 /// grammars) on top of this scaffold.
-pub fn run(engine: &Engine, argv: &[String], taint: Option<&TaintLedger>) -> Result<CheckCmdReport> {
+pub fn run(
+    engine: &Engine,
+    argv: &[String],
+    taint: Option<&TaintLedger>,
+) -> Result<CheckCmdReport> {
     if argv.is_empty() {
         return Err(anyhow!(
             "--check-cmd requires at least the command name after `--`"
@@ -200,7 +204,10 @@ pub fn refusal_banner(report: &CheckCmdReport) -> String {
         Decision::Allow => "ALLOW",
     };
 
-    out.push_str(&format!("[aperion-shield/check-cmd] {} -- ", decision_label));
+    out.push_str(&format!(
+        "[aperion-shield/check-cmd] {} -- ",
+        decision_label
+    ));
     out.push_str(&format!("`{}`\n", short_command(&report.command_line)));
 
     if let Some(p) = &report.primary {
@@ -303,8 +310,12 @@ mod tests {
     #[test]
     fn run_with_innocuous_command_returns_allow() {
         let engine = Engine::builtin_default();
-        let report = run(&engine, &["aws".to_string(), "s3".to_string(), "ls".to_string()], None)
-            .expect("run");
+        let report = run(
+            &engine,
+            &["aws".to_string(), "s3".to_string(), "ls".to_string()],
+            None,
+        )
+        .expect("run");
         assert!(matches!(
             report.decision,
             Decision::Allow | Decision::Warn { .. }
@@ -343,8 +354,7 @@ mod tests {
     fn shim_picks_up_taint_written_by_a_prior_tag() {
         use crate::taint::{TaintLedger, DEFAULT_TTL_SECS};
         let tmp = tempfile::TempDir::new().unwrap();
-        let ledger =
-            TaintLedger::at_path(tmp.path().join("taint.jsonl"), DEFAULT_TTL_SECS, true);
+        let ledger = TaintLedger::at_path(tmp.path().join("taint.jsonl"), DEFAULT_TTL_SECS, true);
         // Simulate an MCP tool result having leaked an AWS key earlier.
         let aws = "AKIAIOSFODNN7EXAMPLE";
         ledger.tag_all_in(&format!("your key: {aws}"), "mcp_tool_result", "fetch_url");

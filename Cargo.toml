@@ -1,6 +1,6 @@
 [package]
 name = "aperion-shield"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 description = "Aperion Shield -- a local MCP guardrail for AI coding agents with optional biometric identity gates (ID.me). Standalone, free tier, binary-only."
 license-file = "LICENSE"
@@ -94,6 +94,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures-util = { version = "0.3", default-features = false }
 # Atomic write of the proof cache file.
 fs2 = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Official Landlock LSM bindings. Linux-only; macOS keeps Seatbelt.
+landlock = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

@@ -28,9 +28,7 @@
 
 use async_trait::async_trait;
 
-use crate::identity::{
-    Challenge, ChallengeRequest, IdentityProvider, VerifiedIdentity,
-};
+use crate::identity::{Challenge, ChallengeRequest, IdentityProvider, VerifiedIdentity};
 
 pub struct MockProvider {
     id: String,
@@ -40,7 +38,12 @@ pub struct MockProvider {
 }
 
 impl MockProvider {
-    pub fn new(id: impl Into<String>, subject: impl Into<String>, email: Option<String>, loa: u8) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        subject: impl Into<String>,
+        email: Option<String>,
+        loa: u8,
+    ) -> Self {
         Self {
             id: id.into(),
             subject: subject.into(),
@@ -127,8 +130,13 @@ mod tests {
         };
         let ch = p.begin(req).await.unwrap();
         assert_eq!(ch.challenge_id, "ch-1");
-        assert!(ch.verify_url.starts_with("http://127.0.0.1:9999/verify/ch-1"));
-        let vi = p.exchange("ch-1", "synthetic-code", "ch-1", None).await.unwrap();
+        assert!(ch
+            .verify_url
+            .starts_with("http://127.0.0.1:9999/verify/ch-1"));
+        let vi = p
+            .exchange("ch-1", "synthetic-code", "ch-1", None)
+            .await
+            .unwrap();
         assert_eq!(vi.subject, "sub-a");
         assert_eq!(vi.loa, 2);
     }

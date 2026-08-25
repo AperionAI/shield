@@ -155,9 +155,7 @@ pub fn flips_to_allow(flips: &FlipCounter) -> usize {
 /// Used for diffing rules textually. Tolerates both the wrapped
 /// (`shieldset:\n  rules:`) and bare (`rules:`) forms, matching the
 /// Python prototype.
-pub fn load_ruleset_yaml(
-    path: &Path,
-) -> anyhow::Result<BTreeMap<String, YamlValue>> {
+pub fn load_ruleset_yaml(path: &Path) -> anyhow::Result<BTreeMap<String, YamlValue>> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading shieldset YAML from {}", path.display()))?;
     let root: YamlValue = serde_yaml::from_str(&raw)
@@ -177,7 +175,9 @@ pub fn load_ruleset_yaml(
     };
     let mut out: BTreeMap<String, YamlValue> = BTreeMap::new();
     for r in rules {
-        let YamlValue::Mapping(mut m) = r else { continue };
+        let YamlValue::Mapping(mut m) = r else {
+            continue;
+        };
         let Some(YamlValue::String(rid)) = m.remove(YamlValue::String("id".into())) else {
             continue;
         };
@@ -190,7 +190,10 @@ pub fn load_ruleset_yaml(
 /// Always emits `id` first to keep the diff stable across runs.
 pub fn yaml_dump_rule(rid: &str, body: &YamlValue) -> String {
     let mut top = serde_yaml::Mapping::new();
-    top.insert(YamlValue::String("id".into()), YamlValue::String(rid.into()));
+    top.insert(
+        YamlValue::String("id".into()),
+        YamlValue::String(rid.into()),
+    );
     if let YamlValue::Mapping(m) = body {
         for (k, v) in m {
             top.insert(k.clone(), v.clone());

@@ -145,10 +145,7 @@ pub fn run(
             Err(e) => {
                 // Don't fail the whole hook because of one unreadable
                 // file -- log and continue.
-                eprintln!(
-                    "[shield-check-staged] skipping {}: {}",
-                    staged.path, e
-                );
+                eprintln!("[shield-check-staged] skipping {}: {}", staged.path, e);
                 continue;
             }
         };
@@ -184,9 +181,7 @@ pub fn run(
                     let primary = eval
                         .matches
                         .iter()
-                        .max_by(|a, b| {
-                            a.severity.cmp(&b.severity).then(a.points.cmp(&b.points))
-                        })
+                        .max_by(|a, b| a.severity.cmp(&b.severity).then(a.points.cmp(&b.points)))
                         .cloned();
                     let (rule_id, severity, reason, safer) = match primary {
                         Some(m) => (
@@ -232,7 +227,10 @@ pub fn run(
 /// Decide whether `path` is one of the file types we lint. Anything
 /// outside this list is skipped (see module-level comment for why).
 fn is_inspectable(path: &str) -> bool {
-    matches!(classify_file(path), FileKind::Sql | FileKind::Shell | FileKind::Code)
+    matches!(
+        classify_file(path),
+        FileKind::Sql | FileKind::Shell | FileKind::Code
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,10 +298,7 @@ fn evaluate_line(
     match kind {
         FileKind::Sql => {
             let canonical = json!({"name": "execute_sql", "arguments": {"query": line}});
-            (
-                engine.evaluate("execute_sql", &canonical, adj),
-                "tool_call",
-            )
+            (engine.evaluate("execute_sql", &canonical, adj), "tool_call")
         }
         FileKind::Shell => {
             let canonical = json!({"name": "shell", "arguments": {"command": line}});
@@ -360,8 +355,7 @@ fn is_inside_git_repo(repo_root: &std::path::Path) -> Result<bool> {
         .current_dir(repo_root)
         .output()
         .with_context(|| "couldn't invoke `git rev-parse`; is git installed?")?;
-    Ok(out.status.success()
-        && String::from_utf8_lossy(&out.stdout).trim() == "true")
+    Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
 }
 
 fn list_staged_files(repo_root: &std::path::Path) -> Result<Vec<StagedFile>> {
@@ -369,13 +363,7 @@ fn list_staged_files(repo_root: &std::path::Path) -> Result<Vec<StagedFile>> {
     // (we skip Deletions, Renames-only, Copies). `--name-only` is the
     // fastest path.
     let out = Command::new("git")
-        .args([
-            "diff",
-            "--cached",
-            "--diff-filter=AM",
-            "--name-only",
-            "-z",
-        ])
+        .args(["diff", "--cached", "--diff-filter=AM", "--name-only", "-z"])
         .current_dir(repo_root)
         .output()
         .with_context(|| "git diff --cached failed")?;
@@ -413,19 +401,9 @@ fn blob_oversize(repo_root: &std::path::Path, rel_path: &str) -> bool {
 /// Walk `git diff --cached -U0 -- <path>` and yield every line that
 /// starts with `+` (but not `+++` -- that's the header) along with its
 /// post-image line number.
-fn list_added_lines(
-    repo_root: &std::path::Path,
-    rel_path: &str,
-) -> Result<Vec<AddedLine>> {
+fn list_added_lines(repo_root: &std::path::Path, rel_path: &str) -> Result<Vec<AddedLine>> {
     let out = Command::new("git")
-        .args([
-            "diff",
-            "--cached",
-            "-U0",
-            "--no-color",
-            "--",
-            rel_path,
-        ])
+        .args(["diff", "--cached", "-U0", "--no-color", "--", rel_path])
         .current_dir(repo_root)
         .output()
         .with_context(|| format!("git diff --cached -U0 -- {} failed", rel_path))?;
@@ -481,7 +459,9 @@ fn parse_unified_diff_added(diff: &str) -> Vec<AddedLine> {
 fn extract_plus_start(header: &str) -> Option<usize> {
     let plus = header.find('+')?;
     let after = &header[plus + 1..];
-    let end = after.find(|c: char| !(c.is_ascii_digit() || c == ',')).unwrap_or(after.len());
+    let end = after
+        .find(|c: char| !(c.is_ascii_digit() || c == ','))
+        .unwrap_or(after.len());
     let nums = &after[..end];
     let first = nums.split(',').next()?;
     first.parse::<usize>().ok()
