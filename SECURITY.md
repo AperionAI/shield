@@ -23,11 +23,11 @@ If you only read one section, read **§4 — Open advisories** below.
 
 | Version | Status | Receives fixes |
 |---|---|---|
-| `0.8.x` | current stable | yes |
-| `0.7.x` | previous       | security-only — superseded by v0.8.0 on 2026-05-27 |
-| `0.6.x` | superseded     | no — superseded by v0.7.0 on 2026-05-20 |
-| `0.5.x` | superseded     | no — superseded by v0.6.0 on 2026-05-18 |
-| `< 0.5` | superseded     | no |
+| `1.5.x` | current stable | yes |
+| `1.4.x` | previous       | security-only — superseded by v1.5.0 on 2026-08-25 |
+| `1.3.x` | superseded     | no |
+| `0.8.x` | superseded     | no |
+| `< 0.8` | superseded     | no |
 
 We do **not** backport fixes to pre-1.0 minor lines. Stay on the
 latest tagged release. Homebrew users get this automatically; pinned
@@ -186,6 +186,30 @@ The signal is intended to *raise the cost and visibility* of a cross-tool
 credential relay and force a human decision on it, not to be an
 unbypassable exfiltration control. For "I don't trust this server's
 process at all," `--sandbox` remains the complementary control.
+
+### Known limitation: native agent hooks are user-level (v1.5+)
+
+`--install-agent-hooks` writes fail-closed wrappers under
+`~/.aperion-shield/hooks/` and merges **user-level** Claude
+`~/.claude/settings.json` / Cursor `~/.cursor/hooks.json`. That is the
+TrustFall-shaped threat: project-local hook files can be dropped in by
+a malicious repo.
+
+Honest limits:
+
+- **Project hooks can still exist.** We do not delete or override
+  `.cursor/hooks.json` / `.claude/settings.json` inside a repo. A
+  project can add its own hooks; user-level hooks still fire if the
+  host loads both, but that is host-defined.
+- **`SHIELD_HOOKS_DISABLE=1` and git `--no-verify` still bypass.** Same
+  contract as the git hooks. The native wrappers fail closed if the
+  binary is missing; git hooks historically fail open so teammates
+  without Shield can still commit.
+- **Claude and Cursor deny JSON are not interchangeable.** The wrong
+  dialect is a silent allow on one host. Wrappers are separate on
+  purpose.
+- **`--scan-ide` does not execute servers.** It reads JSON and SKILL.md.
+  A command-type MCP that is not yet written to disk will not show up.
 
 ### Cryptographic primitives
 
@@ -365,6 +389,7 @@ If you operate Shield as part of an enterprise deployment:
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | v1.5.0 shipped. Native Claude/Cursor PreToolUse hooks (`--check-hook`, `--install-agent-hooks`, fail-closed wrappers), `--scan-ide` (TrustFall project MCP + Skills ATR pass), `install.sh` for `shield-get.aperion.ai`. New §3 subsection "native agent hooks are user-level". Supported-versions table: 1.5.x current, 1.4.x security-only. No new network endpoints in the binary; the installer still only talks to GitHub Releases. |
 | 2026-05-15 | Initial policy. Documents the three open Dependabot advisories surfaced by Shield's first public release and the v0.6.0 fix plan. |
 | 2026-05-18 | v0.6.0 shipped. RUSTSEC-2026-0098 / -0099 / -0104 closed by `rustls-webpki 0.103.13` (transitively via the `reqwest 0.12` / `rustls 0.23` / `hyper 1.x` upgrade). `.cargo/audit.toml` ignore list trimmed back to `[]`. Supported-versions table updated. |
 | 2026-05-20 | v0.7.0 shipped. No new advisories or fix-required changes; this is a feature-only release. `cargo audit` clean against `Cargo.lock` at the v0.7.0 commit. New surfaces (`--install-hooks`, `--check-staged`, `--check-pushed-refs`, `--suggest-rules`) all stay within the standalone process model — no new network endpoints, no new on-disk persistence beyond `.git/hooks/` (Shield itself) and the operator-redirected audit log. Supported-versions table updated; v0.6.x dropped to security-only. |

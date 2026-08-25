@@ -268,6 +268,8 @@ shieldset:
           - "~/.aws/**"
           - "~/.gnupg/**"
           - "~/.kube/**"
+          - "**/.env"
+          - "**/.env.*"
       reason: "Operation touches a sensitive system or credential path."
       safer_alternative: "Scope the change to your project directory. If you really need to touch system paths, run the command manually with `sudo` outside the agent."
 
@@ -338,6 +340,8 @@ shieldset:
           - '~?/\.ssh/id_(rsa|ed25519|dsa|ecdsa)(\.pub)?\b'
           - '~?/\.aws/credentials\b'
           - '~?/\.gnupg/private-keys-v1\.d'
+          - '(?i)(^|[\s/])\.env(\.[A-Za-z0-9_-]+)?($|[\s;|&])'
+          - '/\.env(\.[A-Za-z0-9_-]+)?\b'
       reason: "Reading private credentials directly -- confirm this is intentional."
       safer_alternative: "Reference the credential by environment variable or use the relevant CLI (aws sts, ssh-agent) instead of `cat`-ing the file."
 

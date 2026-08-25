@@ -122,13 +122,35 @@ struct Cli {
     )]
     scan: Option<String>,
 
-    /// Output format for `--scan`. Default: text.
-    #[arg(long, value_name = "FMT", value_parser = ["text", "json"], requires = "scan")]
+    /// Output format for `--scan` and `--scan-ide`. Default: text.
+    #[arg(long, value_name = "FMT", value_parser = ["text", "json"])]
     scan_format: Option<String>,
 
     /// Skip the network passes of `--scan` (registry metadata, OSV).
     #[arg(long, requires = "scan")]
     scan_offline: bool,
+
+    /// Walk local IDE MCP configs and Skills (Cursor, Claude Code,
+    /// Windsurf, Codex) under $HOME and the project root. Does not
+    /// execute anything. Exit: 0 = pass, 1 = caution, 2 = fail.
+    #[arg(
+        long,
+        conflicts_with = "scan",
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "check_cmd"
+    )]
+    scan_ide: bool,
+
+    /// Extra project root(s) for `--scan-ide` (repeatable). Default:
+    /// current working directory. $HOME is always included.
+    #[arg(long = "scan-ide-root", value_name = "PATH", requires = "scan_ide")]
+    scan_ide_root: Vec<PathBuf>,
+
+    /// Skip the Skills / SKILL.md pass of `--scan-ide`.
+    #[arg(long, requires = "scan_ide")]
+    no_skills: bool,
 
     /// Run in shadow mode: never block; just warn + log. Mirrors the
     /// enterprise `SHIELD_MODE=shadow` behaviour. Default: enforce.
@@ -310,12 +332,10 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     repo: Option<PathBuf>,
 
-    /// With `--install-hooks`: if an existing hook is present that we
-    /// don't recognise, move it aside (to `<hook>.aperion-backup`) and
-    /// have our hook `exec` it as a tail chain. Compatible with husky,
-    /// pre-commit, and lefthook installations. Without this flag we
-    /// refuse to overwrite an unrecognised hook (the safe default).
-    #[arg(long, requires = "install_hooks")]
+    /// With `--install-hooks` or `--install-agent-hooks`: if existing
+    /// unmanaged hooks are present, append/chain instead of refusing.
+    /// Without this flag we leave foreign hooks alone (the safe default).
+    #[arg(long)]
     chain_existing: bool,
 
     /// Run the engine against the lines this commit is about to
@@ -493,6 +513,58 @@ struct Cli {
         conflicts_with = "list_shims"
     )]
     check_cmd: bool,
+
+    /// Read a Claude Code / Cursor PreToolUse JSON event on stdin,
+    /// evaluate it with the same engine as `--check-cmd`, and print
+    /// the host-specific deny JSON. Used by `--install-agent-hooks`.
+    #[arg(
+        long,
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "check_cmd",
+        conflicts_with = "scan",
+        conflicts_with = "scan_ide"
+    )]
+    check_hook: bool,
+
+    /// JSON dialect for `--check-hook`. `auto` inspects the payload.
+    /// Claude and Cursor shapes are incompatible -- do not share one
+    /// wrapper script. Default: auto.
+    #[arg(
+        long,
+        value_name = "DIALECT",
+        value_parser = ["auto", "claude", "cursor"],
+        default_value = "auto"
+    )]
+    hook_dialect: String,
+
+    /// Install user-level Claude Code `PreToolUse` and Cursor
+    /// `preToolUse` hooks (fail-closed wrappers under
+    /// `~/.aperion-shield/hooks/`). Does not touch project-level
+    /// hook files (TrustFall is project-injected).
+    #[arg(
+        long,
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "install_hooks",
+        conflicts_with = "check_hook",
+        conflicts_with = "scan_ide"
+    )]
+    install_agent_hooks: bool,
+
+    /// Remove Aperion-installed agent-hook wrappers and their entries
+    /// in `~/.claude/settings.json` / `~/.cursor/hooks.json`.
+    #[arg(
+        long,
+        conflicts_with = "install_agent_hooks",
+        conflicts_with = "check_hook"
+    )]
+    uninstall_agent_hooks: bool,
+
+    /// Override $HOME for `--install-agent-hooks` / `--scan-ide`
+    /// (tests and unusual prefixes). Default: the real home directory.
+    #[arg(long, value_name = "PATH")]
+    agent_home: Option<PathBuf>,
 
     // ── Decision transparency (v0.8+) ─────────────────────────────
     //
@@ -974,6 +1046,22 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.check_cmd {
         let exit_code = run_check_cmd(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.check_hook {
+        let exit_code = run_check_hook(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.install_agent_hooks {
+        let exit_code = run_install_agent_hooks(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.uninstall_agent_hooks {
+        let exit_code = run_uninstall_agent_hooks(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.scan_ide {
+        let exit_code = run_scan_ide_mode(&cli)?;
         std::process::exit(exit_code);
     }
     if cli.explain {
@@ -2171,6 +2259,119 @@ fn run_check_cmd(cli: &Cli) -> anyhow::Result<i32> {
         eprint!("{}", refusal_banner(&report));
     }
     Ok(report.exit_code() as i32)
+}
+
+/// `--check-hook`. Reads one JSON event from stdin (Claude / Cursor
+/// PreToolUse). Prints dialect-specific deny JSON on stdout.
+fn run_check_hook(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::hooks::agent::{detect_dialect, run, HookDialect, HookEvent};
+    use std::io::Read;
+
+    let mut raw = String::new();
+    std::io::stdin().read_to_string(&mut raw)?;
+    let event = HookEvent::from_json(&raw)?;
+    let dialect = match cli.hook_dialect.as_str() {
+        "auto" => detect_dialect(&event),
+        other => HookDialect::parse(other)?,
+    };
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
+    let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
+    let report = run(&engine, &event, dialect, Some(&taint))?;
+
+    let audit_record = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": "shield_eval",
+        "source": "check-hook",
+        "tool": report.tool_name,
+        "canonical_tool": report.canonical_tool,
+        "decision": report.decision.label(),
+        "rule_id": report.primary_rule_id,
+        "dialect": match report.dialect {
+            HookDialect::Claude => "claude",
+            HookDialect::Cursor => "cursor",
+        },
+    });
+    eprintln!("{}", audit_record);
+    print!("{}", report.stdout);
+    Ok(report.exit_code())
+}
+
+fn run_install_agent_hooks(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::hooks::agent_install::{install, AgentInstallOutcome};
+
+    let report = install(cli.agent_home.as_deref(), cli.chain_existing)?;
+    eprintln!(
+        "[shield] agent-hooks dir: {}",
+        report.hooks_dir.display()
+    );
+    if let Some(bin) = &report.shield_bin {
+        eprintln!("[shield] baked binary: {}", bin.display());
+    } else {
+        eprintln!("[shield] no aperion-shield on PATH -- wrappers will fail closed until it is");
+    }
+    let mut blocked = false;
+    for (name, outcome) in [
+        ("claude wrapper", report.claude_wrapper),
+        ("cursor wrapper", report.cursor_wrapper),
+        ("~/.claude/settings.json", report.claude_settings),
+        ("~/.cursor/hooks.json", report.cursor_settings),
+    ] {
+        match outcome {
+            AgentInstallOutcome::Installed => eprintln!("[shield] installed: {name}"),
+            AgentInstallOutcome::Refreshed => eprintln!("[shield] refreshed: {name}"),
+            AgentInstallOutcome::Merged => eprintln!("[shield] merged: {name}"),
+            AgentInstallOutcome::UnknownPresent => {
+                eprintln!(
+                    "[shield] {name}: existing unmanaged hooks present. Re-run with --chain-existing to append."
+                );
+                blocked = true;
+            }
+        }
+    }
+    if blocked {
+        eprintln!("[shield] next: aperion-shield --install-agent-hooks --chain-existing");
+        return Ok(2);
+    }
+    eprintln!("[shield] agent hooks are user-level. Project .cursor/hooks.json is not touched.");
+    Ok(0)
+}
+
+fn run_uninstall_agent_hooks(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::hooks::agent_install::uninstall;
+
+    let report = uninstall(cli.agent_home.as_deref())?;
+    eprintln!(
+        "[shield] removed wrappers: claude={} cursor={}",
+        report.claude_wrapper_removed, report.cursor_wrapper_removed
+    );
+    eprintln!(
+        "[shield] cleared settings: claude={} cursor={}",
+        report.claude_settings_cleared, report.cursor_settings_cleared
+    );
+    Ok(0)
+}
+
+fn run_scan_ide_mode(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::scan::ide::{run_ide_scan, IdeScanOptions};
+
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
+    let mut roots = cli.scan_ide_root.clone();
+    if roots.is_empty() {
+        if let Ok(cwd) = std::env::current_dir() {
+            roots.push(cwd);
+        }
+    }
+    let opts = IdeScanOptions {
+        roots,
+        home: cli.agent_home.clone(),
+        no_skills: cli.no_skills,
+    };
+    let report = run_ide_scan(&opts, &engine)?;
+    match cli.scan_format.as_deref() {
+        Some("json") => println!("{}", serde_json::to_string_pretty(&report)?),
+        _ => print!("{}", report.render_text()),
+    }
+    Ok(report.exit_code())
 }
 
 /// The single choke point both downstreams (stdio + HTTP) run client

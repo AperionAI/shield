@@ -1,7 +1,7 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
 [![License: Proprietary](https://img.shields.io/badge/License-Proprietary-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-365%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
+[![Tests](https://img.shields.io/badge/tests-232%20lib%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
 [![Security policy](https://img.shields.io/badge/security-SECURITY.md-red.svg)](SECURITY.md)
@@ -44,7 +44,10 @@ server *process* at the OS level. And since v1.4, **reversible secret
 cloaking** lets your agent reference a real credential as a
 `{{cloak:NAME}}` placeholder — the secret is substituted in only on the
 frame Shield forwards upstream and scrubbed back out of any result, so it
-never enters the model's context, transcript, or prompt cache.
+never enters the model's context, transcript, or prompt cache. **v1.5**
+adds the seam the August 2026 market actually demos: native Cursor /
+Claude Code `PreToolUse` hooks (fail-closed), `--scan-ide` for TrustFall
+project MCP + Skills, and `curl -fsSL https://shield-get.aperion.ai | sh`.
 
 Plus, when you need to prove **who** approved a destructive call —
 not just that *someone* did — Shield can gate selected rules behind
@@ -53,6 +56,40 @@ And when you outgrow the single-machine model, the **same binary**
 enrolls into a Smartflow control plane with one command to pull
 org-wide policy, ship audit upstream, and use your existing IdP as
 the relying party — no rewrite, no re-install.
+
+---
+
+## What's new in v1.5
+
+The August 2026 market moved the real attack surface off MCP wrappers.
+Agents run Bash, Write, and Read as native tools. Project `mcp.json` can
+auto-start on folder trust (TrustFall). Snyk Agent Scan walks the whole
+machine. v1.5 covers those three without a cloud account.
+
+1. **Native agent hooks.** `aperion-shield --install-agent-hooks` writes
+   fail-closed wrappers and merges user-level Claude Code `PreToolUse`
+   (`~/.claude/settings.json`) and Cursor `preToolUse`
+   (`~/.cursor/hooks.json`). `--check-hook` reads the host JSON on stdin
+   and emits the matching deny dialect (they are not interchangeable).
+   `SHIELD_HOOKS_DISABLE=1` is the documented bypass. Project-level hook
+   files are left alone on purpose — TrustFall is project-injected.
+
+2. **`--scan-ide`.** Walks Cursor / Claude / Windsurf / Codex MCP configs
+   under `$HOME` and the project root, plus `SKILL.md` trees. Flags
+   unwrapped command-type servers, unpinned `npx`/`uvx`, and project-local
+   configs. Skills run through the ATR `skill_compromise` rules. Nothing
+   is executed. Exit 0/1/2 for CI.
+
+3. **`curl | sh` install.** `curl -fsSL https://shield-get.aperion.ai | sh`
+   (same pattern as Halo). Then `--install-agent-hooks`. Halo's installer
+   now prints that two-liner after a successful Halo install — Shield is
+   not silently bundled.
+
+```bash
+curl -fsSL https://shield-get.aperion.ai | sh
+aperion-shield --install-agent-hooks
+aperion-shield --scan-ide
+```
 
 ---
 
@@ -614,6 +651,16 @@ Shield's terms are unchanged: still no cloud, no telemetry, no account.
 ---
 
 ## Install
+
+One-liner (macOS / Linux, arm64 + x64):
+
+```bash
+curl -fsSL https://shield-get.aperion.ai | sh
+aperion-shield --install-agent-hooks
+```
+
+See [docs/INSTALL.md](docs/INSTALL.md) if `shield-get.aperion.ai` is not
+resolving yet — the same script is on `main` as `install.sh`.
 
 ### Homebrew (macOS / Linux)
 
@@ -1922,6 +1969,8 @@ the answer.
 | Composite scoring + workspace probe + decision memory + burst detector | ✅              | ✅               |
 | Local stderr audit log + `.aperion-shield/decisions.jsonl`             | ✅              | ✅               |
 | `--check` mode (CI / corpus testing)                                   | ✅              | ✅               |
+| Native Claude/Cursor PreToolUse hooks (`--install-agent-hooks`)        | ✅              | ✅               |
+| `--scan-ide` (TrustFall project MCP + Skills)                          | ✅              | ✅               |
 | Identity gates -- mock provider + ID.me provider (feature-gated)       | ✅              | ✅               |
 | Org-mode **client** (`--enroll`, policy pull, audit stream, vkey)      | ✅              | ✅               |
 | Hosted approval queue + dashboard                                      | —               | ✅               |

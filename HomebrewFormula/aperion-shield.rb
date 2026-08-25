@@ -10,9 +10,9 @@
 #   brew install aperion-shield
 class AperionShield < Formula
   desc     "Local MCP guardrail for AI coding agents"
-  homepage "https://shield.aperion.ai"
+  homepage "https://github.com/AperionAI/shield"
   license  :cannot_represent
-  version  "0.3.0"
+  version  "1.5.0"
 
   on_macos do
     on_arm do

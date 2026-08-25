@@ -1,6 +1,6 @@
-//! Git-hook integration (v0.7+).
+//! Git-hook integration (v0.7+) and native agent hooks (v1.5).
 //!
-//! Three concerns live under this module:
+//! Git concerns:
 //!
 //!   * `install`        -- write / remove `.git/hooks/pre-commit` and
 //!                         `.git/hooks/pre-push` (`--install-hooks`,
@@ -15,10 +15,18 @@
 //!                         pre-push stdin and refuses force-pushes /
 //!                         deletions of protected branches.
 //!
-//! See `docs/hooks.md` for the user-facing contract (installer
-//! semantics, exit codes, env overrides, husky / pre-commit / lefthook
-//! coexistence).
+//! Native agent concerns (v1.5):
+//!
+//!   * `agent`          -- `--check-hook` stdin JSON adapter (Claude /
+//!                         Cursor dialects).
+//!   * `agent_install`  -- `--install-agent-hooks` / `--uninstall-agent-hooks`
+//!                         user-level Claude `settings.json` + Cursor
+//!                         `hooks.json` merge, fail-closed wrappers.
+//!
+//! See `docs/hooks.md` for the git-hook contract.
 
+pub mod agent;
+pub mod agent_install;
 pub mod check_pushed;
 pub mod check_staged;
 pub mod install;

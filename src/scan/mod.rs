@@ -42,6 +42,8 @@ use serde::Serialize;
 
 use crate::engine::{Adjustments, Engine, Scope, Severity};
 
+pub mod ide;
+
 // ───────────────────────────── targets ─────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
