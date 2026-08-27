@@ -228,7 +228,7 @@ jobs:
             desc "Local MCP guardrail for AI coding agents (Cursor, Claude Code, ...)"
             homepage "https://github.com/AperionAI/shield"
             version "${VERSION}"
-            license :cannot_represent
+            license "Elastic-2.0"
 
             on_macos do
               on_arm do

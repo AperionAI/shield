@@ -47,7 +47,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 LABEL org.opencontainers.image.title="aperion-shield"
 LABEL org.opencontainers.image.description="Local MCP guardrail for AI coding agents"
 LABEL org.opencontainers.image.source="https://github.com/AperionAI/shield"
-LABEL org.opencontainers.image.licenses="NOASSERTION"
+LABEL org.opencontainers.image.licenses="Elastic-2.0"
 LABEL org.opencontainers.image.vendor="Aperion"
 # Required by the official MCP Registry's OCI ownership check -- the
 # value must exactly match the `name` field in server.json.

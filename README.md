@@ -2009,10 +2009,11 @@ the answer.
 | MCP trust registry (signed servers)                                    | —               | ✅               |
 | Sigstore-signed binaries + admission policies                          | —               | ✅               |
 
-The free product is distributed under a proprietary binary license — see
-[LICENSE](LICENSE) — including the `src/orgmode/` client. The paid
-product is the Smartflow **control plane** that the client talks to: a
-hosted service, separately licensed. Both halves
+The free product is source-available under the [Elastic License 2.0](LICENSE),
+including the `src/orgmode/` client. You can run and modify it. You cannot
+offer it as a competing hosted service. The paid product is the Smartflow
+**control plane** that the client talks to: a hosted service, separately
+licensed. Both halves
 share the same `shieldset.yaml` schema and the same audit-record format,
 so policy you author for standalone Shield works unchanged once you
 enroll into Smartflow.
@@ -2177,7 +2178,7 @@ star genuinely helps:
 
 ## License
 
-Proprietary — binaries and images only, no source distributed. See
-[LICENSE](LICENSE) (Aperion AI Shield Binary License Agreement).
+[Elastic License 2.0](LICENSE). Use and modify it. Do not offer it as a
+competing hosted service.
 
 <!-- ci: trigger codeql re-run after billing fix (2026-06-22) -->

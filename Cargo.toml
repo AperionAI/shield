@@ -2,7 +2,8 @@
 name = "aperion-shield"
 version = "1.6.0"
 edition = "2021"
-description = "Aperion Shield -- a local MCP guardrail for AI coding agents with optional biometric identity gates (ID.me). Standalone, free tier, binary-only."
+description = "Aperion Shield -- a local MCP guardrail for AI coding agents with optional biometric identity gates (ID.me). Standalone, free tier."
+license = "Elastic-2.0"
 license-file = "LICENSE"
 authors = ["Aperion <support@aperion.ai>"]
 readme = "README.md"
