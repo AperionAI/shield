@@ -60,10 +60,48 @@ detect_target() {
   echo "${arch_part}-${os_part}"
 }
 
+# Prefer a directory already on PATH so the next line of
+#   curl | sh && aperion-shield --scan-ide
+# actually runs this binary. Homebrew leftovers (1.0.x) sit earlier on
+# PATH than ~/.local/bin and make --scan-ide look like an unknown flag.
 pick_install_dir() {
   if [ -n "$INSTALL_DIR" ]; then echo "$INSTALL_DIR"; return; fi
+
+  existing="$(command -v aperion-shield 2>/dev/null || true)"
+  if [ -n "$existing" ]; then
+    ed="$(dirname "$existing")"
+    if [ -w "$ed" ]; then echo "$ed"; return; fi
+  fi
+
+  for d in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    case ":$PATH:" in
+      *":$d:"*)
+        if [ -d "$d" ] && [ -w "$d" ]; then echo "$d"; return; fi
+        ;;
+    esac
+  done
+
   if [ -w /usr/local/bin ] 2>/dev/null; then echo /usr/local/bin; return; fi
   echo "$HOME/.local/bin"
+}
+
+warn_if_shadowed() {
+  dir="$1"
+  installed="$dir/$BIN"
+  resolved="$(command -v aperion-shield 2>/dev/null || true)"
+  [ -n "$resolved" ] || return 0
+  inst_real="$(cd "$dir" && pwd)/$BIN"
+  if [ "$resolved" = "$installed" ] || [ "$resolved" = "$inst_real" ]; then
+    return 0
+  fi
+  old_ver="$("$resolved" --version 2>/dev/null || echo unknown)"
+  new_ver="$("$installed" --version 2>/dev/null || echo unknown)"
+  echo "shield-install: WARNING: PATH still prefers an older binary."
+  echo "  PATH hits:    $resolved  ($old_ver)"
+  echo "  this install: $installed  ($new_ver)"
+  echo "  Homebrew leftover:  brew unlink aperion-shield"
+  echo "  This shell:         export PATH=\"$dir:\$PATH\""
+  echo "  Then:               aperion-shield --version   # must read 1.6+"
 }
 
 resolve_tag() {
@@ -134,9 +172,10 @@ main() {
     *":$dir:"*) : ;;
     *) path_hint "$dir" ;;
   esac
+  warn_if_shadowed "$dir"
   "$dir/$BIN" --version || true
-  echo "shield-install: done. Next: 'aperion-shield --install-agent-hooks'"
-  echo "  then wrap MCP servers or run 'aperion-shield --scan-ide'."
+  echo "shield-install: done. Next: 'aperion-shield --version' (must be 1.6+), then"
+  echo "  aperion-shield --install-agent-hooks && aperion-shield --scan-ide"
 }
 
 main "$@"
