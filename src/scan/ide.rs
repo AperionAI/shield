@@ -1,17 +1,25 @@
 //! v1.5: `--scan-ide` -- walk local agent configs and Skills.
 //!
 //! Does not execute anything. Complements `--scan` (per-package) with
-//! the one-command machine sweep Snyk Agent Scan popularised, without
-//! shipping catalogs to a vendor.
+//! a machine sweep of IDE config. Native Bash/Write/Read are governed
+//! by `--install-agent-hooks`, not this scan. This pass is MCP, Skills,
+//! TrustFall project files, and (since 1.6.1) a coverage block so a
+//! clean laptop does not look like a no-op.
 //!
 //! Passes:
 //!   (a) MCP config walk -- Cursor / Claude / Windsurf / Codex JSON
-//!       files under $HOME and the project root. Flags command-type
-//!       servers that are not wrapped by aperion-shield, unpinned
-//!       npx/npm/uvx, and project-local configs (TrustFall class).
+//!       at $HOME *and* project files discovered under Documents /
+//!       Desktop / Downloads. Flags command-type servers that are not
+//!       wrapped, unpinned npx/npm/uvx, and project-local configs
+//!       (TrustFall). A file under `~/Documents/app/.cursor/mcp.json`
+//!       is project-local even though it lives in $HOME; only the
+//!       well-known user-level paths (`~/.cursor/mcp.json`, …) are not.
 //!   (b) Skills walk -- SKILL.md under ~/.claude/skills, .claude/skills,
 //!       .cursor/skills. Text is evaluated against ATR
 //!       `skill_compromise` / `tool_description` rules.
+//!   (c) Coverage -- whether native hooks are installed, HTTP vs stdio
+//!       global MCP, how many workspaces shipped project MCP.
+
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -23,6 +31,17 @@ use crate::engine::{Adjustments, Engine, Scope, Severity};
 
 use super::{Finding, Verdict};
 
+#[derive(Debug, Default, Serialize)]
+pub struct IdeCoverage {
+    pub cursor_hooks: String,
+    pub codex_hooks: String,
+    pub claude_hooks: String,
+    pub windsurf: String,
+    pub global_mcp: String,
+    pub workspaces_with_project_mcp: usize,
+    pub note: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct IdeReport {
     pub roots: Vec<String>,
@@ -32,6 +51,8 @@ pub struct IdeReport {
     pub passes_run: Vec<&'static str>,
     pub passes_skipped: Vec<(&'static str, String)>,
     pub verdict: Verdict,
+    #[serde(default)]
+    pub coverage: IdeCoverage,
 }
 
 impl IdeReport {
@@ -55,6 +76,19 @@ impl IdeReport {
     pub fn render_text(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("scan-ide roots: {}\n", self.roots.join(", ")));
+        out.push_str("coverage:\n");
+        out.push_str(&format!("  Cursor hooks:  {}\n", self.coverage.cursor_hooks));
+        out.push_str(&format!("  Codex hooks:   {}\n", self.coverage.codex_hooks));
+        out.push_str(&format!("  Claude hooks:  {}\n", self.coverage.claude_hooks));
+        out.push_str(&format!("  Windsurf:      {}\n", self.coverage.windsurf));
+        out.push_str(&format!("  global MCP:    {}\n", self.coverage.global_mcp));
+        out.push_str(&format!(
+            "  project MCP:   {} workspace(s) under Documents/Desktop/Downloads\n",
+            self.coverage.workspaces_with_project_mcp
+        ));
+        if !self.coverage.note.is_empty() {
+            out.push_str(&format!("  note: {}\n", self.coverage.note));
+        }
         out.push_str(&format!(
             "configs: {}  skills: {}\n",
             self.configs_scanned.len(),
@@ -152,8 +186,153 @@ fn skill_rel_dirs() -> &'static [&'static str] {
     ]
 }
 
-fn is_under(path: &Path, ancestor: &Path) -> bool {
-    path.starts_with(ancestor)
+fn is_user_level_config(path: &Path, home: &Path) -> bool {
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    config_rel_paths().iter().any(|rel| {
+        let candidate = home.join(rel);
+        candidate.canonicalize().unwrap_or(candidate) == path
+    })
+}
+
+fn skip_walk_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules"
+            | ".git"
+            | "target"
+            | "dist"
+            | "build"
+            | ".venv"
+            | "venv"
+            | "Library"
+            | "Caches"
+            | ".Trash"
+            | "site-packages"
+            | ".cursor"
+            | ".claude"
+            | ".codex"
+            | ".codeium"
+            | ".windsurf"
+            | ".copilot"
+    )
+}
+
+const DISCOVER_MAX_DEPTH: usize = 6;
+const DISCOVER_MAX_HITS: usize = 50;
+
+fn discover_workspace_roots(home: &Path) -> Vec<PathBuf> {
+    let mut hits = Vec::new();
+    for rel in ["Documents", "Desktop", "Downloads", "code", "src", "dev"] {
+        let root = home.join(rel);
+        if root.is_dir() {
+            walk_workspaces(&root, 0, &mut hits);
+        }
+        if hits.len() >= DISCOVER_MAX_HITS {
+            break;
+        }
+    }
+    hits
+}
+
+fn walk_workspaces(dir: &Path, depth: usize, hits: &mut Vec<PathBuf>) {
+    if hits.len() >= DISCOVER_MAX_HITS || depth > DISCOVER_MAX_DEPTH {
+        return;
+    }
+    if dir.join(".cursor").join("mcp.json").is_file()
+        || dir.join(".cursor").join("hooks.json").is_file()
+        || dir.join(".mcp.json").is_file()
+        || dir.join(".windsurf").join("mcp.json").is_file()
+    {
+        hits.push(dir.to_path_buf());
+    }
+    let rd = match fs::read_dir(dir) {
+        Ok(x) => x,
+        Err(_) => return,
+    };
+    for ent in rd.flatten() {
+        let ft = match ent.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() || !ft.is_dir() {
+            continue;
+        }
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if skip_walk_dir(&name) {
+            continue;
+        }
+        walk_workspaces(&ent.path(), depth + 1, hits);
+    }
+}
+
+fn hook_line(home: &Path, rel: &str) -> String {
+    let p = home.join(rel);
+    match fs::read_to_string(&p) {
+        Ok(s) if s.contains("aperion-shield") || s.contains("pretooluse") => {
+            "installed".into()
+        }
+        Ok(_) => "present, not Shield-managed".into(),
+        Err(_) => "not installed".into(),
+    }
+}
+
+fn global_mcp_line(home: &Path) -> String {
+    let p = home.join(".cursor/mcp.json");
+    let raw = match fs::read_to_string(&p) {
+        Ok(s) => s,
+        Err(_) => return "no ~/.cursor/mcp.json".into(),
+    };
+    let parsed: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return "unreadable ~/.cursor/mcp.json".into(),
+    };
+    let mut http = 0usize;
+    let mut stdio = 0usize;
+    let mut wrapped = 0usize;
+    for (_name, cfg) in servers_from_json(&parsed) {
+        let command = cfg.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let args: Vec<String> = cfg
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let url = cfg.get("url").and_then(|v| v.as_str());
+        if !command.is_empty() {
+            stdio += 1;
+            if is_wrapped(command, &args) {
+                wrapped += 1;
+            }
+        } else if url.is_some() {
+            http += 1;
+        }
+    }
+    format!("{http} HTTP, {stdio} stdio ({wrapped} Shield-wrapped)")
+}
+
+fn build_coverage(home: &Path, project_workspaces: usize, hooks_ok: bool) -> IdeCoverage {
+    let cursor = hook_line(home, ".cursor/hooks.json");
+    let note = if hooks_ok && cursor == "installed" {
+        "Bash/Write/Read on Cursor go through Shield even when findings is none. In Cursor, ask the agent to write a .env — that is the deny.".into()
+    } else if cursor != "installed" {
+        "Native Cursor tools are not hooked. Run: aperion-shield --install-agent-hooks".into()
+    } else {
+        String::new()
+    };
+    IdeCoverage {
+        cursor_hooks: cursor,
+        codex_hooks: hook_line(home, ".codex/hooks.json"),
+        claude_hooks: hook_line(home, ".claude/settings.json"),
+        windsurf: "no native PreToolUse (stdio MCP wrap only)".into(),
+        global_mcp: global_mcp_line(home),
+        workspaces_with_project_mcp: project_workspaces,
+        note,
+    }
 }
 
 fn is_wrapped(command: &str, args: &[String]) -> bool {
@@ -229,14 +408,32 @@ fn inspect_server(name: &str, cfg: &Value, location: &str, project_local: bool) 
         return findings;
     }
 
+    let wrapped = !command.is_empty() && is_wrapped(&command, &args);
+
     if project_local {
+        let (severity, detail) = if wrapped {
+            (
+                Severity::Medium,
+                format!("project-local MCP server '{name}' is Shield-wrapped (folder-trust can still auto-start it)"),
+            )
+        } else if url.is_some() && command.is_empty() {
+            (
+                Severity::Medium,
+                format!("project-local HTTP MCP server '{name}' (folder-trust can auto-start it)"),
+            )
+        } else {
+            (
+                Severity::High,
+                format!(
+                    "project-local MCP server '{name}' (TrustFall class: folder-trust can auto-start this)"
+                ),
+            )
+        };
         findings.push(Finding {
             pass: "config",
             id: "scan.ide.project_mcp".into(),
-            severity: Severity::High,
-            detail: format!(
-                "project-local MCP server '{name}' (TrustFall class: folder-trust can auto-start this)"
-            ),
+            severity,
+            detail,
             location: Some(location.into()),
         });
     }
@@ -312,11 +509,7 @@ fn scan_config_file(path: &Path, home: &Path) -> Vec<Finding> {
             }];
         }
     };
-    let project_local = home
-        .canonicalize()
-        .ok()
-        .map(|h| !is_under(path, &h) && !is_under(path, &home))
-        .unwrap_or_else(|| !is_under(path, home));
+    let project_local = !is_user_level_config(path, home);
     let mut findings = Vec::new();
     for (name, cfg) in servers_from_json(&parsed) {
         findings.extend(inspect_server(&name, &cfg, &loc, project_local));
@@ -485,6 +678,14 @@ pub fn run_ide_scan(opts: &IdeScanOptions, engine: &Engine) -> Result<IdeReport>
         roots.push(home.clone());
     }
 
+    let discovered = discover_workspace_roots(&home);
+    let project_workspace_count = discovered.len();
+    for d in &discovered {
+        if !roots.iter().any(|r| r == d) {
+            roots.push(d.clone());
+        }
+    }
+
     let mut report = IdeReport {
         roots: roots.iter().map(|p| p.display().to_string()).collect(),
         configs_scanned: Vec::new(),
@@ -493,6 +694,7 @@ pub fn run_ide_scan(opts: &IdeScanOptions, engine: &Engine) -> Result<IdeReport>
         passes_run: Vec::new(),
         passes_skipped: Vec::new(),
         verdict: Verdict::Pass,
+        coverage: IdeCoverage::default(),
     };
 
     let mut seen = std::collections::BTreeSet::<PathBuf>::new();
@@ -531,6 +733,9 @@ pub fn run_ide_scan(opts: &IdeScanOptions, engine: &Engine) -> Result<IdeReport>
         report.passes_run.push("skills");
     }
 
+    let hooks_ok = hook_line(&home, ".cursor/hooks.json") == "installed"
+        || hook_line(&home, ".codex/hooks.json") == "installed";
+    report.coverage = build_coverage(&home, project_workspace_count, hooks_ok);
     report.finalize();
     Ok(report)
 }
@@ -574,6 +779,56 @@ mod tests {
         assert!(ids.contains(&"scan.ide.unpinned_npx"), "{ids:?}");
         assert_eq!(report.verdict, Verdict::Fail);
         assert_eq!(report.exit_code(), 2);
+    }
+
+    #[test]
+    fn project_mcp_under_home_documents_is_trustfall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(home.join("Documents/app")).unwrap();
+        write(
+            &home,
+            "Documents/app/.cursor/mcp.json",
+            r#"{"mcpServers":{"evil":{"command":"npx","args":["-y","@evil/mcp-server"]}}}"#,
+        );
+        let report = run_ide_scan(
+            &IdeScanOptions {
+                roots: vec![home.clone()],
+                home: Some(home),
+                no_skills: true,
+            },
+            &Engine::builtin_default(),
+        )
+        .unwrap();
+        let ids: Vec<&str> = report.findings.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            ids.contains(&"scan.ide.project_mcp"),
+            "home-nested project MCP must be TrustFall, not treated as user-level: {ids:?}"
+        );
+        assert!(ids.contains(&"scan.ide.unwrapped_command"), "{ids:?}");
+        assert_eq!(report.verdict, Verdict::Fail);
+        assert!(report.coverage.workspaces_with_project_mcp >= 1);
+    }
+
+    #[test]
+    fn coverage_reports_missing_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let report = run_ide_scan(
+            &IdeScanOptions {
+                roots: vec![home.clone()],
+                home: Some(home),
+                no_skills: true,
+            },
+            &Engine::builtin_default(),
+        )
+        .unwrap();
+        assert_eq!(report.coverage.cursor_hooks, "not installed");
+        assert!(report.coverage.note.contains("install-agent-hooks"));
+        let text = report.render_text();
+        assert!(text.contains("coverage:"), "{text}");
+        assert!(text.contains("Cursor hooks:"), "{text}");
     }
 
     #[test]
