@@ -318,7 +318,7 @@ fn global_mcp_line(home: &Path) -> String {
 fn build_coverage(home: &Path, project_workspaces: usize, hooks_ok: bool) -> IdeCoverage {
     let cursor = hook_line(home, ".cursor/hooks.json");
     let note = if hooks_ok && cursor == "installed" {
-        "Bash/Write/Read on Cursor go through Shield even when findings is none. In Cursor, ask the agent to write a .env — that is the deny.".into()
+        "Bash/Write/Read on Cursor go through Shield even when findings is none. In Cursor, ask the agent to write a .env — High-severity paths prompt; Critical (rm -rf /) still denies.".into()
     } else if cursor != "installed" {
         "Native Cursor tools are not hooked. Run: aperion-shield --install-agent-hooks".into()
     } else {

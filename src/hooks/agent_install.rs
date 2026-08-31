@@ -3,7 +3,8 @@
 //! Writes fail-closed wrappers under `~/.aperion-shield/hooks/` and
 //! merges user-level host config:
 //!   * Claude Code `~/.claude/settings.json` `hooks.PreToolUse`
-//!   * Cursor `~/.cursor/hooks.json` `hooks.preToolUse`
+//!   * Cursor `~/.cursor/hooks.json` `hooks.preToolUse`,
+//!     `beforeShellExecution`, `beforeMCPExecution`
 //!   * Codex `~/.codex/hooks.json` `hooks.preToolUse`
 //!   * Gemini CLI `~/.gemini/settings.json` `hooks.PreToolUse`
 //!   * Copilot CLI `~/.copilot/hooks.json` `hooks.preToolUse`
@@ -423,10 +424,53 @@ fn merge_cursor_hooks(
     let hooks_obj = hooks
         .as_object_mut()
         .ok_or_else(|| anyhow!("{} hooks is not an object", path.display()))?;
-    let pre = hooks_obj.entry("preToolUse").or_insert_with(|| json!([]));
+
+    // Cursor only prompts on beforeShellExecution / beforeMCPExecution.
+    // preToolUse still covers Write/Read; ask is a no-op there, deny still works.
+    let events: &[(&str, bool)] = &[
+        ("preToolUse", true),
+        ("beforeShellExecution", true),
+        ("beforeMCPExecution", true),
+    ];
+
+    let mut overall = AgentInstallOutcome::Installed;
+    for (event, fail_closed) in events {
+        let outcome = merge_cursor_event(hooks_obj, event, wrapper, chain_existing, *fail_closed)?;
+        match outcome {
+            AgentInstallOutcome::UnknownPresent => {
+                if *event == "preToolUse" {
+                    return Ok(AgentInstallOutcome::UnknownPresent);
+                }
+            }
+            AgentInstallOutcome::Refreshed => overall = AgentInstallOutcome::Refreshed,
+            AgentInstallOutcome::Merged => {
+                if overall != AgentInstallOutcome::Refreshed {
+                    overall = AgentInstallOutcome::Merged;
+                }
+            }
+            other => {
+                if matches!(overall, AgentInstallOutcome::Installed) {
+                    overall = other;
+                }
+            }
+        }
+    }
+
+    fs::write(path, serde_json::to_string_pretty(&root)? + "\n")?;
+    Ok(overall)
+}
+
+fn merge_cursor_event(
+    hooks_obj: &mut serde_json::Map<String, Value>,
+    event: &str,
+    wrapper: &Path,
+    chain_existing: bool,
+    fail_closed: bool,
+) -> Result<AgentInstallOutcome> {
+    let pre = hooks_obj.entry(event).or_insert_with(|| json!([]));
     let arr = pre
         .as_array_mut()
-        .ok_or_else(|| anyhow!("{} hooks.preToolUse is not an array", path.display()))?;
+        .ok_or_else(|| anyhow!("hooks.{event} is not an array"))?;
 
     let already = arr.iter().any(|entry| {
         entry
@@ -440,10 +484,10 @@ fn merge_cursor_hooks(
             if let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) {
                 if is_our_command(cmd, wrapper) {
                     entry["command"] = json!(wrapper.to_string_lossy());
+                    entry["failClosed"] = json!(fail_closed);
                 }
             }
         }
-        fs::write(path, serde_json::to_string_pretty(&root)? + "\n")?;
         return Ok(AgentInstallOutcome::Refreshed);
     }
 
@@ -453,8 +497,8 @@ fn merge_cursor_hooks(
 
     arr.push(json!({
         "command": wrapper.to_string_lossy(),
+        "failClosed": fail_closed,
     }));
-    fs::write(path, serde_json::to_string_pretty(&root)? + "\n")?;
     Ok(AgentInstallOutcome::Merged)
 }
 
@@ -680,13 +724,18 @@ fn clear_cursor_hooks(path: &Path, wrapper: &Path) -> Result<bool> {
     let raw = fs::read_to_string(path)?;
     let mut root: Value =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let Some(arr) = root
-        .pointer_mut("/hooks/preToolUse")
-        .and_then(|v| v.as_array_mut())
-    else {
-        return Ok(false);
-    };
-    let changed = strip_our_cursor_entries(arr, wrapper);
+    let mut changed = false;
+    for event in ["preToolUse", "beforeShellExecution", "beforeMCPExecution"] {
+        let Some(arr) = root
+            .pointer_mut(&format!("/hooks/{event}"))
+            .and_then(|v| v.as_array_mut())
+        else {
+            continue;
+        };
+        if strip_our_cursor_entries(arr, wrapper) {
+            changed = true;
+        }
+    }
     if changed {
         fs::write(path, serde_json::to_string_pretty(&root)? + "\n")?;
     }
@@ -727,6 +776,18 @@ mod tests {
         let cursor_json: Value =
             serde_json::from_str(&fs::read_to_string(cursor_hooks_path(home)).unwrap()).unwrap();
         assert!(cursor_json["hooks"]["preToolUse"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("cursor-pretooluse"));
+        assert!(cursor_json["hooks"]["beforeShellExecution"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("cursor-pretooluse"));
+        assert_eq!(
+            cursor_json["hooks"]["beforeShellExecution"][0]["failClosed"],
+            json!(true)
+        );
+        assert!(cursor_json["hooks"]["beforeMCPExecution"][0]["command"]
             .as_str()
             .unwrap()
             .contains("cursor-pretooluse"));

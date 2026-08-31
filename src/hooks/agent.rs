@@ -8,10 +8,16 @@
 //!
 //! Exit-code policy (mirrors `--check-cmd`, with a Claude overlay):
 //!
-//! | Decision                         | Claude stdout                         | Claude exit | Cursor stdout              | Cursor exit |
-//! |----------------------------------|---------------------------------------|-------------|----------------------------|-------------|
-//! | Allow / Warn                     | (empty)                               | 0           | `{"permission":"allow"}`   | 0           |
-//! | Block / Approval / Identity      | `hookSpecificOutput.permissionDecision: deny` | 2 | `{"permission":"deny"}`    | 2           |
+//! | Decision                    | Claude stdout                                      | Claude exit | Cursor stdout                         | Cursor exit |
+//! |-----------------------------|----------------------------------------------------|-------------|---------------------------------------|-------------|
+//! | Allow / Warn                | (empty)                                            | 0           | `{"permission":"allow"}`              | 0           |
+//! | Approval / Identity         | `hookSpecificOutput.permissionDecision: ask`       | 0           | `{"permission":"ask"}`                | 0           |
+//! | Block                       | `hookSpecificOutput.permissionDecision: deny`      | 2           | `{"permission":"deny"}`               | 2           |
+//!
+//! Exit 2 is treated as deny by both hosts — never use it for ask.
+//! Cursor only *enforces* ask on `beforeShellExecution` / `beforeMCPExecution`
+//! (`preToolUse` accepts the field but does not prompt). The installer
+//! registers those events so a High-severity git push is a click, not a wall.
 //!
 //! APort documents the two JSON shapes as incompatible — we never share
 //! one wrapper script between Claude and Cursor.
@@ -63,6 +69,10 @@ pub struct HookEvent {
     pub tool_input: Option<Value>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// `beforeShellExecution` sends `command` at the top level, not as
+    /// `tool_name` / `tool_input`.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 impl HookEvent {
@@ -90,6 +100,13 @@ pub fn detect_dialect(event: &HookEvent) -> HookDialect {
         .as_deref()
         .unwrap_or("")
         .to_ascii_lowercase();
+    if name == "beforeshellexecution"
+        || name == "beforemcpexecution"
+        || name == "aftershellexecution"
+        || name == "aftermcpexecution"
+    {
+        return HookDialect::Cursor;
+    }
     if name == "pretooluse" || name == "posttooluse" {
         // Claude Code uses PascalCase PreToolUse; Cursor uses preToolUse.
         // After lowercasing they collide, so look at the original casing
@@ -125,10 +142,10 @@ pub struct HookReport {
 
 impl HookReport {
     pub fn exit_code(&self) -> i32 {
-        if self.decision.is_blocking() {
-            2
-        } else {
-            0
+        // Exit 2 is deny on both hosts. Ask must be 0 plus permission JSON.
+        match self.decision {
+            Decision::Block { .. } => 2,
+            _ => 0,
         }
     }
 }
@@ -316,19 +333,16 @@ fn decision_rule_id(d: &Decision) -> Option<String> {
     }
 }
 
-fn render_stdout(
-    dialect: HookDialect,
-    decision: &Decision,
-    reason: &str,
-    rule_id: Option<&str>,
-) -> String {
-    if !decision.is_blocking() {
-        return match dialect {
-            HookDialect::Claude => String::new(),
-            HookDialect::Cursor => json!({"permission": "allow"}).to_string() + "\n",
-        };
+fn permission_verb(decision: &Decision) -> Option<&'static str> {
+    match decision {
+        Decision::Allow | Decision::Warn { .. } => Some("allow"),
+        Decision::Approval { .. } | Decision::IdentityVerification { .. } => Some("ask"),
+        Decision::Block { .. } => Some("deny"),
     }
-    let reason_full = match rule_id {
+}
+
+fn reason_full(reason: &str, rule_id: Option<&str>) -> String {
+    match rule_id {
         Some(id) if !reason.is_empty() => format!("[{id}] {reason}"),
         Some(id) => format!("blocked by {id}"),
         None => {
@@ -338,13 +352,29 @@ fn render_stdout(
                 reason.to_string()
             }
         }
-    };
+    }
+}
+
+fn render_stdout(
+    dialect: HookDialect,
+    decision: &Decision,
+    reason: &str,
+    rule_id: Option<&str>,
+) -> String {
+    let verb = permission_verb(decision).unwrap_or("allow");
+    if verb == "allow" {
+        return match dialect {
+            HookDialect::Claude => String::new(),
+            HookDialect::Cursor => json!({"permission": "allow"}).to_string() + "\n",
+        };
+    }
+    let reason_full = reason_full(reason, rule_id);
     match dialect {
         HookDialect::Claude => {
             json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
+                    "permissionDecision": verb,
                     "permissionDecisionReason": reason_full,
                 }
             })
@@ -353,7 +383,9 @@ fn render_stdout(
         }
         HookDialect::Cursor => {
             json!({
-                "permission": "deny",
+                "permission": verb,
+                "user_message": reason_full,
+                "agent_message": reason_full,
                 "permissionDecisionReason": reason_full,
             })
             .to_string()
@@ -369,9 +401,29 @@ pub fn run(
     dialect: HookDialect,
     taint: Option<&TaintLedger>,
 ) -> Result<HookReport> {
-    let tool_name = event.tool_name().to_string();
+    let mut tool_name = event.tool_name().to_string();
+    let mut input = event.input().clone();
+
+    // Cursor `beforeShellExecution` has no tool_name — only `command` + `cwd`.
+    if tool_name.is_empty() {
+        if let Some(cmd) = event.command.as_deref().filter(|s| !s.is_empty()) {
+            tool_name = "Bash".to_string();
+            input = json!({ "command": cmd });
+        } else if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+            if !cmd.is_empty() {
+                tool_name = "Bash".to_string();
+                input = json!({ "command": cmd });
+            }
+        }
+    }
     if tool_name.is_empty() {
         anyhow::bail!("--check-hook JSON is missing tool_name");
+    }
+    // beforeMCPExecution sends tool_input as a JSON string.
+    if let Value::String(s) = &input {
+        if let Ok(v) = serde_json::from_str::<Value>(s) {
+            input = v;
+        }
     }
 
     let cwd = event
@@ -384,7 +436,7 @@ pub fn run(
     let workspace = WorkspaceContext::probe_at(&engine.policy, &cwd);
     let burst = BurstDetector::new(engine.policy.burst_detector.clone());
 
-    let calls = canonical_calls(&tool_name, event.input());
+    let calls = canonical_calls(&tool_name, &input);
     let mut best = Decision::Allow;
     let mut canonical_tool = calls
         .first()
@@ -494,18 +546,19 @@ mod tests {
             report.decision
         );
         assert!(
-            report.stdout.contains("\"permission\":\"deny\"")
-                || report.stdout.contains("\"permission\": \"deny\"")
+            report.stdout.contains("\"permission\":\"ask\"")
+                || report.stdout.contains("\"permission\": \"ask\"")
         );
+        assert_eq!(report.exit_code(), 0);
         assert!(!report.stdout.contains("hookSpecificOutput"));
     }
 
     #[test]
-    fn write_env_blocks() {
+    fn write_env_asks_not_denies() {
         let report = eval_named(
             "Write",
             json!({"path": "/tmp/proj/.env", "contents": "AWS_SECRET=x"}),
-            HookDialect::Claude,
+            HookDialect::Cursor,
         );
         assert!(
             report.decision.is_blocking(),
@@ -513,6 +566,22 @@ mod tests {
             report.decision,
             report.reason
         );
+        assert_eq!(report.exit_code(), 0);
+        assert!(report.stdout.contains("\"permission\":\"ask\"") || report.stdout.contains("\"permission\": \"ask\""));
+    }
+
+    #[test]
+    fn shell_event_without_tool_name_still_evaluates() {
+        let event = HookEvent {
+            hook_event_name: Some("beforeShellExecution".into()),
+            command: Some("git reset --hard HEAD~1".into()),
+            cwd: Some("/tmp/repo".into()),
+            ..Default::default()
+        };
+        let report = run(&engine(), &event, HookDialect::Cursor, None).expect("run");
+        assert!(matches!(report.decision, Decision::Approval { .. }));
+        assert_eq!(report.exit_code(), 0);
+        assert!(report.stdout.contains("ask"));
     }
 
     #[test]

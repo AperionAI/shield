@@ -10,7 +10,7 @@ Downloads the matching GitHub Release tarball, verifies SHA-256, and drops
 `aperion-shield` onto PATH. Pin a version or relocate:
 
 ```bash
-SHIELD_VERSION=shield-v1.6.1 SHIELD_INSTALL_DIR=~/.local/bin \
+SHIELD_VERSION=shield-v1.6.2 SHIELD_INSTALL_DIR=~/.local/bin \
   curl -fsSL https://shield-get.aperion.ai | sh
 ```
 
