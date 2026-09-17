@@ -65,6 +65,14 @@ shieldset:
         medium:   2
         high:     5
         critical: 9
+    # v1.7: I/O offload gate. A full Read / cat of a file with more than
+    # `min_lines` lines is refused at PreToolUse and the agent is told to
+    # run `aperion-shield --summarize <path>` (cheap model, bullets with
+    # line numbers) instead of loading the file into the frontier model.
+    # 0 = off. Targeted reads (offset/limit), pipes, and redirects pass.
+    # Per-machine override: APERION_SHIELD_OFFLOAD_MIN_LINES.
+    io_offload:
+      min_lines: 0
     # v0.9: MCP supply-chain protection. On first contact with an
     # upstream, every tool's (name, description, input schema) is hashed
     # and pinned to ~/.aperion-shield/pins/ (trust-on-first-use). A

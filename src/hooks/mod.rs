@@ -22,12 +22,16 @@
 //!   * `agent_install`  -- `--install-agent-hooks` / `--uninstall-agent-hooks`
 //!                         user-level Claude `settings.json` + Cursor
 //!                         `hooks.json` merge, fail-closed wrappers.
+//!   * `offload`        -- I/O offload gate (v1.7): refuse unbounded
+//!                         reads of large files at PreToolUse and point
+//!                         the agent at `--summarize` on the cheap model.
 //!
 //! See `docs/hooks.md` for the git-hook contract.
 
 pub mod agent;
 pub mod agent_install;
 pub mod check_pushed;
+pub mod offload;
 pub mod check_staged;
 pub mod install;
 pub mod templates;

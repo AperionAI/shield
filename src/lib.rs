@@ -34,6 +34,7 @@ pub mod sandbox;
 pub mod scan;
 pub mod shims;
 pub mod suggest;
+pub mod summarize;
 pub mod supply;
 pub mod taint;
 pub mod transport;

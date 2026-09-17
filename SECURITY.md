@@ -23,7 +23,8 @@ If you only read one section, read **§4 — Open advisories** below.
 
 | Version | Status | Receives fixes |
 |---|---|---|
-| `1.6.x` | current stable | yes |
+| `1.7.x` | current stable | yes |
+| `1.6.x` | previous       | security-only — superseded by v1.7.0 on 2026-09-17 |
 | `1.5.x` | previous       | security-only — superseded by v1.6.0 on 2026-08-25 |
 | `1.4.x` | previous       | security-only — superseded by v1.5.0 on 2026-08-25 |
 | `1.3.x` | superseded     | no |
@@ -392,6 +393,7 @@ If you operate Shield as part of an enterprise deployment:
 
 | Date | Change |
 |---|---|
+| 2026-09-17 | v1.7.0. I/O offload gate: PreToolUse rule `io.offload_large_read` refuses unbounded `Read` / `cat` / `head -n N` of files over `policy.io_offload.min_lines` (default 0 = off; per-machine override `APERION_SHIELD_OFFLOAD_MIN_LINES`). New `--summarize` command **adds one network endpoint**: it POSTs file contents plus a question to the operator's own Smartflow at `<url>/api/offload/summarize` with the vkey as bearer. URL and key come only from `--offload-url`/`--offload-key`, `APERION_SHIELD_OFFLOAD_URL`/`_KEY`, or the existing org-mode enrollment record; there is no default host and nothing is sent unless the operator invokes `--summarize`. Supported-versions table: 1.7.x current, 1.6.x security-only. |
 | 2026-08-31 | v1.6.2. Cursor/Claude native hooks map High-severity (Approval) to `ask` instead of `deny`. Critical stays a hard deny. `--install-agent-hooks` registers Cursor `beforeShellExecution` and `beforeMCPExecution` so the prompt actually appears. No new network endpoints. |
 | 2026-08-28 | v1.6.1. `--scan-ide` coverage block (native hooks, HTTP vs stdio MCP, project MCP under Documents/Desktop/Downloads). TrustFall treats `~/Documents/.../.cursor/mcp.json` as project-local; only well-known user-level paths are not. Installer replaces an older binary already on PATH. No new network endpoints. |
 | 2026-08-25 | v1.6.0. Linux Landlock backend for `--sandbox secrets` / `--sandbox strict` (helper `--internal-sandbox-exec`, then exec into the upstream; `strict` without `--sandbox-allow-network` is a hard fail if the kernel cannot deny TCP). Windows PATH shims (`aws.cmd` via PATHEXT). `--install-agent-hooks` covers Codex / Gemini CLI / Copilot CLI. TrustFall follow-through: install reports project-level hook files without modifying them; `--scan-ide` finding `scan.ide.project_hooks`. Supported-versions table: 1.6.x current, 1.5.x security-only. No new network endpoints. |

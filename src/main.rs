@@ -562,6 +562,56 @@ struct Cli {
     )]
     uninstall_agent_hooks: bool,
 
+    // ── I/O offload (v1.7) ────────────────────────────────────────
+    //
+    // The PreToolUse gate (`io.offload_large_read`, enabled by setting
+    // `APERION_SHIELD_OFFLOAD_MIN_LINES`) refuses a full `Read` / `cat`
+    // of a large file and points the agent at `--summarize`, which runs
+    // the file through Smartflow on the efficient model and prints
+    // bullets with line numbers. The expensive model never loads the file.
+    /// Summarize one or more files on the governed cheap model instead
+    /// of loading them into the agent's context. Prints markdown bullets
+    /// with `path:line` citations. Gateway comes from `--offload-url` /
+    /// `--offload-key`, `APERION_SHIELD_OFFLOAD_URL` / `_KEY`, or the
+    /// org-mode enrollment.
+    #[arg(
+        long,
+        value_name = "PATH",
+        num_args = 1..,
+        conflicts_with = "check",
+        conflicts_with = "check_hook",
+        conflicts_with = "diff",
+        conflicts_with = "scan",
+        conflicts_with = "enroll",
+        conflicts_with = "upstream"
+    )]
+    summarize: Vec<PathBuf>,
+
+    /// What you need to know about the file(s). Defaults to a structural
+    /// overview (types, functions, config keys, error paths, line numbers).
+    #[arg(long, value_name = "TEXT", requires = "summarize")]
+    question: Option<String>,
+
+    /// Cap on bullets returned (1-40). Gateway default is 12.
+    #[arg(long, value_name = "N", requires = "summarize")]
+    max_bullets: Option<usize>,
+
+    /// Override the gateway's efficient model for this call.
+    #[arg(long, value_name = "MODEL", requires = "summarize")]
+    summarize_model: Option<String>,
+
+    /// Smartflow base URL for `--summarize` (else env, else org-mode).
+    #[arg(long, value_name = "URL", requires = "summarize")]
+    offload_url: Option<String>,
+
+    /// Virtual key (`sk-sf-…`) for `--summarize` (else env, else org-mode).
+    #[arg(long, value_name = "KEY", requires = "summarize")]
+    offload_key: Option<String>,
+
+    /// Print the raw gateway JSON instead of markdown.
+    #[arg(long, requires = "summarize")]
+    summarize_json: bool,
+
     /// Override $HOME for `--install-agent-hooks` / `--scan-ide`
     /// (tests and unusual prefixes). Default: the real home directory.
     #[arg(long, value_name = "PATH")]
@@ -1086,6 +1136,19 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.uninstall_agent_hooks {
         let exit_code = run_uninstall_agent_hooks(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if !cli.summarize.is_empty() {
+        let exit_code = aperion_shield::summarize::run(aperion_shield::summarize::SummarizeOpts {
+            paths: cli.summarize.clone(),
+            question: cli.question.clone().unwrap_or_default(),
+            max_bullets: cli.max_bullets,
+            model: cli.summarize_model.clone(),
+            url: cli.offload_url.clone(),
+            key: cli.offload_key.clone(),
+            json: cli.summarize_json,
+        })
+        .await?;
         std::process::exit(exit_code);
     }
     if cli.scan_ide {

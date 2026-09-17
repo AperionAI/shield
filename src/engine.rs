@@ -240,6 +240,19 @@ pub struct Policy {
     pub composite_scoring: CompositeScoringCfg,
     #[serde(default)]
     pub supply_chain: SupplyChainCfg,
+    #[serde(default)]
+    pub io_offload: IoOffloadCfg,
+}
+
+/// v1.7 I/O offload gate. Refuses unbounded reads of files with more
+/// than `min_lines` lines at the agent PreToolUse seam and points the
+/// agent at `--summarize`. `min_lines: 0` (default) disables the gate.
+/// `APERION_SHIELD_OFFLOAD_MIN_LINES` overrides this per machine; the
+/// shieldset value is what an org publishes to a policy group.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct IoOffloadCfg {
+    #[serde(default)]
+    pub min_lines: usize,
 }
 
 /// v0.9 MCP supply-chain protection. Controls TOFU pinning of the

@@ -26,9 +26,11 @@ use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::engine::{decide, Adjustments, Decision, Engine};
+use crate::engine::{decide, Adjustments, Decision, Engine, Severity};
 use crate::taint::TaintLedger;
 use crate::{BurstDetector, WorkspaceContext};
+
+use super::offload::{self, OffloadConfig, OffloadVerdict};
 
 /// Which host JSON dialect to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,7 +224,7 @@ pub fn canonical_calls(tool_name: &str, input: &Value) -> Vec<(String, Value)> {
     out
 }
 
-fn is_shell_tool(lower: &str) -> bool {
+pub(crate) fn is_shell_tool(lower: &str) -> bool {
     matches!(
         lower,
         "bash"
@@ -257,7 +259,7 @@ fn is_write_tool(lower: &str) -> bool {
     )
 }
 
-fn is_read_tool(lower: &str) -> bool {
+pub(crate) fn is_read_tool(lower: &str) -> bool {
     matches!(
         lower,
         "read" | "readfile" | "read_file" | "fs.read" | "filesystem.read_file"
@@ -277,7 +279,7 @@ fn looks_like_sql(tool: &str, input: &Value) -> bool {
     input.get("query").is_some() || input.get("sql").is_some() || input.get("statement").is_some()
 }
 
-fn extract_command(input: &Value) -> String {
+pub(crate) fn extract_command(input: &Value) -> String {
     for key in ["command", "cmd", "script", "code", "input"] {
         if let Some(s) = input.get(key).and_then(|v| v.as_str()) {
             return s.to_string();
@@ -289,7 +291,7 @@ fn extract_command(input: &Value) -> String {
     input.to_string()
 }
 
-fn extract_path(input: &Value) -> String {
+pub(crate) fn extract_path(input: &Value) -> String {
     for key in [
         "path",
         "file_path",
@@ -394,12 +396,31 @@ fn render_stdout(
     }
 }
 
-/// Evaluate a parsed hook event against the engine.
+/// Evaluate a parsed hook event against the engine. The I/O offload
+/// gate threshold comes from `APERION_SHIELD_OFFLOAD_MIN_LINES`, else
+/// the shieldset's `policy.io_offload.min_lines` (off by default).
 pub fn run(
     engine: &Engine,
     event: &HookEvent,
     dialect: HookDialect,
     taint: Option<&TaintLedger>,
+) -> Result<HookReport> {
+    run_with_offload(
+        engine,
+        event,
+        dialect,
+        taint,
+        &OffloadConfig::resolve(&engine.policy),
+    )
+}
+
+/// [`run`] with an explicit offload config (tests, embedders).
+pub fn run_with_offload(
+    engine: &Engine,
+    event: &HookEvent,
+    dialect: HookDialect,
+    taint: Option<&TaintLedger>,
+    offload_cfg: &OffloadConfig,
 ) -> Result<HookReport> {
     let mut tool_name = event.tool_name().to_string();
     let mut input = event.input().clone();
@@ -442,6 +463,22 @@ pub fn run(
         .first()
         .map(|(t, _)| t.clone())
         .unwrap_or_else(|| tool_name.clone());
+
+    // I/O offload gate: an unbounded read of a large file is refused
+    // before the security rules even run. Cost, not safety, but the
+    // seam is the same. Security rules still evaluate below and a
+    // higher-ranked decision (identity, etc.) wins.
+    if let OffloadVerdict::Block { reason, .. } =
+        offload::check(offload_cfg, &tool_name, &input, &cwd)
+    {
+        best = Decision::Block {
+            rule_id: offload::RULE_ID.to_string(),
+            severity: Severity::Low,
+            reason,
+            safer_alternative: Some("aperion-shield --summarize <path>".to_string()),
+            contributing_rules: Vec::new(),
+        };
+    }
 
     for (tool, params) in &calls {
         let blob = params.to_string();
@@ -567,7 +604,10 @@ mod tests {
             report.reason
         );
         assert_eq!(report.exit_code(), 0);
-        assert!(report.stdout.contains("\"permission\":\"ask\"") || report.stdout.contains("\"permission\": \"ask\""));
+        assert!(
+            report.stdout.contains("\"permission\":\"ask\"")
+                || report.stdout.contains("\"permission\": \"ask\"")
+        );
     }
 
     #[test]
@@ -612,6 +652,60 @@ mod tests {
             report.decision,
             report.canonical_tool
         );
+    }
+
+    #[test]
+    fn offload_gate_denies_large_read_in_both_dialects() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("huge.rs");
+        let mut f = std::fs::File::create(&big).unwrap();
+        for i in 0..600 {
+            writeln!(f, "fn f{i}() {{}}").unwrap();
+        }
+        let cfg = OffloadConfig { min_lines: 350 };
+        let event = HookEvent {
+            tool_name: Some("Read".into()),
+            tool_input: Some(json!({"file_path": big})),
+            cwd: Some(dir.path().display().to_string()),
+            ..Default::default()
+        };
+        let claude =
+            run_with_offload(&engine(), &event, HookDialect::Claude, None, &cfg).expect("run");
+        assert!(
+            matches!(claude.decision, Decision::Block { .. }),
+            "{:?}",
+            claude.decision
+        );
+        assert_eq!(claude.primary_rule_id.as_deref(), Some(offload::RULE_ID));
+        assert_eq!(claude.exit_code(), 2);
+        assert!(claude.stdout.contains("\"permissionDecision\":\"deny\""));
+        assert!(claude.stdout.contains("--summarize"));
+
+        let cursor =
+            run_with_offload(&engine(), &event, HookDialect::Cursor, None, &cfg).expect("run");
+        assert!(cursor.stdout.contains("\"permission\":\"deny\""));
+        assert_eq!(cursor.exit_code(), 2);
+
+        // Same file, targeted read: gate stays out of the way.
+        let ranged = HookEvent {
+            tool_input: Some(json!({"file_path": big, "offset": 10, "limit": 50})),
+            ..event.clone()
+        };
+        let ok =
+            run_with_offload(&engine(), &ranged, HookDialect::Claude, None, &cfg).expect("run");
+        assert!(matches!(ok.decision, Decision::Allow), "{:?}", ok.decision);
+
+        // Disabled config: plain allow.
+        let off = run_with_offload(
+            &engine(),
+            &event,
+            HookDialect::Claude,
+            None,
+            &OffloadConfig::disabled(),
+        )
+        .expect("run");
+        assert!(matches!(off.decision, Decision::Allow));
     }
 
     #[test]

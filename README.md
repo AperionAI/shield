@@ -59,6 +59,40 @@ the relying party — no rewrite, no re-install.
 
 ---
 
+## What's new in v1.7
+
+One cost feature, on the security seam Shield already owns. Most of a
+coding agent's frontier-model bill is loading files, not thinking about
+them. v1.7 refuses the load and hands the file to a cheap model instead.
+
+1. **I/O offload gate.** Set `policy.io_offload.min_lines: 350` in your
+   shieldset (or `APERION_SHIELD_OFFLOAD_MIN_LINES=350` on one machine)
+   and the PreToolUse hook denies a full `Read`, `cat`, `less`, or
+   `head -n 900` of any file over that many lines (rule
+   `io.offload_large_read`). Targeted reads (`offset`/`limit`), pipes,
+   redirects, `head`/`tail` with a small `-n`, binaries, and missing
+   files pass. Off by default: nothing changes for existing installs
+   until you set it.
+
+2. **`--summarize`.** What the deny message points the agent at. Reads
+   the file(s) locally, posts them with a question to your Smartflow's
+   `/api/offload/summarize`, and prints bullets with `path:line`
+   citations from the efficient model. The expensive model sees a dozen
+   lines instead of a few thousand. Gateway comes from `--offload-url` /
+   `--offload-key`, `APERION_SHIELD_OFFLOAD_URL` / `_KEY`, or the
+   org-mode enrollment. The saving shows up in FinOps under `io_offload`.
+
+```bash
+export APERION_SHIELD_OFFLOAD_MIN_LINES=350
+# agent tries: Read src/proxy_handler.rs  (13,000 lines)  -> denied, told to run:
+aperion-shield --summarize src/proxy_handler.rs --question "where is vkey auth enforced?"
+```
+
+The gate is the hook you already installed and the summarizer is your
+own governed gateway. Nothing leaves your Smartflow.
+
+---
+
 ## What's new in v1.6
 
 v1.5 covered the IDE hook seam and `curl | sh`. v1.6 fills the leftover
