@@ -765,6 +765,32 @@ impl Engine {
         Self::from_yaml(yaml).expect("bundled shieldset.yaml must parse")
     }
 
+    /// SHA-256 hex of a shieldset body. Compared to `SHIELDSET_SHA256` or a
+    /// sibling `*.sha256` file recorded at install.
+    pub fn yaml_checksum(yaml: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(yaml.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
+    /// Warn (and return false) when the loaded shieldset does not match the
+    /// recorded checksum and no signature is present.
+    pub fn check_shieldset_integrity(yaml: &str, signed: bool) -> bool {
+        let actual = Self::yaml_checksum(yaml);
+        let expected = std::env::var("SHIELDSET_SHA256").ok().filter(|s| !s.is_empty());
+        match expected {
+            Some(exp) if exp != actual && !signed => {
+                log::warn!(
+                    "[shield] TAMPER: loaded shieldset checksum {} does not match SHIELDSET_SHA256 {} (unsigned)",
+                    actual, exp
+                );
+                false
+            }
+            _ => true,
+        }
+    }
+
     /// Evaluate a tool call. Returns the full evaluation (which rules
     /// fired, points, raw vs composite vs final severity). The caller
     /// turns this into a Decision via `decide_tool_call`.
@@ -1665,6 +1691,30 @@ mod tests {
         let b = fingerprint("sql.drop_database", &p);
         assert_eq!(a, b);
         assert_eq!(a.len(), 16);
+    }
+
+    #[test]
+    fn tamper_gateway_admin_api_blocks_curl_to_self() {
+        let e = engine();
+        let p = json!({"command": "curl -X DELETE https://cluster1.aperion.ai/api/policies/hipaa"});
+        let ev = e.evaluate("bash", &p, Adjustments::default());
+        assert!(
+            ev.matches.iter().any(|m| m.rule_id == "tamper.gateway_admin_api"),
+            "expected tamper.gateway_admin_api, got {:?}",
+            ev.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn tamper_admin_secret_read_blocks_printenv() {
+        let e = engine();
+        let p = json!({"command": "printenv SMARTFLOW_ADMIN_KEY"});
+        let ev = e.evaluate("bash", &p, Adjustments::default());
+        assert!(
+            ev.matches.iter().any(|m| m.rule_id == "tamper.admin_secret_read"),
+            "expected tamper.admin_secret_read, got {:?}",
+            ev.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>()
+        );
     }
 
     #[test]

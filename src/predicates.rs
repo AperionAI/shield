@@ -53,6 +53,11 @@ pub enum CommandPredicate {
     /// command).
     SudoPrefix,
 
+    /// Command / URL targets this gateway's own admin API
+    /// (`SMARTFLOW_PUBLIC_URL` plus localhost/cluster1 aliases and
+    /// `/api/admin`, `/api/routing`, `/api/v2/keys`, …).
+    TargetsGateway,
+
     /// `npm/pnpm/yarn/pip install ... --registry=<URL>` or `--index-url=<URL>`
     /// where the URL does NOT point at the official registry. Rust's
     /// `regex` crate doesn't support negative lookahead, so this lives in
@@ -70,6 +75,7 @@ impl CommandPredicate {
             "network_fetch_to_interpreter" => Some(Self::NetworkFetchToInterpreter),
             "world_writable_chmod" => Some(Self::WorldWritableChmod),
             "sudo_prefix" => Some(Self::SudoPrefix),
+            "targets_gateway" => Some(Self::TargetsGateway),
             "untrusted_pkg_registry" => Some(Self::UntrustedPkgRegistry),
             _ => None,
         }
@@ -83,6 +89,7 @@ impl CommandPredicate {
             Self::NetworkFetchToInterpreter => network_fetch_to_interpreter(cmd),
             Self::WorldWritableChmod => world_writable_chmod(cmd),
             Self::SudoPrefix => sudo_prefix(cmd),
+            Self::TargetsGateway => targets_gateway(cmd),
             Self::UntrustedPkgRegistry => untrusted_pkg_registry(cmd),
         }
     }
@@ -303,6 +310,56 @@ static SUDO: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)(^|[\s;&|])sudo(\s|$)")
 
 fn sudo_prefix(cmd: &str) -> bool {
     SUDO.is_match(cmd)
+}
+
+fn gateway_hosts() -> Vec<String> {
+    let mut hosts = vec![
+        "cluster1.aperion.ai".into(),
+        "cluster1.langsmart.app".into(),
+        "localhost".into(),
+        "127.0.0.1".into(),
+    ];
+    if let Ok(url) = std::env::var("SMARTFLOW_PUBLIC_URL") {
+        let rest = url
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        if let Some(h) = rest.split('/').next().and_then(|s| s.split(':').next()) {
+            if !h.is_empty() {
+                hosts.push(h.to_string());
+            }
+        }
+    }
+    hosts
+}
+
+const GATEWAY_ADMIN_PATHS: &[&str] = &[
+    "/api/admin",
+    "/api/policy",
+    "/api/policies",
+    "/api/presets",
+    "/api/enterprise/shield",
+    "/api/v2/keys",
+    "/api/enterprise/vkeys",
+    "/api/routing",
+    "/api/mcp/trust",
+    "/api/atomizer",
+    "/api/auth/sso/config",
+    "/api/deploy",
+];
+
+fn targets_gateway(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    let host_hit = gateway_hosts()
+        .iter()
+        .any(|h| lower.contains(&h.to_ascii_lowercase()));
+    let port_hit = lower.contains(":7778") || lower.contains(":7775") || lower.contains(":7782");
+    if !host_hit && !port_hit {
+        return false;
+    }
+    GATEWAY_ADMIN_PATHS
+        .iter()
+        .any(|p| lower.contains(&p.to_ascii_lowercase()))
 }
 
 // Hosts considered trusted defaults for npm / pip / yarn / pnpm. Anything
@@ -1026,6 +1083,16 @@ mod tests {
     fn sensitive_path_extracts_quoted_arg() {
         let m = SensitivePath::compile("/etc/**").unwrap();
         assert!(m.touches("install --target='/etc/cron.d/x'"));
+    }
+
+    #[test]
+    fn targets_gateway_hits_own_admin_api() {
+        assert!(targets_gateway(
+            "curl -X DELETE https://cluster1.aperion.ai/api/policies/hipaa"
+        ));
+        assert!(targets_gateway("curl http://localhost:7778/api/admin/quarantine"));
+        assert!(!targets_gateway("curl https://api.openai.com/v1/chat/completions"));
+        assert!(!targets_gateway("curl https://example.com/api/policy/atomize"));
     }
 
     #[test]

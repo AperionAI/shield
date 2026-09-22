@@ -367,6 +367,59 @@ shieldset:
       reason: "Bulk read of a cloud secrets store -- verify before continuing."
       safer_alternative: "Read a specific secret by name, not all of them. Audit logs treat bulk reads as suspicious."
 
+    - id: tamper.shield_self_paths
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, write_file, filesystem.write, fs.write, filesystem.delete_file, fs.delete]
+        any_param_matches:
+          - '(?i)\.aperion-shield'
+          - '(?i)\.cursor/hooks\.json'
+        sensitive_paths:
+          - "~/.aperion-shield/**"
+          - "~/.cursor/hooks.json"
+          - "**/.cursor/hooks.json"
+      reason: "Write or delete targeting Shield's own files or Cursor hooks.json."
+      safer_alternative: "Leave Shield and hooks.json alone. If you need a policy change, ask a human operator."
+
+    - id: tamper.shield_disable
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(?i)SHIELD_HOOKS_DISABLE'
+          - '(?i)--no-verify'
+          - '(?i)\b(pkill|killall|kill)\b.*aperion-shield'
+          - '(?i)\b(pkill|killall|kill)\b.*\bsmartflow\b'
+      reason: "Attempt to disable or kill Aperion Shield."
+      safer_alternative: "Shield stays on. If a rule is wrong, file it with a human; do not turn the guard off."
+
+    - id: tamper.gateway_admin_api
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, http_request, web_fetch, fetch]
+        command_predicates: [targets_gateway]
+      reason: "Call targets this gateway's own admin API."
+      safer_alternative: "Admin API changes go through a verified human, not an agent."
+
+    - id: tamper.admin_secret_read
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, filesystem.read_file, fs.read, read_file]
+        any_param_matches:
+          - 'SMARTFLOW_ADMIN_KEY'
+          - 'SF_[A-Z_]+_ADMIN_KEY'
+          - 'VAS_HMAC_KEY'
+      reason: "Read of a Smartflow admin or HMAC secret."
+      safer_alternative: "Those keys stay in the operator's secret store. Do not print them."
+
     # ═════════════════════════════════════════════════════════════════
     # Supply chain / RCE -- fetch and execute
     # ═════════════════════════════════════════════════════════════════

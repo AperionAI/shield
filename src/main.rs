@@ -1603,6 +1603,12 @@ fn load_engine_with_packs(
         Some(p) => {
             let raw = std::fs::read_to_string(p)
                 .with_context(|| format!("reading shieldset from {}", p.display()))?;
+            if !Engine::check_shieldset_integrity(&raw, false) {
+                warn!(
+                    "[shield] unsigned shieldset at {} failed checksum; continuing with a tamper warning",
+                    p.display()
+                );
+            }
             Engine::from_yaml(&raw)?
         }
         None => Engine::builtin_default(),

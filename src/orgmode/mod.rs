@@ -89,7 +89,20 @@ pub async fn load_initial_engine(state: &OrgState, api: &OrgApi, fallback: Engin
                 version
             );
             match crate::Engine::from_yaml(&yaml) {
-                Ok(eng) => eng,
+                Ok(eng) => {
+                    if !crate::Engine::check_shieldset_integrity(&yaml, false) {
+                        let ev = serde_json::json!({
+                            "id": uuid::Uuid::new_v4().to_string(),
+                            "rule_id": "tamper.shieldset_checksum",
+                            "decision": "warn",
+                            "severity": "Critical",
+                            "tool": "shieldset.load",
+                            "context": {"group": state.policy_group, "version": version},
+                        });
+                        let _ = api.post_events(&[ev]).await;
+                    }
+                    eng
+                }
                 Err(e) => {
                     log::error!(
                         "[shield] failed to compile pulled shieldset (group={}): {}. \

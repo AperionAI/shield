@@ -102,6 +102,20 @@ inspection of every binary we ship.
 - **Vulnerabilities in your operating system, IDE, or upstream MCP
   servers.** Shield does not patch what it does not own.
 
+### Known limitation: a local root user can still remove Shield
+
+The `tamper.*` rules (`tamper.shield_self_paths`, `tamper.shield_disable`,
+`tamper.gateway_admin_api`, `tamper.admin_secret_read`) stop an *agent*
+from editing `~/.aperion-shield/**`, rewriting `.cursor/hooks.json`,
+running `pkill aperion-shield`, or calling the gateway admin API. They
+do not stop a human with a shell on the same machine. Anyone who can
+already run arbitrary commands as that user can unload the hook, delete
+the binary, or set `SHIELD_HOOKS_DISABLE`.
+
+The durable control is on the gateway: a tamper signal quarantines the
+session and virtual key to read-only until a verified human releases
+it. Local Shield is best-effort. Don't claim it holds against root.
+
 ### Trust boundaries
 
 | Boundary | Trusted? | Notes |
@@ -393,6 +407,7 @@ If you operate Shield as part of an enterprise deployment:
 
 | Date | Change |
 |---|---|
+| 2026-09-22 | v1.7.1. Tamper-guard rules (`tamper.shield_self_paths`, `tamper.shield_disable`, `tamper.gateway_admin_api`, `tamper.admin_secret_read`) plus unsigned shieldset checksum warn (`SHIELDSET_SHA256`). A local root user can still remove Shield; the gateway quarantine is the durable control. New §3 subsection "Known limitation: a local root user can still remove Shield". No new network endpoints. |
 | 2026-09-17 | v1.7.0. I/O offload gate: PreToolUse rule `io.offload_large_read` refuses unbounded `Read` / `cat` / `head -n N` of files over `policy.io_offload.min_lines` (default 0 = off; per-machine override `APERION_SHIELD_OFFLOAD_MIN_LINES`). New `--summarize` command **adds one network endpoint**: it POSTs file contents plus a question to the operator's own Smartflow at `<url>/api/offload/summarize` with the vkey as bearer. URL and key come only from `--offload-url`/`--offload-key`, `APERION_SHIELD_OFFLOAD_URL`/`_KEY`, or the existing org-mode enrollment record; there is no default host and nothing is sent unless the operator invokes `--summarize`. Supported-versions table: 1.7.x current, 1.6.x security-only. |
 | 2026-08-31 | v1.6.2. Cursor/Claude native hooks map High-severity (Approval) to `ask` instead of `deny`. Critical stays a hard deny. `--install-agent-hooks` registers Cursor `beforeShellExecution` and `beforeMCPExecution` so the prompt actually appears. No new network endpoints. |
 | 2026-08-28 | v1.6.1. `--scan-ide` coverage block (native hooks, HTTP vs stdio MCP, project MCP under Documents/Desktop/Downloads). TrustFall treats `~/Documents/.../.cursor/mcp.json` as project-local; only well-known user-level paths are not. Installer replaces an older binary already on PATH. No new network endpoints. |
