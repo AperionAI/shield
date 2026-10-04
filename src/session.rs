@@ -24,6 +24,19 @@ use crate::taint::DEFAULT_TTL_SECS;
 
 thread_local! {
     static PATH_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static MIRROR_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Tests point the user-level mirror at a temp file.
+pub fn set_mirror_override(path: Option<PathBuf>) {
+    MIRROR_OVERRIDE.with(|slot| *slot.borrow_mut() = path);
+}
+
+fn user_session_path() -> Option<PathBuf> {
+    if let Some(over) = MIRROR_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Some(over);
+    }
+    dirs::home_dir().map(|h| h.join(".aperion-shield").join("session.json"))
 }
 
 /// Point `SessionStore::open` at a specific file for this thread.
@@ -147,6 +160,43 @@ impl SessionStore {
         if let Ok(body) = serde_json::to_string(&file) {
             let _ = fs::write(&self.path, body);
         }
+        self.mirror_user_level();
+    }
+
+    /// Copy the live flags to `~/.aperion-shield/session.json` so Edge's
+    /// native host can see a tainted session without knowing the project
+    /// directory. Best-effort. A store that is already the user file, or
+    /// that does not live under `.aperion-shield`, does not mirror.
+    fn mirror_user_level(&self) {
+        let Some(user) = user_session_path() else {
+            return;
+        };
+        if user == self.path {
+            return;
+        }
+        let in_shield_dir = self
+            .path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n == ".aperion-shield")
+            .unwrap_or(false);
+        if !in_shield_dir {
+            return;
+        }
+        let flags = self.flags();
+        if !flags.tainted && !flags.injected {
+            return;
+        }
+        let source = flags
+            .sources
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "session".to_string());
+        let user_store = SessionStore {
+            path: user,
+            ttl_secs: self.ttl_secs,
+        };
+        user_store.mark("machine", flags.tainted, flags.injected, &source);
     }
 
     fn read(&self) -> Option<SessionFile> {
@@ -199,5 +249,20 @@ mod tests {
             "a later injected mark must not clear tainted"
         );
         assert!(flags.injected);
+    }
+
+    #[test]
+    fn mark_mirrors_to_the_user_session_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj").join(".aperion-shield");
+        std::fs::create_dir_all(&project).unwrap();
+        let mirror = tmp.path().join("home-session.json");
+        set_mirror_override(Some(mirror.clone()));
+        let store = SessionStore::at_path(project.join("session.json"), 600);
+        store.mark("/work", true, false, "Read .env");
+        set_mirror_override(None);
+        let raw = std::fs::read_to_string(&mirror).unwrap();
+        assert!(raw.contains("\"tainted\":true"), "{raw}");
+        assert!(raw.contains("machine"));
     }
 }
