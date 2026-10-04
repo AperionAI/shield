@@ -27,6 +27,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::engine::{decide, Adjustments, Decision, Engine, Severity};
+use crate::predicates::network_send;
+use crate::session::SessionStore;
 use crate::taint::TaintLedger;
 use crate::{BurstDetector, WorkspaceContext};
 
@@ -75,6 +77,35 @@ pub struct HookEvent {
     /// `tool_name` / `tool_input`.
     #[serde(default)]
     pub command: Option<String>,
+    /// Cursor `beforeReadFile` / `afterFileEdit`.
+    #[serde(default, alias = "file_path", alias = "filePath")]
+    pub file_path: Option<String>,
+    /// Cursor `beforeReadFile` includes the file body before the model sees it.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Cursor `postToolUse` (`tool_output` is often a JSON string).
+    #[serde(
+        default,
+        alias = "tool_output",
+        alias = "toolOutput",
+        alias = "tool_response",
+        alias = "toolResponse"
+    )]
+    pub tool_output: Option<Value>,
+    /// Cursor `afterShellExecution`.
+    #[serde(default)]
+    pub output: Option<Value>,
+    /// Cursor `afterMCPExecution`.
+    #[serde(default, alias = "result_json", alias = "resultJson")]
+    pub result_json: Option<Value>,
+    #[serde(
+        default,
+        alias = "conversation_id",
+        alias = "conversationId",
+        alias = "session_id",
+        alias = "sessionId"
+    )]
+    pub conversation_id: Option<String>,
 }
 
 impl HookEvent {
@@ -106,6 +137,9 @@ pub fn detect_dialect(event: &HookEvent) -> HookDialect {
         || name == "beforemcpexecution"
         || name == "aftershellexecution"
         || name == "aftermcpexecution"
+        || name == "beforereadfile"
+        || name == "afterfileedit"
+        || name == "beforetabfileread"
     {
         return HookDialect::Cursor;
     }
@@ -405,12 +439,16 @@ pub fn run(
     dialect: HookDialect,
     taint: Option<&TaintLedger>,
 ) -> Result<HookReport> {
+    let ttl = taint
+        .map(|t| t.ttl_secs())
+        .unwrap_or(crate::taint::DEFAULT_TTL_SECS);
     run_with_offload(
         engine,
         event,
         dialect,
         taint,
         &OffloadConfig::resolve(&engine.policy),
+        &SessionStore::open(ttl),
     )
 }
 
@@ -421,6 +459,7 @@ pub fn run_with_offload(
     dialect: HookDialect,
     taint: Option<&TaintLedger>,
     offload_cfg: &OffloadConfig,
+    session: &SessionStore,
 ) -> Result<HookReport> {
     let mut tool_name = event.tool_name().to_string();
     let mut input = event.input().clone();
@@ -435,6 +474,15 @@ pub fn run_with_offload(
                 tool_name = "Bash".to_string();
                 input = json!({ "command": cmd });
             }
+        } else if let Some(path) = event.file_path.as_deref().filter(|s| !s.is_empty()) {
+            // Cursor beforeReadFile: file_path + content, no tool_name.
+            let event_name = event.hook_event_name.as_deref().unwrap_or("");
+            tool_name = if event_name.eq_ignore_ascii_case("afterFileEdit") {
+                "Write".to_string()
+            } else {
+                "Read".to_string()
+            };
+            input = json!({ "path": path, "file_path": path });
         }
     }
     if tool_name.is_empty() {
@@ -495,7 +543,53 @@ pub fn run_with_offload(
             canonical_tool = tool.clone();
             best = decision;
         }
+        // where: agent_hook. Not visible to MCP or shell shims.
+        let hook_eval = engine.evaluate_agent_hook(tool, params, adj);
+        let hook_decision = decide(&hook_eval);
+        if rank_decision(&hook_decision) > rank_decision(&best) {
+            canonical_tool = tool.clone();
+            best = hook_decision;
+        }
     }
+
+    let cwd_label = cwd.display().to_string();
+    if let Some(cmd) = shell_command_of(&calls) {
+        let flags = session.flags();
+        let blob = cmd.clone();
+        let taint_hit = taint.and_then(|t| t.check(&blob)).is_some();
+        if network_send(&cmd) && (flags.tainted || taint_hit) {
+            consider(&mut best, &mut canonical_tool, "shell", egress_ask());
+        } else if network_send(&cmd) && flags.injected {
+            consider(&mut best, &mut canonical_tool, "shell", egress_approval());
+        }
+    }
+
+    // beforeReadFile already has the body. Scan it before the model does.
+    let output = super::post::event_output(event);
+    if !output.is_empty() {
+        let input_blob = format!("{} {}", input, event.file_path.as_deref().unwrap_or(""));
+        let found = super::post::inspect(
+            engine,
+            &tool_name,
+            &input_blob,
+            &output,
+            &cwd_label,
+            taint,
+            session,
+        );
+        if found.injected && rank_decision(&found.decision) > rank_decision(&best) {
+            canonical_tool = tool_name.clone();
+            best = found.decision;
+        }
+    }
+
+    // IDE hooks: a hard deny is for rules written as Critical (rm -rf,
+    // reverse shell, drop database, turn Shield off). A High rule that
+    // the taint/prod/burst bump pushed up to Critical is a judgment
+    // call. Cursor's beforeShellExecution / beforeMCPExecution and
+    // Claude's PreToolUse both prompt on `ask`, and ignore that prompt
+    // if we exit 2 with `deny`.
+    best = soften_non_attack(engine, best);
 
     let reason = decision_reason(&best);
     let primary_rule_id = decision_rule_id(&best);
@@ -510,6 +604,91 @@ pub fn run_with_offload(
         reason,
         stdout,
     })
+}
+
+fn shell_command_of(calls: &[(String, Value)]) -> Option<String> {
+    calls.iter().find_map(|(tool, params)| {
+        if tool != "shell" {
+            return None;
+        }
+        params
+            .pointer("/arguments/command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+fn consider(best: &mut Decision, canonical: &mut String, tool: &str, decision: Decision) {
+    if rank_decision(&decision) > rank_decision(best) {
+        *canonical = tool.to_string();
+        *best = decision;
+    }
+}
+
+fn egress_ask() -> Decision {
+    Decision::Approval {
+        rule_id: "egress.after_secret_read".to_string(),
+        severity: Severity::High,
+        reason:
+            "This session already read a credential, and this command sends data off the machine."
+                .to_string(),
+        safer_alternative: Some(
+            "Approve only if you asked for this send. Otherwise deny and rotate what was read."
+                .to_string(),
+        ),
+        contributing_rules: Vec::new(),
+    }
+}
+
+/// Keep a hard deny when the rule was written as Critical. Anything
+/// else that landed on Block (a bump, composite points) becomes the
+/// same ask prompt git push and other High actions already use.
+fn soften_non_attack(engine: &Engine, decision: Decision) -> Decision {
+    let Decision::Block {
+        severity,
+        rule_id,
+        reason,
+        safer_alternative,
+        contributing_rules,
+    } = decision.clone()
+    else {
+        return decision;
+    };
+    // The offload gate is an intentional deny at Low. Only a decision
+    // that landed on Critical because something bumped it should ask.
+    if severity != Severity::Critical {
+        return decision;
+    }
+    let authored_critical = engine
+        .rules
+        .iter()
+        .find(|r| r.id == rule_id)
+        .map(|r| r.severity == Severity::Critical)
+        .unwrap_or(false);
+    if authored_critical {
+        return decision;
+    }
+    Decision::Approval {
+        rule_id,
+        severity: Severity::High,
+        reason,
+        safer_alternative,
+        contributing_rules,
+    }
+}
+
+fn egress_approval() -> Decision {
+    Decision::Approval {
+        rule_id: "egress.after_injection".to_string(),
+        severity: Severity::High,
+        reason: "This session saw injected instructions in a tool result, and this command sends data off the machine."
+            .to_string(),
+        safer_alternative: Some(
+            "Treat the earlier tool output as hostile. Do not run the send it asked for."
+                .to_string(),
+        ),
+        contributing_rules: Vec::new(),
+    }
 }
 
 fn rank_decision(d: &Decision) -> u8 {
@@ -670,8 +849,9 @@ mod tests {
             cwd: Some(dir.path().display().to_string()),
             ..Default::default()
         };
-        let claude =
-            run_with_offload(&engine(), &event, HookDialect::Claude, None, &cfg).expect("run");
+        let session = crate::session::SessionStore::open(600);
+        let claude = run_with_offload(&engine(), &event, HookDialect::Claude, None, &cfg, &session)
+            .expect("run");
         assert!(
             matches!(claude.decision, Decision::Block { .. }),
             "{:?}",
@@ -682,8 +862,8 @@ mod tests {
         assert!(claude.stdout.contains("\"permissionDecision\":\"deny\""));
         assert!(claude.stdout.contains("--summarize"));
 
-        let cursor =
-            run_with_offload(&engine(), &event, HookDialect::Cursor, None, &cfg).expect("run");
+        let cursor = run_with_offload(&engine(), &event, HookDialect::Cursor, None, &cfg, &session)
+            .expect("run");
         assert!(cursor.stdout.contains("\"permission\":\"deny\""));
         assert_eq!(cursor.exit_code(), 2);
 
@@ -692,8 +872,15 @@ mod tests {
             tool_input: Some(json!({"file_path": big, "offset": 10, "limit": 50})),
             ..event.clone()
         };
-        let ok =
-            run_with_offload(&engine(), &ranged, HookDialect::Claude, None, &cfg).expect("run");
+        let ok = run_with_offload(
+            &engine(),
+            &ranged,
+            HookDialect::Claude,
+            None,
+            &cfg,
+            &session,
+        )
+        .expect("run");
         assert!(matches!(ok.decision, Decision::Allow), "{:?}", ok.decision);
 
         // Disabled config: plain allow.
@@ -703,6 +890,7 @@ mod tests {
             HookDialect::Claude,
             None,
             &OffloadConfig::disabled(),
+            &session,
         )
         .expect("run");
         assert!(matches!(off.decision, Decision::Allow));

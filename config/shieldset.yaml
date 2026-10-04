@@ -73,6 +73,12 @@ shieldset:
     # Per-machine override: APERION_SHIELD_OFFLOAD_MIN_LINES.
     io_offload:
       min_lines: 0
+    # v1.8: hosts a data-sending command may target without
+    # egress.unlisted_host. `*.example.com` and `*` are accepted.
+    # APERION_SHIELD_EGRESS_ALLOW (comma-separated) is merged in.
+    # Tainted or injected sessions still escalate, allowlist or not.
+    egress:
+      allow_hosts: []
     # v0.9: MCP supply-chain protection. On first contact with an
     # upstream, every tool's (name, description, input schema) is hashed
     # and pinned to ~/.aperion-shield/pins/ (trust-on-first-use). A
@@ -367,6 +373,105 @@ shieldset:
       reason: "Bulk read of a cloud secrets store -- verify before continuing."
       safer_alternative: "Read a specific secret by name, not all of them. Audit logs treat bulk reads as suspicious."
 
+    - id: secret.browser_store
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, filesystem.read_file, fs.read, read_file]
+        any_param_matches:
+          - '(?i)[/\\]Cookies\b'
+          - '(?i)Login Data'
+          - '(?i)cookies\.sqlite'
+          - '(?i)logins\.json'
+          - '(?i)key4\.db'
+          - '(?i)Library/Cookies'
+      reason: "Reading a browser cookie or saved-login store."
+      safer_alternative: "Don't let an agent read browser profile data. Export the one cookie you need by hand, or use the site's API."
+
+    - id: secret.keychain_dump
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(?i)\bsecurity\s+find-(generic|internet)-password\b'
+          - '(?i)\bsecurity\s+dump-keychain\b'
+          - '(?i)\bsecret-tool\s+lookup\b'
+      reason: "Dumping the OS keychain."
+      safer_alternative: "Use the keychain UI, or a named CLI that does not print the secret. Do not pass -w to an agent."
+
+    - id: secret.cli_token_dump
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(?i)\bop\s+(read|item\s+get)\b'
+          - '(?i)\bgh\s+auth\s+token\b'
+          - '(?i)\bheroku\s+auth:token\b'
+          - '(?i)\bnpm\s+token\s+list\b'
+          - '(?i)\bvault\s+kv\s+get\b'
+      reason: "Printing a CLI or password-manager token."
+      safer_alternative: "Let the CLI use its own credential helper. Do not ask an agent to print the token."
+
+    - id: secret.dev_config_read
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, filesystem.read_file, fs.read, read_file]
+        any_param_matches:
+          - '(?i)(^|[\s/])\.npmrc(\s|$)'
+          - '(?i)(^|[\s/])\.pypirc(\s|$)'
+          - '(?i)(^|[\s/])\.netrc(\s|$)'
+          - '(?i)\.docker/config\.json'
+          - '(?i)(^|[\s/])\.kube/config(\s|$)'
+          - '(?i)\.config/gcloud(/|$|\s)'
+          - '(?i)(^|[\s/])\.bitcoin/'
+          - '(?i)(^|[\s/])\.electrum/'
+          - '(?i)solana/id\.json'
+          - '(?i)ethereum/keystore'
+      reason: "Reading a developer credential file (package registry, kube, gcloud, or a wallet)."
+      safer_alternative: "Use the tool's own login (`npm whoami`, `kubectl auth`) instead of printing the file."
+
+    # ═════════════════════════════════════════════════════════════════
+    # Egress (v1.8) -- a command that sends data off the machine.
+    # network_send respects policy.egress.allow_hosts. The tainted and
+    # injected variants do not: exfil after a secret read is the point.
+    # ═════════════════════════════════════════════════════════════════
+    - id: egress.unlisted_host
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        command_predicates: [network_send]
+      reason: "Command sends data to a host that is not on policy.egress.allow_hosts."
+      safer_alternative: "Add the host to policy.egress.allow_hosts if it is a known destination, or paste the payload yourself."
+
+    - id: egress.after_secret_read
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        command_predicates: [network_send_tainted]
+      reason: "This session already read a credential, and this command sends data off the machine."
+      safer_alternative: "Stop. Rotate anything that was read. Do not let the agent post it."
+
+    - id: egress.after_injection
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        command_predicates: [network_send_injected]
+      reason: "This session saw injected instructions in a tool result, and this command sends data off the machine."
+      safer_alternative: "Treat the earlier tool output as hostile. Do not run the send it asked for."
+
     - id: tamper.shield_self_paths
       severity: Critical
       points: 8
@@ -396,6 +501,29 @@ shieldset:
           - '(?i)\b(pkill|killall|kill)\b.*\bsmartflow\b'
       reason: "Attempt to disable or kill Aperion Shield."
       safer_alternative: "Shield stays on. If a rule is wrong, file it with a human; do not turn the guard off."
+
+    # Agent-hook only (`where: agent_hook`). A person at their own
+    # terminal, including through the shell shims, is not matched.
+    # Covers the hook configs tamper.shield_self_paths does not, plus
+    # SHIELD_SHIMS_DISABLE and the uninstall flags.
+    - id: shield.self_tamper
+      severity: Critical
+      points: 8
+      where: agent_hook
+      match:
+        tool: [shell, fs.write, fs.read, filesystem.read_file, filesystem.write_file, filesystem.delete_file, fs.delete, write_file, read_file, execute_command, exec, bash, run_terminal]
+        any_param_matches:
+          - '(?i)\.aperion-shield(/|\\|\b)'
+          - '(?i)\.cursor[/\\]hooks\.json'
+          - '(?i)\.claude[/\\]settings\.json'
+          - '(?i)\.codex[/\\]hooks\.json'
+          - '(?i)\.gemini[/\\]settings\.json'
+          - '(?i)\.copilot[/\\]hooks\.json'
+          - '(?i)SHIELD_HOOKS_DISABLE'
+          - '(?i)SHIELD_SHIMS_DISABLE'
+          - '(?i)--uninstall-(agent-hooks|hooks|shims)\b'
+      reason: "An agent is editing Shield, its hooks, or the switch that turns it off."
+      safer_alternative: "Leave the hook configs alone. A human can change them from their own terminal."
 
     - id: tamper.gateway_admin_api
       severity: Critical

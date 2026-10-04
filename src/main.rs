@@ -528,6 +528,22 @@ struct Cli {
     )]
     check_hook: bool,
 
+    /// Read a Claude Code / Cursor post-tool JSON event on stdin.
+    /// Scans tool output for prompt injection, tags secrets, and records
+    /// session flags the next `--check-hook` call escalates. Claude
+    /// PostToolUse can deny (exit 2). Cursor post events cannot, so
+    /// those exit 0.
+    #[arg(
+        long,
+        conflicts_with = "check",
+        conflicts_with = "diff",
+        conflicts_with = "check_cmd",
+        conflicts_with = "scan",
+        conflicts_with = "scan_ide",
+        conflicts_with = "check_hook"
+    )]
+    check_hook_post: bool,
+
     /// JSON dialect for `--check-hook`. `auto` inspects the payload.
     /// Claude and Cursor shapes are incompatible -- do not share one
     /// wrapper script. Default: auto.
@@ -561,6 +577,28 @@ struct Cli {
         conflicts_with = "check_hook"
     )]
     uninstall_agent_hooks: bool,
+
+    /// Run the resident watcher: poll hook configs, MCP configs, and
+    /// agent rules files. On change, re-scan and put Shield's hook
+    /// entry back if an agent removed it. User-level, no root.
+    #[arg(long, conflicts_with = "check_hook", conflicts_with = "check")]
+    guard: bool,
+
+    /// One watcher pass, then exit.
+    #[arg(long, conflicts_with = "check_hook")]
+    guard_once: bool,
+
+    /// Extra project root for `--guard` / `--guard-once`.
+    #[arg(long, value_name = "PATH")]
+    guard_root: Vec<PathBuf>,
+
+    /// Write a user launchd or systemd unit for `--guard` and load it.
+    #[arg(long, conflicts_with = "guard", conflicts_with = "check_hook")]
+    install_guard: bool,
+
+    /// Unload and delete the user watcher unit.
+    #[arg(long, conflicts_with = "install_guard", conflicts_with = "guard")]
+    uninstall_guard: bool,
 
     // ── I/O offload (v1.7) ────────────────────────────────────────
     //
@@ -1130,12 +1168,28 @@ async fn main() -> anyhow::Result<()> {
         let exit_code = run_check_hook(&cli)?;
         std::process::exit(exit_code);
     }
+    if cli.check_hook_post {
+        let exit_code = run_check_hook_post(&cli)?;
+        std::process::exit(exit_code);
+    }
     if cli.install_agent_hooks {
         let exit_code = run_install_agent_hooks(&cli)?;
         std::process::exit(exit_code);
     }
     if cli.uninstall_agent_hooks {
         let exit_code = run_uninstall_agent_hooks(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.install_guard {
+        let exit_code = run_install_guard(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.uninstall_guard {
+        let exit_code = run_uninstall_guard(&cli)?;
+        std::process::exit(exit_code);
+    }
+    if cli.guard || cli.guard_once {
+        let exit_code = run_guard(&cli)?;
         std::process::exit(exit_code);
     }
     if !cli.summarize.is_empty() {
@@ -2460,6 +2514,45 @@ fn run_check_hook(cli: &Cli) -> anyhow::Result<i32> {
     Ok(report.exit_code())
 }
 
+/// `--check-hook-post`. Same stdin shape as `--check-hook`, after the
+/// tool has run. Prints dialect-specific JSON. Cursor always exits 0.
+fn run_check_hook_post(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::hooks::agent::HookEvent;
+    use aperion_shield::hooks::post::{dialect_for, run};
+    use aperion_shield::session::SessionStore;
+    use std::io::Read;
+
+    let mut raw = String::new();
+    std::io::stdin().read_to_string(&mut raw)?;
+    let event = HookEvent::from_json(&raw)?;
+    let dialect = dialect_for(&event, &cli.hook_dialect)?;
+    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
+    let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
+    let session = SessionStore::open(cli.taint_ttl_secs);
+    let report = run(&engine, &event, dialect, Some(&taint), &session)?;
+
+    let audit_record = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": "shield_eval",
+        "source": "check-hook-post",
+        "tool": report.tool_name,
+        "decision": report.decision.label(),
+        "injected": report.injected,
+        "tainted": report.tainted,
+        "secrets_tagged": report.secrets_tagged,
+        "dialect": match report.dialect {
+            aperion_shield::hooks::agent::HookDialect::Claude => "claude",
+            aperion_shield::hooks::agent::HookDialect::Cursor => "cursor",
+        },
+    });
+    eprintln!("{}", audit_record);
+    if report.exit_code() != 0 && !report.reason.is_empty() {
+        eprintln!("{}", report.reason);
+    }
+    print!("{}", report.stdout);
+    Ok(report.exit_code())
+}
+
 fn run_install_agent_hooks(cli: &Cli) -> anyhow::Result<i32> {
     use aperion_shield::hooks::agent_install::{install, AgentInstallOutcome};
 
@@ -2517,6 +2610,51 @@ fn run_uninstall_agent_hooks(cli: &Cli) -> anyhow::Result<i32> {
             settings
         );
     }
+    Ok(0)
+}
+
+fn run_guard(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::guard::{run, GuardOptions};
+    use std::time::Duration;
+
+    run(GuardOptions {
+        home: cli.agent_home.clone(),
+        roots: cli.guard_root.clone(),
+        interval: Duration::from_secs(5),
+        once: cli.guard_once && !cli.guard,
+        notify: true,
+    })
+}
+
+fn run_install_guard(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::guard::install_unit;
+
+    let home = cli
+        .agent_home
+        .clone()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| anyhow::anyhow!("couldn't resolve home directory"))?;
+    let bin = std::env::current_exe()?;
+    let path = install_unit(&home, &bin, cli.agent_home.is_none())?;
+    eprintln!("[shield] watcher unit: {}", path.display());
+    if cli.agent_home.is_some() {
+        eprintln!("[shield] wrote the unit only (--agent-home is set, not loaded)");
+    } else {
+        eprintln!("[shield] watcher is loaded for this user");
+    }
+    Ok(0)
+}
+
+fn run_uninstall_guard(cli: &Cli) -> anyhow::Result<i32> {
+    use aperion_shield::guard::uninstall_unit;
+
+    let home = cli
+        .agent_home
+        .clone()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| anyhow::anyhow!("couldn't resolve home directory"))?;
+    let removed = uninstall_unit(&home, cli.agent_home.is_none())?;
+    eprintln!("[shield] watcher unit removed={removed}");
     Ok(0)
 }
 

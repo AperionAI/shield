@@ -242,6 +242,20 @@ pub struct Policy {
     pub supply_chain: SupplyChainCfg,
     #[serde(default)]
     pub io_offload: IoOffloadCfg,
+    /// v1.8 egress allowlist. Hosts (and `*.suffix` / `*`) that a
+    /// data-sending command may target without `egress.unlisted_host`.
+    /// A tainted or injected session still escalates. Env override:
+    /// `APERION_SHIELD_EGRESS_ALLOW` (comma-separated), merged in.
+    #[serde(default)]
+    pub egress: EgressCfg,
+}
+
+/// v1.8. Empty `allow_hosts` means every send destination is unlisted
+/// (warn). `*` allows every host for that warn rule only.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct EgressCfg {
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
 }
 
 /// v1.7 I/O offload gate. Refuses unbounded reads of files with more
@@ -475,6 +489,10 @@ pub enum Scope {
     /// v0.9: matches against the text content of a `tools/call` result
     /// (catches prompt-injection payloads coming back from the tool).
     ToolResult,
+    /// v1.8: evaluated only by the native agent pre-hook. These rules
+    /// do not fire on MCP, git hooks, or shell shims, so a person at
+    /// their own terminal can still edit Shield's config.
+    AgentHook,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -704,6 +722,7 @@ impl Engine {
                 "llm_response" => Scope::LlmResponse,
                 "tool_description" => Scope::ToolDescription,
                 "tool_result" => Scope::ToolResult,
+                "agent_hook" => Scope::AgentHook,
                 other => anyhow::bail!("rule '{}' has unknown where '{}'", y.id, other),
             };
             let matcher = if let Some(m) = y.r#match {
@@ -778,7 +797,9 @@ impl Engine {
     /// recorded checksum and no signature is present.
     pub fn check_shieldset_integrity(yaml: &str, signed: bool) -> bool {
         let actual = Self::yaml_checksum(yaml);
-        let expected = std::env::var("SHIELDSET_SHA256").ok().filter(|s| !s.is_empty());
+        let expected = std::env::var("SHIELDSET_SHA256")
+            .ok()
+            .filter(|s| !s.is_empty());
         match expected {
             Some(exp) if exp != actual && !signed => {
                 log::warn!(
@@ -795,9 +816,32 @@ impl Engine {
     /// fired, points, raw vs composite vs final severity). The caller
     /// turns this into a Decision via `decide_tool_call`.
     pub fn evaluate(&self, tool: &str, params: &serde_json::Value, adj: Adjustments) -> Evaluation {
+        self.evaluate_scope(Scope::ToolCall, tool, params, adj)
+    }
+
+    /// Rules with `where: agent_hook`. The native pre-tool hook calls
+    /// this in addition to [`evaluate`](Self::evaluate). Other surfaces
+    /// do not, so the rule cannot fire from a human's shell shim.
+    pub fn evaluate_agent_hook(
+        &self,
+        tool: &str,
+        params: &serde_json::Value,
+        adj: Adjustments,
+    ) -> Evaluation {
+        self.evaluate_scope(Scope::AgentHook, tool, params, adj)
+    }
+
+    fn evaluate_scope(
+        &self,
+        scope: Scope,
+        tool: &str,
+        params: &serde_json::Value,
+        adj: Adjustments,
+    ) -> Evaluation {
+        crate::predicates::set_egress_allow(&self.policy.egress.allow_hosts);
         let mut matches = Vec::new();
         let mut composite_points = 0u32;
-        for r in self.rules.iter().filter(|r| r.scope == Scope::ToolCall) {
+        for r in self.rules.iter().filter(|r| r.scope == scope) {
             if r.matches_tool_call(tool, params) {
                 composite_points = composite_points.saturating_add(r.points);
                 matches.push(MatchInfo {
@@ -1699,7 +1743,9 @@ mod tests {
         let p = json!({"command": "curl -X DELETE https://cluster1.aperion.ai/api/policies/hipaa"});
         let ev = e.evaluate("bash", &p, Adjustments::default());
         assert!(
-            ev.matches.iter().any(|m| m.rule_id == "tamper.gateway_admin_api"),
+            ev.matches
+                .iter()
+                .any(|m| m.rule_id == "tamper.gateway_admin_api"),
             "expected tamper.gateway_admin_api, got {:?}",
             ev.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>()
         );
@@ -1711,7 +1757,9 @@ mod tests {
         let p = json!({"command": "printenv SMARTFLOW_ADMIN_KEY"});
         let ev = e.evaluate("bash", &p, Adjustments::default());
         assert!(
-            ev.matches.iter().any(|m| m.rule_id == "tamper.admin_secret_read"),
+            ev.matches
+                .iter()
+                .any(|m| m.rule_id == "tamper.admin_secret_read"),
             "expected tamper.admin_secret_read, got {:?}",
             ev.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>()
         );

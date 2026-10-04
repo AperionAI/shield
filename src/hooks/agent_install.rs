@@ -2,12 +2,17 @@
 //!
 //! Writes fail-closed wrappers under `~/.aperion-shield/hooks/` and
 //! merges user-level host config:
-//!   * Claude Code `~/.claude/settings.json` `hooks.PreToolUse`
+//!   * Claude Code `~/.claude/settings.json` `hooks.PreToolUse` and
+//!     `hooks.PostToolUse`
 //!   * Cursor `~/.cursor/hooks.json` `hooks.preToolUse`,
-//!     `beforeShellExecution`, `beforeMCPExecution`
-//!   * Codex `~/.codex/hooks.json` `hooks.preToolUse`
-//!   * Gemini CLI `~/.gemini/settings.json` `hooks.PreToolUse`
-//!   * Copilot CLI `~/.copilot/hooks.json` `hooks.preToolUse`
+//!     `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`,
+//!     plus post events `afterShellExecution`, `afterMCPExecution`,
+//!     `postToolUse` (these cannot deny; they record session flags)
+//!   * Codex `~/.codex/hooks.json` `hooks.preToolUse` and `postToolUse`
+//!   * Gemini CLI `~/.gemini/settings.json` `hooks.PreToolUse` and
+//!     `hooks.PostToolUse`
+//!   * Copilot CLI `~/.copilot/hooks.json` `hooks.preToolUse` and
+//!     `postToolUse`
 //!
 //! Project-level hook files are not modified. Install prints them
 //! (TrustFall: a repo can drop `.cursor/hooks.json`). `--scan-ide`
@@ -58,13 +63,22 @@ impl AgentHookKind {
     }
 
     pub fn wrapper_filename(self) -> String {
+        self.wrapper_filename_for(false)
+    }
+
+    pub fn post_wrapper_filename(self) -> String {
+        self.wrapper_filename_for(true)
+    }
+
+    fn wrapper_filename_for(self, post: bool) -> String {
+        let which = if post { "posttooluse" } else { "pretooluse" };
         #[cfg(windows)]
         {
-            format!("{}-pretooluse.cmd", self.slug())
+            format!("{}-{which}.cmd", self.slug())
         }
         #[cfg(not(windows))]
         {
-            format!("{}-pretooluse.sh", self.slug())
+            format!("{}-{which}.sh", self.slug())
         }
     }
 
@@ -201,21 +215,48 @@ fn wrapper_ext() -> &'static str {
     }
 }
 
-fn wrapper_script(kind: AgentHookKind, baked_bin: Option<&Path>) -> String {
+fn wrapper_script(kind: AgentHookKind, baked_bin: Option<&Path>, post: bool) -> String {
     let dialect = kind.dialect_flag();
     let baked = baked_bin
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let fail_json = match kind.merge_style() {
-        MergeStyle::ClaudePreToolUse => {
-            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"aperion-shield is not installed (fail-closed)"}}"#
-        }
-        MergeStyle::CursorPreToolUse => {
-            r#"{"permission":"deny","permissionDecisionReason":"aperion-shield is not installed (fail-closed)"}"#
+    let flag = if post {
+        "--check-hook-post"
+    } else {
+        "--check-hook"
+    };
+    // Cursor post events cannot deny. A missing binary must not wedge
+    // the IDE, so that wrapper exits 0. Everything else fails closed.
+    let fail_open = post && matches!(kind.merge_style(), MergeStyle::CursorPreToolUse);
+    let fail_json = if fail_open {
+        ""
+    } else {
+        match kind.merge_style() {
+            MergeStyle::ClaudePreToolUse => {
+                if post {
+                    r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","permissionDecision":"deny","permissionDecisionReason":"aperion-shield is not installed (fail-closed)"}}"#
+                } else {
+                    r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"aperion-shield is not installed (fail-closed)"}}"#
+                }
+            }
+            MergeStyle::CursorPreToolUse => {
+                r#"{"permission":"deny","permissionDecisionReason":"aperion-shield is not installed (fail-closed)"}"#
+            }
         }
     };
+    let missing = if fail_open {
+        "exit 0"
+    } else {
+        "printf '%s\\n' '{fail_json}'\n  exit 2"
+    };
+    let label = if post { "PostToolUse" } else { "PreToolUse" };
     if wrapper_ext() == "cmd" {
         let baked_cmd = baked.replace('"', "\"\"");
+        let missing_cmd = if fail_open {
+            "exit /b 0".to_string()
+        } else {
+            format!("echo {fail_json}\r\n  exit /b 2")
+        };
         return format!(
             r#"@echo off
 REM {marker}
@@ -227,15 +268,15 @@ if exist "%BIN%" goto :run
 set "BIN=aperion-shield"
 where aperion-shield >nul 2>nul
 if errorlevel 1 (
-  echo {fail_json}
-  exit /b 2
+  {missing_cmd}
 )
 :run
-"%BIN%" --check-hook --hook-dialect {dialect}
+"%BIN%" {flag} --hook-dialect {dialect}
 "#,
             marker = APERION_AGENT_HOOK_MARKER,
             baked = baked_cmd,
-            fail_json = fail_json,
+            missing_cmd = missing_cmd,
+            flag = flag,
             dialect = dialect,
         );
     }
@@ -243,7 +284,7 @@ if errorlevel 1 (
         r#"#!/bin/sh
 {marker}
 #
-# Fail-closed PreToolUse wrapper. Do not edit by hand -- refresh with
+# {label} wrapper. Do not edit by hand -- refresh with
 #   aperion-shield --install-agent-hooks
 #
 if [ "${{SHIELD_HOOKS_DISABLE:-}}" = "1" ]; then
@@ -254,14 +295,15 @@ if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
   BIN="$(command -v aperion-shield 2>/dev/null || true)"
 fi
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
-  printf '%s\n' '{fail_json}'
-  exit 2
+  {missing}
 fi
-exec "$BIN" --check-hook --hook-dialect {dialect}
+exec "$BIN" {flag} --hook-dialect {dialect}
 "#,
         marker = APERION_AGENT_HOOK_MARKER,
+        label = label,
         baked = shell_single_quote(&baked),
-        fail_json = fail_json,
+        missing = missing.replace("{fail_json}", fail_json),
+        flag = flag,
         dialect = dialect,
     )
 }
@@ -276,10 +318,11 @@ fn write_wrapper(
     dir: &Path,
     kind: AgentHookKind,
     baked_bin: Option<&Path>,
+    post: bool,
 ) -> Result<AgentInstallOutcome> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.join(kind.wrapper_filename());
-    let body = wrapper_script(kind, baked_bin);
+    let path = dir.join(kind.wrapper_filename_for(post));
+    let body = wrapper_script(kind, baked_bin, post);
     let outcome = if path.exists() {
         let existing = fs::read_to_string(&path).unwrap_or_default();
         if existing.contains(APERION_AGENT_HOOK_MARKER) {
@@ -315,8 +358,19 @@ fn is_our_command(cmd: &str, wrapper: &Path) -> bool {
         || cmd.contains("aperion-shield --check-hook")
 }
 
-fn merge_claude_settings(
+fn combine_outcome(a: AgentInstallOutcome, b: AgentInstallOutcome) -> AgentInstallOutcome {
+    use AgentInstallOutcome::*;
+    match (a, b) {
+        (UnknownPresent, _) | (_, UnknownPresent) => UnknownPresent,
+        (Refreshed, _) | (_, Refreshed) => Refreshed,
+        (Merged, _) | (_, Merged) => Merged,
+        _ => Installed,
+    }
+}
+
+fn merge_claude_event(
     path: &Path,
+    event: &str,
     wrapper: &Path,
     chain_existing: bool,
 ) -> Result<AgentInstallOutcome> {
@@ -343,10 +397,10 @@ fn merge_claude_settings(
     let hooks_obj = hooks
         .as_object_mut()
         .ok_or_else(|| anyhow!("{} hooks is not an object", path.display()))?;
-    let pre = hooks_obj.entry("PreToolUse").or_insert_with(|| json!([]));
+    let pre = hooks_obj.entry(event).or_insert_with(|| json!([]));
     let arr = pre
         .as_array_mut()
-        .ok_or_else(|| anyhow!("{} hooks.PreToolUse is not an array", path.display()))?;
+        .ok_or_else(|| anyhow!("{} hooks.{} is not an array", path.display(), event))?;
 
     let already = arr.iter().any(|entry| {
         entry
@@ -395,8 +449,10 @@ fn merge_claude_settings(
 
 fn merge_cursor_hooks(
     path: &Path,
-    wrapper: &Path,
+    pre_wrapper: &Path,
+    post_wrapper: &Path,
     chain_existing: bool,
+    kind: AgentHookKind,
 ) -> Result<AgentInstallOutcome> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -427,14 +483,27 @@ fn merge_cursor_hooks(
 
     // Cursor only prompts on beforeShellExecution / beforeMCPExecution.
     // preToolUse still covers Write/Read; ask is a no-op there, deny still works.
-    let events: &[(&str, bool)] = &[
-        ("preToolUse", true),
-        ("beforeShellExecution", true),
-        ("beforeMCPExecution", true),
-    ];
+    // beforeReadFile can deny and already includes the file body.
+    // Post events cannot deny; failClosed stays false so a missing
+    // binary does not wedge the IDE. Codex and Copilot use the same
+    // Cursor event names so a High-severity shell or MCP call is an
+    // ask there too, not only on Cursor.
+    let events: &[(&str, bool, bool)] = match kind {
+        AgentHookKind::Cursor | AgentHookKind::Codex | AgentHookKind::Copilot => &[
+            ("preToolUse", true, false),
+            ("beforeShellExecution", true, false),
+            ("beforeMCPExecution", true, false),
+            ("beforeReadFile", true, false),
+            ("afterShellExecution", false, true),
+            ("afterMCPExecution", false, true),
+            ("postToolUse", false, true),
+        ],
+        AgentHookKind::Claude | AgentHookKind::Gemini => &[],
+    };
 
     let mut overall = AgentInstallOutcome::Installed;
-    for (event, fail_closed) in events {
+    for (event, fail_closed, post) in events {
+        let wrapper = if *post { post_wrapper } else { pre_wrapper };
         let outcome = merge_cursor_event(hooks_obj, event, wrapper, chain_existing, *fail_closed)?;
         match outcome {
             AgentInstallOutcome::UnknownPresent => {
@@ -526,16 +595,34 @@ pub fn install_at(
 
     let mut hosts = Vec::new();
     for kind in AgentHookKind::ALL {
-        let wrapper = write_wrapper(&hooks, kind, baked)?;
+        let wrapper = write_wrapper(&hooks, kind, baked, false)?;
+        let _post_wrapper = write_wrapper(&hooks, kind, baked, true)?;
         let wrapper_path = hooks.join(kind.wrapper_filename());
+        let post_path = hooks.join(kind.post_wrapper_filename());
         let settings = match kind.merge_style() {
             MergeStyle::ClaudePreToolUse => {
-                merge_claude_settings(&kind.settings_path(&home), &wrapper_path, chain_existing)?
+                let pre = merge_claude_event(
+                    &kind.settings_path(&home),
+                    "PreToolUse",
+                    &wrapper_path,
+                    chain_existing,
+                )?;
+                let post = merge_claude_event(
+                    &kind.settings_path(&home),
+                    "PostToolUse",
+                    &post_path,
+                    chain_existing,
+                )?;
+                Ok::<_, anyhow::Error>(combine_outcome(pre, post))
             }
-            MergeStyle::CursorPreToolUse => {
-                merge_cursor_hooks(&kind.settings_path(&home), &wrapper_path, chain_existing)?
-            }
-        };
+            MergeStyle::CursorPreToolUse => merge_cursor_hooks(
+                &kind.settings_path(&home),
+                &wrapper_path,
+                &post_path,
+                chain_existing,
+                kind,
+            ),
+        }?;
         hosts.push(HostInstall {
             kind,
             wrapper,
@@ -626,31 +713,37 @@ fn file_declares_hooks(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-fn strip_our_claude_entries(arr: &mut Vec<Value>, wrapper: &Path) -> bool {
+fn is_managed_hook_command(cmd: &str) -> bool {
+    cmd.contains("-pretooluse.")
+        || cmd.contains("-posttooluse.")
+        || cmd.contains("aperion-shield --check-hook")
+}
+
+fn strip_our_claude_entries(arr: &mut Vec<Value>, _wrapper: &Path) -> bool {
     let before = arr.len();
     arr.retain(|entry| {
         let ours = entry
             .pointer("/hooks/0/command")
             .and_then(|v| v.as_str())
-            .map(|c| is_our_command(c, wrapper))
+            .map(is_managed_hook_command)
             .unwrap_or(false)
             || entry
                 .get("command")
                 .and_then(|v| v.as_str())
-                .map(|c| is_our_command(c, wrapper))
+                .map(is_managed_hook_command)
                 .unwrap_or(false);
         !ours
     });
     arr.len() != before
 }
 
-fn strip_our_cursor_entries(arr: &mut Vec<Value>, wrapper: &Path) -> bool {
+fn strip_our_cursor_entries(arr: &mut Vec<Value>, _wrapper: &Path) -> bool {
     let before = arr.len();
     arr.retain(|entry| {
         let ours = entry
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|c| is_our_command(c, wrapper))
+            .map(is_managed_hook_command)
             .unwrap_or(false);
         !ours
     });
@@ -667,7 +760,8 @@ pub fn uninstall(home: Option<&Path>) -> Result<AgentUninstallReport> {
     let mut removed = Vec::new();
     for kind in AgentHookKind::ALL {
         let wrapper_path = hooks.join(kind.wrapper_filename());
-        let wrapper_removed = remove_our_file(&wrapper_path)?;
+        let post_path = hooks.join(kind.post_wrapper_filename());
+        let wrapper_removed = remove_our_file(&wrapper_path)? || remove_our_file(&post_path)?;
         let settings_cleared = match kind.merge_style() {
             MergeStyle::ClaudePreToolUse => {
                 clear_claude_settings(&kind.settings_path(&home), &wrapper_path)?
@@ -704,13 +798,21 @@ fn clear_claude_settings(path: &Path, wrapper: &Path) -> Result<bool> {
     let raw = fs::read_to_string(path)?;
     let mut root: Value =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let Some(arr) = root
-        .pointer_mut("/hooks/PreToolUse")
-        .and_then(|v| v.as_array_mut())
-    else {
+    let mut changed = false;
+    for event in ["PreToolUse", "PostToolUse"] {
+        let Some(arr) = root
+            .pointer_mut(&format!("/hooks/{event}"))
+            .and_then(|v| v.as_array_mut())
+        else {
+            continue;
+        };
+        if strip_our_claude_entries(arr, wrapper) {
+            changed = true;
+        }
+    }
+    if !changed {
         return Ok(false);
-    };
-    let changed = strip_our_claude_entries(arr, wrapper);
+    }
     if changed {
         fs::write(path, serde_json::to_string_pretty(&root)? + "\n")?;
     }
@@ -725,7 +827,15 @@ fn clear_cursor_hooks(path: &Path, wrapper: &Path) -> Result<bool> {
     let mut root: Value =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     let mut changed = false;
-    for event in ["preToolUse", "beforeShellExecution", "beforeMCPExecution"] {
+    for event in [
+        "preToolUse",
+        "beforeShellExecution",
+        "beforeMCPExecution",
+        "beforeReadFile",
+        "afterShellExecution",
+        "afterMCPExecution",
+        "postToolUse",
+    ] {
         let Some(arr) = root
             .pointer_mut(&format!("/hooks/{event}"))
             .and_then(|v| v.as_array_mut())
@@ -772,6 +882,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("claude-pretooluse"));
+        assert!(settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("claude-posttooluse"));
 
         let cursor_json: Value =
             serde_json::from_str(&fs::read_to_string(cursor_hooks_path(home)).unwrap()).unwrap();
@@ -791,12 +905,44 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("cursor-pretooluse"));
+        assert!(cursor_json["hooks"]["beforeReadFile"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("cursor-pretooluse"));
+        assert_eq!(
+            cursor_json["hooks"]["beforeReadFile"][0]["failClosed"],
+            json!(true)
+        );
+        assert!(cursor_json["hooks"]["afterShellExecution"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("cursor-posttooluse"));
+        assert_eq!(
+            cursor_json["hooks"]["afterShellExecution"][0]["failClosed"],
+            json!(false)
+        );
+        assert!(cursor_json["hooks"]["afterMCPExecution"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("cursor-posttooluse"));
+        assert!(cursor_json["hooks"]["postToolUse"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("cursor-posttooluse"));
 
         let codex_json: Value = serde_json::from_str(
             &fs::read_to_string(AgentHookKind::Codex.settings_path(home)).unwrap(),
         )
         .unwrap();
         assert!(codex_json["hooks"]["preToolUse"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("codex-pretooluse"));
+        assert!(codex_json["hooks"]["postToolUse"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("codex-posttooluse"));
+        assert!(codex_json["hooks"]["beforeShellExecution"][0]["command"]
             .as_str()
             .unwrap()
             .contains("codex-pretooluse"));
@@ -810,12 +956,26 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("gemini-pretooluse"));
+        assert!(
+            gemini_json["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("gemini-posttooluse")
+        );
 
         let copilot_json: Value = serde_json::from_str(
             &fs::read_to_string(AgentHookKind::Copilot.settings_path(home)).unwrap(),
         )
         .unwrap();
         assert!(copilot_json["hooks"]["preToolUse"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("copilot-pretooluse"));
+        assert!(copilot_json["hooks"]["postToolUse"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("copilot-posttooluse"));
+        assert!(copilot_json["hooks"]["beforeShellExecution"][0]["command"]
             .as_str()
             .unwrap()
             .contains("copilot-pretooluse"));
@@ -871,10 +1031,15 @@ mod tests {
 
     #[test]
     fn wrapper_denies_when_binary_missing() {
-        let script = wrapper_script(AgentHookKind::Claude, None);
+        let script = wrapper_script(AgentHookKind::Claude, None, false);
         assert!(script.contains("permissionDecision\":\"deny\"") || script.contains("fail-closed"));
         assert!(script.contains("exit 2"));
         assert!(script.contains("SHIELD_HOOKS_DISABLE"));
+        assert!(script.contains("--check-hook "));
+        let post = wrapper_script(AgentHookKind::Cursor, None, true);
+        assert!(post.contains("--check-hook-post"));
+        assert!(post.contains("exit 0"));
+        assert!(!post.contains("exit 2"));
     }
 
     #[test]

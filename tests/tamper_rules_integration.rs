@@ -17,7 +17,11 @@ const CASES: &str = include_str!("fixtures/tamper_cases.json");
 fn tamper_rules_behave_as_labelled() {
     let engine = Engine::builtin_default();
     let cases: Vec<Case> = serde_json::from_str(CASES).expect("tamper fixture parses");
-    assert!(cases.len() >= 6, "expected several tamper fixtures, got {}", cases.len());
+    assert!(
+        cases.len() >= 6,
+        "expected several tamper fixtures, got {}",
+        cases.len()
+    );
 
     let mut tp_failures = Vec::new();
     let mut tn_failures = Vec::new();
@@ -25,14 +29,12 @@ fn tamper_rules_behave_as_labelled() {
         let eval = engine.evaluate(&c.tool, &c.params, Adjustments::default());
         let fired = eval.matches.iter().any(|m| m.rule_id == c.expect_rule);
         match c.expect.as_str() {
-            "triggered" if !fired => tp_failures.push(format!(
-                "{} on {}: {:?}",
-                c.expect_rule, c.tool, c.params
-            )),
-            "not_triggered" if fired => tn_failures.push(format!(
-                "{} on {}: {:?}",
-                c.expect_rule, c.tool, c.params
-            )),
+            "triggered" if !fired => {
+                tp_failures.push(format!("{} on {}: {:?}", c.expect_rule, c.tool, c.params))
+            }
+            "not_triggered" if fired => {
+                tn_failures.push(format!("{} on {}: {:?}", c.expect_rule, c.tool, c.params))
+            }
             _ => {}
         }
     }

