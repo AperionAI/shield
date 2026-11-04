@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context};
 
 use super::client::{OrgApi, TokenEnrollResponse};
 use super::state::OrgState;
+use super::{device_identity, keystore};
 
 /// Run `aperion-shield enroll`.
 ///
@@ -45,6 +46,7 @@ pub async fn run_enroll(
         smartflow_url, platform, name
     );
 
+    let identity = device_identity::generate(&name).context("create device identity")?;
     let resp: TokenEnrollResponse = OrgApi::token_enroll(
         smartflow_url,
         token,
@@ -52,13 +54,23 @@ pub async fn run_enroll(
         &name,
         &platform,
         user_email,
+        &identity.csr_pem,
+        &identity.signing_pubkey_hex(),
     )
     .await
     .context("token-enroll request failed")?;
 
+    device_identity::save(
+        &identity,
+        resp.client_cert_pem.as_deref(),
+        resp.ca_cert_pem.as_deref(),
+        &resp.vkey,
+    )
+    .context("store device identity")?;
+
     let state = OrgState {
         smartflow_url: smartflow_url.trim_end_matches('/').to_string(),
-        vkey: resp.vkey.clone(),
+        vkey: String::new(),
         device_id: resp.device_id.clone(),
         policy_group: resp.policy_group.clone(),
         owner_email: user_email.map(|s| s.to_string()),
@@ -66,6 +78,7 @@ pub async fn run_enroll(
         platform,
         device_name: name,
         device_fingerprint: fingerprint,
+        bundle_pubkey: resp.bundle_pubkey.clone().filter(|k| !k.is_empty()),
     };
     state.save().context("save orgmode.json")?;
 
@@ -73,9 +86,26 @@ pub async fn run_enroll(
     eprintln!("[shield]   device_id    = {}", resp.device_id);
     eprintln!("[shield]   policy_group = {}", resp.policy_group);
     eprintln!(
-        "[shield]   vkey         = {}*** (stored at ~/.aperion-shield/orgmode.json)",
-        &resp.vkey[..resp.vkey.len().min(12)]
+        "[shield]   vkey         = {}*** (stored in {})",
+        &resp.vkey[..resp.vkey.len().min(12)],
+        keystore::backend()
     );
+    match &resp.client_cert_pem {
+        Some(_) => eprintln!(
+            "[shield]   client cert  = {}",
+            device_identity::path(device_identity::CERT_FILE)?.display()
+        ),
+        None => eprintln!("[shield]   client cert  = none (this Smartflow has no device CA)"),
+    }
+    match super::OrgApi::from_state(&state).get_shieldset(&state.policy_group).await {
+        Ok(signed) => {
+            super::policy_cache::save(&signed)?;
+            eprintln!("[shield]   org policy   = version {} cached for agent hooks", signed.version);
+        }
+        Err(e) => eprintln!(
+            "[shield]   org policy   = not pulled yet ({e}); hooks ask on every call until the guard pulls it"
+        ),
+    }
     eprintln!("[shield]");
     eprintln!(
         "[shield] next run of `aperion-shield -- <mcp-server>` will pull policy from {}",
@@ -111,6 +141,15 @@ pub async fn run_status() -> anyhow::Result<()> {
     println!("  enrolled_at      = {}", state.enrolled_at);
     println!("  platform         = {}", state.platform);
     println!("  device_fingerprint = {}", state.device_fingerprint);
+    println!("  keystore         = {}", keystore::backend());
+    println!(
+        "  client cert      = {}",
+        if device_identity::identity_pem().is_some() { "present" } else { "none" }
+    );
+    println!(
+        "  policy signing   = {}",
+        if state.bundle_pubkey.is_some() { "pinned" } else { "not pinned (enrolled before v1.22)" }
+    );
     println!();
 
     let api = OrgApi::from_state(&state);
@@ -163,7 +202,7 @@ pub async fn run_disenroll(revoke: bool) -> anyhow::Result<()> {
         );
         let resp = client
             .delete(&url)
-            .bearer_auth(&state.vkey)
+            .bearer_auth(state.vkey())
             .send()
             .await
             .context("revoke request failed")?;
@@ -179,6 +218,7 @@ pub async fn run_disenroll(revoke: bool) -> anyhow::Result<()> {
         let _ = api;
     }
     OrgState::remove()?;
+    device_identity::clear()?;
     println!("aperion-shield disenrolled (local record removed).");
     Ok(())
 }

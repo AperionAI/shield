@@ -1,32 +1,21 @@
-//! Audit sink -- bounded in-memory queue, batched POST every 5 s.
+//! Audit sink for the MCP middleman.
 //!
-//! The MCP middleman calls [`AuditSink::record`] every time the engine
-//! produces a decision. The sink buffers up to 1000 entries; the
-//! background flusher batches them in groups of 200 and POSTs to
-//! `/api/enterprise/shield/events`. Failures are retried with
-//! exponential backoff, never lose more than the in-memory buffer.
-//!
-//! Designed to never block the hot path. `record()` is a non-async
-//! `try_send` -- if the queue is full we drop the oldest event and
-//! log at warn level (the in-process stderr log line still happens
-//! either way, so we never *silently* lose data).
+//! [`AuditSink::record`] writes the decision to the on-disk spool (see
+//! [`super::spool`]), so a crash or an outage doesn't lose it. A flusher
+//! forwards the spool every 5 s. Allows are tallied, not sent one by one.
+//! A 401 means the device was revoked; forwarding stops and the events
+//! stay on disk.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
-use super::client::OrgApi;
+use super::client::{OrgApi, OrgApiError};
+use super::spool::Spool;
 
-/// Maximum number of events held in memory before we start dropping.
-const QUEUE_CAP: usize = 1000;
-
-/// Maximum events shipped per POST.
-const BATCH_SIZE: usize = 200;
-
-/// How often the flusher wakes up to ship a batch.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,18 +31,30 @@ pub struct AuditEvent {
     pub context: serde_json::Value,
 }
 
+/// Write one hook or proxy decision to the spool.
+pub fn spool_decision(spool: &Spool, ev: &AuditEvent) -> anyhow::Result<()> {
+    if ev.decision == "allow" {
+        spool.count_allow(&ev.tool)
+    } else {
+        spool.append(ev).map(|_| ())
+    }
+}
+
 pub struct AuditSink {
-    queue: Mutex<Vec<AuditEvent>>,
+    spool: Option<Spool>,
     api: Arc<OrgApi>,
+    revoked: AtomicBool,
 }
 
 impl AuditSink {
-    /// Create a sink + spawn the background flusher. Returns the sink
-    /// wrapped in `Arc` so producers + flusher share state.
     pub fn new(api: Arc<OrgApi>) -> Arc<Self> {
+        let spool = Spool::open()
+            .map_err(|e| log::error!("[shield] audit spool unavailable: {e}"))
+            .ok();
         let sink = Arc::new(Self {
-            queue: Mutex::new(Vec::with_capacity(QUEUE_CAP)),
+            spool,
             api,
+            revoked: AtomicBool::new(false),
         });
         let sink_for_task = sink.clone();
         tokio::spawn(async move {
@@ -62,24 +63,21 @@ impl AuditSink {
         sink
     }
 
-    /// Non-blocking enqueue. Drops the oldest event if the queue is
-    /// full, surfacing a warn-log so operators notice.
-    ///
-    /// Async because we await the queue lock (it's a `tokio::Mutex`).
-    /// In practice this is a contended lock for sub-microsecond bursts
-    /// only; the await never crosses an I/O boundary.
     pub async fn record(&self, ev: AuditEvent) {
-        let mut q = self.queue.lock().await;
-        if q.len() >= QUEUE_CAP {
-            let dropped = q.remove(0);
-            log::warn!(
-                "[shield] audit queue full ({} events buffered); dropped oldest rule_id={} ts={}",
-                QUEUE_CAP,
-                dropped.rule_id,
-                dropped.ts
-            );
+        let Some(spool) = &self.spool else {
+            return log::warn!("[shield] audit not spooled (no spool): rule_id={}", ev.rule_id);
+        };
+        if let Err(e) = spool_decision(spool, &ev) {
+            log::warn!("[shield] audit spool write failed rule_id={}: {e}", ev.rule_id);
         }
-        q.push(ev);
+    }
+
+    async fn flush_once(&self) -> Result<(), OrgApiError> {
+        let Some(spool) = &self.spool else { return Ok(()) };
+        if let Err(e) = spool.flush_allow_counts() {
+            log::warn!("[shield] allow tally flush failed: {e}");
+        }
+        spool.forward(&self.api).await.map(|_| ())
     }
 
     async fn run_flusher(self: Arc<Self>) {
@@ -87,51 +85,17 @@ impl AuditSink {
         let max_backoff = Duration::from_secs(60);
         loop {
             tokio::time::sleep(FLUSH_INTERVAL).await;
-
-            // Snapshot up to BATCH_SIZE events from the queue.
-            let batch = {
-                let mut q = self.queue.lock().await;
-                if q.is_empty() {
-                    continue;
-                }
-                let n = q.len().min(BATCH_SIZE);
-                q.drain(..n).collect::<Vec<_>>()
-            };
-
-            let payload: Vec<serde_json::Value> = batch
-                .iter()
-                .filter_map(|e| serde_json::to_value(e).ok())
-                .collect();
-
-            match self.api.post_events(&payload).await {
-                Ok(ack) => {
-                    log::debug!(
-                        "[shield] audit shipped: received={} batch_size={}",
-                        ack.received,
-                        batch.len()
-                    );
-                    backoff = Duration::from_secs(1);
+            if self.revoked.load(Ordering::Relaxed) {
+                continue;
+            }
+            match self.flush_once().await {
+                Ok(()) => backoff = Duration::from_secs(1),
+                Err(OrgApiError::Unauthorized) => {
+                    self.revoked.store(true, Ordering::Relaxed);
+                    log::error!("[shield] Smartflow rejected this device (401). Audit forwarding stopped; events stay in the spool.");
                 }
                 Err(e) => {
-                    // Re-enqueue at the front so we don't lose data.
-                    let mut q = self.queue.lock().await;
-                    for ev in batch.into_iter().rev() {
-                        if q.len() >= QUEUE_CAP {
-                            // Drop oldest from the *back* (these are
-                            // the newest unflushed) to keep the older
-                            // re-queued ones near head. The net effect:
-                            // on prolonged outage we keep the *oldest*
-                            // QUEUE_CAP events.
-                            let _ = q.pop();
-                        }
-                        q.insert(0, ev);
-                    }
-                    drop(q);
-                    log::warn!(
-                        "[shield] audit ship failed: {} -- retry in {:?}",
-                        e,
-                        backoff
-                    );
+                    log::warn!("[shield] audit ship failed: {e} -- retry in {backoff:?}");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
                 }
@@ -139,17 +103,13 @@ impl AuditSink {
         }
     }
 
-    /// Best-effort drain on shutdown. The caller awaits a short timeout
-    /// to give the background flusher one last chance to ship.
+    /// One last forward on shutdown.
     pub async fn drain(&self) {
-        let q = self.queue.lock().await;
-        let n = q.len();
-        drop(q);
-        if n == 0 {
+        if self.revoked.load(Ordering::Relaxed) {
             return;
         }
-        log::info!("[shield] draining {} pending audit events before exit", n);
-        // Give the flusher one full cycle.
-        tokio::time::sleep(FLUSH_INTERVAL + Duration::from_millis(500)).await;
+        if let Err(e) = self.flush_once().await {
+            log::warn!("[shield] audit drain failed: {e}");
+        }
     }
 }

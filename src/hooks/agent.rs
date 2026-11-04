@@ -436,6 +436,25 @@ fn render_stdout(
     }
 }
 
+/// Turn an allow or warn into an approve / deny prompt. Block and
+/// approval decisions are left alone.
+pub fn ask_floor(mut report: HookReport, rule_id: &str, reason: &str) -> HookReport {
+    if !matches!(report.decision, Decision::Allow | Decision::Warn { .. }) {
+        return report;
+    }
+    report.decision = Decision::Approval {
+        rule_id: rule_id.to_string(),
+        severity: Severity::High,
+        reason: reason.to_string(),
+        safer_alternative: None,
+        contributing_rules: Vec::new(),
+    };
+    report.primary_rule_id = Some(rule_id.to_string());
+    report.reason = decision_reason(&report.decision);
+    report.stdout = render_stdout(report.dialect, &report.decision, &report.reason, Some(rule_id));
+    report
+}
+
 /// Evaluate a parsed hook event against the engine. The I/O offload
 /// gate threshold comes from `APERION_SHIELD_OFFLOAD_MIN_LINES`, else
 /// the shieldset's `policy.io_offload.min_lines` (off by default).

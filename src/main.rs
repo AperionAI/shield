@@ -767,6 +767,28 @@ struct Cli {
     #[arg(long, requires = "disenroll")]
     revoke: bool,
 
+    /// Print this device's virtual key from the OS keystore and exit.
+    /// Claude Code's `apiKeyHelper` calls this, so the key is never in a
+    /// settings file or environment variable.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    api_key: bool,
+
+    /// Print Claude Code managed settings for this enrollment: gateway
+    /// URL, device client cert, `apiKeyHelper`, and Shield hooks that
+    /// user settings can't remove. Run as the enrolled user.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    claude_managed_settings: bool,
+
+    /// Write the managed settings to this path instead of stdout. Pass
+    /// `default` for the OS location (needs admin rights).
+    #[arg(long, value_name = "PATH", requires = "claude_managed_settings")]
+    managed_settings_out: Option<String>,
+
+    /// Corporate CA bundle for the gateway's server certificate, set as
+    /// `NODE_EXTRA_CA_CERTS` in the managed settings.
+    #[arg(long, value_name = "PATH", requires = "claude_managed_settings")]
+    gateway_ca: Option<PathBuf>,
+
     /// Smartflow control-plane base URL, e.g.
     /// `https://smartflow.example.com`. Required for `--enroll`.
     #[arg(long, value_name = "URL", requires = "enroll")]
@@ -1238,6 +1260,38 @@ async fn main() -> anyhow::Result<()> {
     if cli.disenroll {
         return orgmode::run_disenroll(cli.revoke).await;
     }
+    if cli.api_key {
+        let state = OrgState::load()?.ok_or_else(|| anyhow!("not enrolled"))?;
+        let key = state.vkey();
+        if key.is_empty() {
+            return Err(anyhow!("enrolled, but no virtual key in the keystore. Re-enroll."));
+        }
+        println!("{key}");
+        return Ok(());
+    }
+    if cli.claude_managed_settings {
+        let state = OrgState::load()?.ok_or_else(|| anyhow!("not enrolled"))?;
+        let settings = orgmode::claude_managed::for_enrolled(&state, cli.gateway_ca.as_deref())?;
+        let body = serde_json::to_string_pretty(&settings)? + "\n";
+        match cli.managed_settings_out.as_deref() {
+            None => print!("{body}"),
+            Some(out) => {
+                let path = if out == "default" {
+                    orgmode::claude_managed::default_path()
+                } else {
+                    PathBuf::from(out)
+                };
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("create {} (needs admin rights?)", dir.display()))?;
+                }
+                std::fs::write(&path, body)
+                    .with_context(|| format!("write {} (needs admin rights?)", path.display()))?;
+                eprintln!("[shield] wrote Claude Code managed settings to {}", path.display());
+            }
+        }
+        return Ok(());
+    }
 
     if cli.upstream.is_empty() && cli.upstream_url.is_none() {
         return Err(anyhow!(
@@ -1430,6 +1484,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Org mode: no shadow, and the file inbox can't approve (the agent can
+    // write to it), so approval-level MCP calls are denied outright.
+    let org = orgmode_handles.is_some();
+    if org && cli.shadow {
+        warn!("[shield] org mode: --shadow ignored");
+    }
     let shield = Arc::new(Shield {
         engine_rx,
         workspace,
@@ -1437,8 +1497,8 @@ async fn main() -> anyhow::Result<()> {
         burst,
         taint,
         cloak,
-        shadow: cli.shadow,
-        auto_deny: cli.auto_deny_high,
+        shadow: cli.shadow && !org,
+        auto_deny: cli.auto_deny_high || org,
         identity_gate,
         orgmode: orgmode_handles,
         smartflow_identity,
@@ -2492,9 +2552,22 @@ fn run_check_hook(cli: &Cli) -> anyhow::Result<i32> {
         "auto" => detect_dialect(&event),
         other => HookDialect::parse(other)?,
     };
-    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
+    let (engine, ask_reason, enrolled) = hook_engine(cli)?;
+    if hooks_disabled_by_env(enrolled) {
+        if dialect == HookDialect::Cursor {
+            println!("{}", json!({"permission": "allow"}));
+        }
+        return Ok(0);
+    }
     let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
-    let report = run(&engine, &event, dialect, Some(&taint))?;
+    let mut report = run(&engine, &event, dialect, Some(&taint))?;
+    if let Some(reason) = ask_reason {
+        report = aperion_shield::hooks::agent::ask_floor(
+            report,
+            aperion_shield::orgmode::policy_cache::STALE_RULE,
+            &reason,
+        );
+    }
 
     let audit_record = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
@@ -2510,8 +2583,62 @@ fn run_check_hook(cli: &Cli) -> anyhow::Result<i32> {
         },
     });
     eprintln!("{}", audit_record);
+    spool_hook_decision(
+        &report.decision,
+        report.primary_rule_id.as_deref(),
+        &report.canonical_tool,
+        &raw,
+        audit_record,
+    );
     print!("{}", report.stdout);
     Ok(report.exit_code())
+}
+
+/// Rules for a hook process. An enrolled device runs the cached signed org
+/// policy and ignores local rule flags; the returned reason, when set,
+/// means every call has to ask.
+fn hook_engine(cli: &Cli) -> anyhow::Result<(Engine, Option<String>, bool)> {
+    use aperion_shield::orgmode::policy_cache;
+    if let Ok(Some(state)) = OrgState::load() {
+        if cli.rules.is_some() || !cli.rules_extra.is_empty() {
+            eprintln!("[shield] org mode: --rules / --rules-extra ignored; the org policy applies");
+        }
+        let p = policy_cache::for_hook(&state, policy_cache::load_raw(), chrono::Utc::now().timestamp());
+        return Ok((p.engine, p.ask_reason, true));
+    }
+    Ok((load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?, None, false))
+}
+
+/// `SHIELD_HOOKS_DISABLE=1` only works on a standalone install.
+fn hooks_disabled_by_env(enrolled: bool) -> bool {
+    let set = std::env::var("SHIELD_HOOKS_DISABLE").map(|v| v == "1").unwrap_or(false);
+    if set && enrolled {
+        eprintln!("[shield] org mode: SHIELD_HOOKS_DISABLE ignored");
+    }
+    set && !enrolled
+}
+
+/// Enrolled devices spool every hook decision for the guard to forward.
+/// A spool failure is logged, never turned into a hook error.
+fn spool_hook_decision(decision: &Decision, rule_id: Option<&str>, tool: &str, raw: &str, context: serde_json::Value) {
+    if !matches!(OrgState::load(), Ok(Some(_))) {
+        return;
+    }
+    let ev = AuditEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts: chrono::Utc::now(),
+        rule_id: rule_id.unwrap_or("").to_string(),
+        decision: decision.label().to_string(),
+        severity: decision.severity().map(|s| s.as_str()).unwrap_or("Info").to_string(),
+        tool: tool.to_string(),
+        fingerprint: hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(raw.as_bytes())[..8]),
+        context,
+    };
+    let res = orgmode::spool::Spool::open()
+        .and_then(|s| orgmode::audit_sink::spool_decision(&s, &ev));
+    if let Err(e) = res {
+        eprintln!("[shield] audit spool write failed: {e}");
+    }
 }
 
 /// `--check-hook-post`. Same stdin shape as `--check-hook`, after the
@@ -2526,7 +2653,10 @@ fn run_check_hook_post(cli: &Cli) -> anyhow::Result<i32> {
     std::io::stdin().read_to_string(&mut raw)?;
     let event = HookEvent::from_json(&raw)?;
     let dialect = dialect_for(&event, &cli.hook_dialect)?;
-    let engine = load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?;
+    let (engine, _, enrolled) = hook_engine(cli)?;
+    if hooks_disabled_by_env(enrolled) {
+        return Ok(0);
+    }
     let taint = TaintLedger::open(cli.taint_ttl_secs, !cli.no_taint_tracking);
     let session = SessionStore::open(cli.taint_ttl_secs);
     let report = run(&engine, &event, dialect, Some(&taint), &session)?;
@@ -2546,6 +2676,14 @@ fn run_check_hook_post(cli: &Cli) -> anyhow::Result<i32> {
         },
     });
     eprintln!("{}", audit_record);
+    let rule_id = match &report.decision {
+        Decision::Allow => None,
+        Decision::Warn { rule_id, .. }
+        | Decision::Approval { rule_id, .. }
+        | Decision::IdentityVerification { rule_id, .. }
+        | Decision::Block { rule_id, .. } => Some(rule_id.as_str()),
+    };
+    spool_hook_decision(&report.decision, rule_id, &report.tool_name, &raw, audit_record);
     if report.exit_code() != 0 && !report.reason.is_empty() {
         eprintln!("{}", report.reason);
     }
@@ -3466,7 +3604,7 @@ async fn evaluate_request(req: &Value, shield: &Shield) -> Option<Value> {
                         "rule_id": rule_id,
                         "severity": severity.as_str(),
                         "ticket_id": ticket,
-                        "reason": format!("Auto-denied by --auto-deny-high: {}", reason),
+                        "reason": format!("Auto-denied (needs human approval, and none is available here): {}", reason),
                         "safer_alternative": safer_alternative,
                         "contributing_rules": contributing_rules,
                         "fingerprint": fp,

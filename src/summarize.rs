@@ -99,8 +99,8 @@ fn resolve_endpoint_from(
     let mut key = key_flag.map(str::to_string).or(env_key.and_then(non_empty));
 
     if let Some(state) = org {
+        key.get_or_insert(state.vkey());
         url.get_or_insert(state.smartflow_url);
-        key.get_or_insert(state.vkey);
     }
 
     let url = url.ok_or_else(|| {
@@ -263,6 +263,7 @@ mod tests {
             platform: "macos".into(),
             device_name: "n".into(),
             device_fingerprint: "f".into(),
+            bundle_pubkey: None,
         }
     }
 

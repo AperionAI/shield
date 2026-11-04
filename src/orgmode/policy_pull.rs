@@ -87,7 +87,10 @@ pub fn start_policy_pull(
                     continue;
                 }
             };
-            let (yaml, new_version) = pulled;
+            if let Err(e) = super::policy_cache::save(&pulled) {
+                log::warn!("[shield] could not cache org policy for hooks: {e}");
+            }
+            let (yaml, new_version) = (pulled.yaml, pulled.version);
             let new_engine = match Engine::from_yaml(&yaml) {
                 Ok(e) => e,
                 Err(e) => {

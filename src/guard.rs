@@ -8,11 +8,15 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 
 use crate::engine::Engine;
+use crate::orgmode::client::{OrgApi, OrgApiError};
+use crate::orgmode::policy_cache;
+use crate::orgmode::spool::{Forwarded, Spool};
+use crate::orgmode::state::OrgState;
 use crate::hooks::agent_install::{hooks_dir, install, AgentHookKind};
 use crate::scan::ide::{run_ide_scan, IdeScanOptions};
 
@@ -152,6 +156,86 @@ pub fn tick(home: &Path, roots: &[PathBuf], engine: &Engine, notify: bool) -> Re
     })
 }
 
+/// Ships the hook spool for an enrolled device. Hooks are short-lived
+/// processes, so the guard is what gets their events to Smartflow.
+struct Forwarder {
+    api: OrgApi,
+    group: String,
+    spool: Spool,
+    stopped: bool,
+    last_tally: Option<Instant>,
+    last_pull: Option<Instant>,
+}
+
+const TALLY_EVERY: Duration = Duration::from_secs(60);
+/// Re-pull the signed org policy so hooks see a fresh `issued_at` even
+/// when the version hasn't changed.
+const PULL_EVERY: Duration = Duration::from_secs(600);
+
+impl Forwarder {
+    fn for_enrolled() -> Option<Self> {
+        let state = OrgState::load().ok()??;
+        Some(Self {
+            api: OrgApi::from_state(&state),
+            group: state.policy_group.clone(),
+            spool: Spool::open().ok()?,
+            stopped: false,
+            last_tally: None,
+            last_pull: None,
+        })
+    }
+
+    fn revoked(&mut self, notify: bool) {
+        self.stopped = true;
+        eprintln!("[shield] guard: Smartflow rejected this device (401). Forwarding stopped.");
+        if notify {
+            desktop_notify("Aperion Shield", "This device was revoked by Smartflow. Events are kept locally.");
+        }
+    }
+
+    fn pull_policy(&mut self, rt: &tokio::runtime::Handle, notify: bool) {
+        if self.last_pull.is_some_and(|t| t.elapsed() < PULL_EVERY) {
+            return;
+        }
+        match tokio::task::block_in_place(|| rt.block_on(self.api.get_shieldset(&self.group))) {
+            Ok(signed) => {
+                self.last_pull = Some(Instant::now());
+                if let Err(e) = policy_cache::save(&signed) {
+                    eprintln!("[shield] guard: could not cache org policy: {e}");
+                }
+            }
+            Err(OrgApiError::Unauthorized) => self.revoked(notify),
+            Err(e) => eprintln!("[shield] guard: policy pull failed, will retry: {e}"),
+        }
+    }
+
+    fn tick(&mut self, notify: bool) {
+        if self.stopped {
+            return;
+        }
+        if self.last_tally.is_none_or(|t| t.elapsed() >= TALLY_EVERY) {
+            if let Err(e) = self.spool.flush_allow_counts() {
+                eprintln!("[shield] guard: allow tally flush failed: {e}");
+            }
+            self.last_tally = Some(Instant::now());
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        self.pull_policy(&rt, notify);
+        if self.stopped {
+            return;
+        }
+        let res = tokio::task::block_in_place(|| rt.block_on(self.spool.forward(&self.api)));
+        match res {
+            Ok(Forwarded::Sent(n)) => eprintln!("[shield] guard: forwarded {n} event(s)"),
+            Ok(_) => {}
+            Err(OrgApiError::Unauthorized) => self.revoked(notify),
+            Err(e) => eprintln!("[shield] guard: forward failed, will retry: {e}"),
+        }
+    }
+}
+
 pub fn run(opts: GuardOptions) -> Result<i32> {
     let home = match &opts.home {
         Some(h) => h.clone(),
@@ -161,7 +245,11 @@ pub fn run(opts: GuardOptions) -> Result<i32> {
     let paths = watch_paths(&home, &opts.roots);
     let mut prev = snapshot(&paths);
     let mut first = true;
+    let mut forwarder = Forwarder::for_enrolled();
     loop {
+        if let Some(f) = forwarder.as_mut() {
+            f.tick(opts.notify);
+        }
         let now = snapshot(&paths);
         let changed = changed_since(&prev, &now);
         if first || !changed.is_empty() {

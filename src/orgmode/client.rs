@@ -37,32 +37,65 @@ impl From<reqwest::Error> for OrgApiError {
     }
 }
 
+/// A pulled org shieldset with what's needed to re-verify it offline.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SignedShieldset {
+    pub yaml: String,
+    pub version: u64,
+    /// Unix seconds, signed by the server.
+    pub issued_at: i64,
+    pub group: String,
+    pub signature: String,
+}
+
 pub struct OrgApi {
     http: Client,
     smartflow_url: String,
     vkey: String,
+    /// Server policy-signing key pinned at enrollment (hex Ed25519).
+    bundle_pubkey: Option<String>,
 }
 
 impl OrgApi {
     pub fn new(smartflow_url: impl Into<String>, vkey: impl Into<String>) -> Self {
-        let smartflow_url = smartflow_url.into();
+        Self::build(smartflow_url.into(), vkey.into(), None, None)
+    }
+
+    fn build(
+        smartflow_url: String,
+        vkey: String,
+        identity_pem: Option<Vec<u8>>,
+        bundle_pubkey: Option<String>,
+    ) -> Self {
         if !smartflow_url.starts_with("https://") {
             panic!("Shield refuses a non-HTTPS Smartflow URL ({smartflow_url})");
         }
-        let http = Client::builder()
+        let mut builder = Client::builder()
             .timeout(REQUEST_TIMEOUT)
-            .user_agent(format!("aperion-shield/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("reqwest client build");
+            .user_agent(format!("aperion-shield/{}", env!("CARGO_PKG_VERSION")));
+        if let Some(pem) = identity_pem {
+            match reqwest::Identity::from_pem(&pem) {
+                Ok(id) => builder = builder.identity(id),
+                Err(e) => log::error!("[shield] device certificate unusable, connecting without it: {}", e),
+            }
+        }
         Self {
-            http,
+            http: builder.build().expect("reqwest client build"),
             smartflow_url,
-            vkey: vkey.into(),
+            vkey,
+            bundle_pubkey,
         }
     }
 
+    /// Client for an enrolled device: vkey from the keystore, device
+    /// cert for mTLS, and the pinned policy-signing key.
     pub fn from_state(state: &OrgState) -> Self {
-        Self::new(&state.smartflow_url, &state.vkey)
+        Self::build(
+            state.smartflow_url.clone(),
+            state.vkey(),
+            super::device_identity::identity_pem(),
+            state.bundle_pubkey.clone(),
+        )
     }
 
     fn url(&self, path: &str) -> String {
@@ -94,6 +127,7 @@ impl OrgApi {
     /// Exchange a one-time enrollment token for a virtual key + device
     /// id. Uses the existing `enterprise_device_api::token_enroll`
     /// endpoint -- no new server code required for enrollment itself.
+    #[allow(clippy::too_many_arguments)]
     pub async fn token_enroll(
         smartflow_url: &str,
         enrollment_token: &str,
@@ -101,6 +135,8 @@ impl OrgApi {
         device_name: &str,
         platform: &str,
         user_email: Option<&str>,
+        csr_pem: &str,
+        signing_pubkey: &str,
     ) -> Result<TokenEnrollResponse, OrgApiError> {
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -112,6 +148,8 @@ impl OrgApi {
             "device_name": device_name,
             "platform": platform,
             "user_email": user_email,
+            "csr_pem": csr_pem,
+            "signing_pubkey": signing_pubkey,
         });
         let resp = http
             .post(format!(
@@ -159,7 +197,7 @@ impl OrgApi {
     /// Fetch the current shieldset YAML for a group, returning
     /// `(yaml, version)`. Version comes from the `X-Shield-Policy-Version`
     /// header so the caller can decide whether to hot-reload.
-    pub async fn get_shieldset(&self, group: &str) -> Result<(String, u64), OrgApiError> {
+    pub async fn get_shieldset(&self, group: &str) -> Result<SignedShieldset, OrgApiError> {
         let resp = self
             .http
             .get(self.url(&format!("/api/enterprise/shield/shieldset/{}", group)))
@@ -183,8 +221,30 @@ impl OrgApi {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string()
+        };
+        let signature = header("X-Shield-Policy-Signature");
+        let issued_at: i64 = header("X-Shield-Policy-Issued-At").parse().unwrap_or(0);
         let yaml = resp.text().await?;
-        Ok((yaml, version))
+        if let Some(pk) = &self.bundle_pubkey {
+            if !super::device_identity::verify_shieldset(pk, issued_at, group, yaml.as_bytes(), &signature) {
+                return Err(OrgApiError::Decode(
+                    "shieldset signature does not match the key pinned at enrollment".into(),
+                ));
+            }
+        }
+        Ok(SignedShieldset {
+            yaml,
+            version,
+            issued_at,
+            group: group.to_string(),
+            signature,
+        })
     }
 
     /// Cheap version probe -- no payload. Used by the policy pull loop
@@ -208,13 +268,17 @@ impl OrgApi {
         &self,
         events: &[serde_json::Value],
     ) -> Result<EventsAck, OrgApiError> {
-        let resp = self
+        let body = serde_json::to_vec(&serde_json::json!({ "events": events }))
+            .map_err(|e| OrgApiError::Decode(e.to_string()))?;
+        let mut req = self
             .http
             .post(self.url("/api/enterprise/shield/events"))
             .bearer_auth(&self.vkey)
-            .json(&serde_json::json!({ "events": events }))
-            .send()
-            .await?;
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        if let Some(sig) = super::device_identity::sign_batch(&body) {
+            req = req.header("X-Shield-Signature", sig);
+        }
+        let resp = req.body(body).send().await?;
         self.unwrap_response(resp).await
     }
 
@@ -291,6 +355,12 @@ pub struct TokenEnrollResponse {
     pub policy_version: String,
     #[serde(default)]
     pub policy_ws_url: String,
+    #[serde(default)]
+    pub bundle_pubkey: Option<String>,
+    #[serde(default)]
+    pub client_cert_pem: Option<String>,
+    #[serde(default)]
+    pub ca_cert_pem: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

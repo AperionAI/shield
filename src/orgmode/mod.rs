@@ -43,12 +43,36 @@ pub fn killswitch_latched() -> bool {
 }
 
 pub mod audit_sink;
+pub mod claude_managed;
 pub mod client;
+pub mod device_identity;
 pub mod enroll;
 pub mod heartbeat;
+pub mod keystore;
+pub mod policy_cache;
 pub mod policy_pull;
 pub mod smartflow_provider;
+pub mod spool;
 pub mod state;
+
+/// Write a file readable only by the owner (0600 on Unix), atomically.
+pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp).with_context(|| format!("open {}", tmp.display()))?;
+        std::io::Write::write_all(&mut f, bytes)?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
+    Ok(())
+}
 
 pub use audit_sink::{AuditEvent, AuditSink};
 pub use client::{OrgApi, OrgApiError};
@@ -91,7 +115,11 @@ pub struct EnrolledHandles {
 /// behaviour documented in the strategy memo.
 pub async fn load_initial_engine(state: &OrgState, api: &OrgApi, fallback: Engine) -> Engine {
     match api.get_shieldset(&state.policy_group).await {
-        Ok((yaml, version)) => {
+        Ok(signed) => {
+            if let Err(e) = policy_cache::save(&signed) {
+                log::warn!("[shield] could not cache org policy for hooks: {e}");
+            }
+            let (yaml, version) = (signed.yaml, signed.version);
             log::warn!(
                 "[shield] org-mode policy pulled from {} group={} version={}",
                 state.smartflow_url,

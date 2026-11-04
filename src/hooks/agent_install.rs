@@ -260,7 +260,7 @@ fn wrapper_script(kind: AgentHookKind, baked_bin: Option<&Path>, post: bool) -> 
         return format!(
             r#"@echo off
 REM {marker}
-if "%SHIELD_HOOKS_DISABLE%"=="1" exit /b 0
+REM SHIELD_HOOKS_DISABLE is handled by the binary; enrolled devices ignore it.
 set "BIN={baked}"
 if "%BIN%"=="" goto :find_path
 if exist "%BIN%" goto :run
@@ -287,10 +287,11 @@ if errorlevel 1 (
 # {label} wrapper. Do not edit by hand -- refresh with
 #   aperion-shield --install-agent-hooks
 #
-if [ "${{SHIELD_HOOKS_DISABLE:-}}" = "1" ]; then
-  exit 0
+# SHIELD_HOOKS_DISABLE is handled by the binary; enrolled devices ignore it.
+BIN="{baked}"
+if [ ! -f "${{APERION_SHIELD_HOME:-$HOME/.aperion-shield}}/orgmode.json" ] && [ -n "${{APERION_SHIELD_BIN:-}}" ]; then
+  BIN="$APERION_SHIELD_BIN"
 fi
-BIN="${{APERION_SHIELD_BIN:-{baked}}}"
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
   BIN="$(command -v aperion-shield 2>/dev/null || true)"
 fi
@@ -1034,7 +1035,8 @@ mod tests {
         let script = wrapper_script(AgentHookKind::Claude, None, false);
         assert!(script.contains("permissionDecision\":\"deny\"") || script.contains("fail-closed"));
         assert!(script.contains("exit 2"));
-        assert!(script.contains("SHIELD_HOOKS_DISABLE"));
+        assert!(!script.contains("SHIELD_HOOKS_DISABLE:-"), "the binary decides, not the wrapper");
+        assert!(script.contains("orgmode.json"));
         assert!(script.contains("--check-hook "));
         let post = wrapper_script(AgentHookKind::Cursor, None, true);
         assert!(post.contains("--check-hook-post"));

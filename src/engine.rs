@@ -180,6 +180,16 @@ impl Decision {
             Decision::Block { .. } => "block",
         }
     }
+
+    pub fn severity(&self) -> Option<Severity> {
+        match self {
+            Decision::Allow => None,
+            Decision::Warn { severity, .. }
+            | Decision::Approval { severity, .. }
+            | Decision::IdentityVerification { severity, .. }
+            | Decision::Block { severity, .. } => Some(*severity),
+        }
+    }
 }
 
 /// All adaptive adjustments the engine should apply on top of the raw
@@ -254,6 +264,33 @@ pub struct Policy {
     /// merged in; the killswitch is always hard.
     #[serde(default)]
     pub hard_block: Vec<String>,
+    /// Set by the org on the group shieldset. Ignored in standalone.
+    #[serde(default)]
+    pub org: OrgPolicyCfg,
+}
+
+/// When `regulated`, an enrolled device whose signed policy is older than
+/// `max_policy_age_hours` asks on every agent tool call until it can pull
+/// a fresh one.
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrgPolicyCfg {
+    #[serde(default)]
+    pub regulated: bool,
+    #[serde(default = "default_max_policy_age_hours")]
+    pub max_policy_age_hours: u64,
+}
+
+fn default_max_policy_age_hours() -> u64 {
+    24
+}
+
+impl Default for OrgPolicyCfg {
+    fn default() -> Self {
+        Self {
+            regulated: false,
+            max_policy_age_hours: default_max_policy_age_hours(),
+        }
+    }
 }
 
 /// v1.8. Empty `allow_hosts` means every send destination is unlisted

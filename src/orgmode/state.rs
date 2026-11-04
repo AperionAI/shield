@@ -19,8 +19,9 @@ pub struct OrgState {
     /// `https://smartflow.langsmart.app`. Used for every REST call.
     pub smartflow_url: String,
 
-    /// Virtual key issued by `enterprise_device_api::token_enroll`.
-    /// Sent as `Authorization: Bearer <vkey>` on every request.
+    /// Legacy plaintext vkey. Empty for v1.22+ enrollments, which keep it
+    /// in the OS keystore; read it through [`OrgState::vkey`].
+    #[serde(default)]
     pub vkey: String,
 
     /// Server-assigned device id (uuid v4).
@@ -50,23 +51,41 @@ pub struct OrgState {
     /// Hashed device fingerprint -- prevents the server from issuing
     /// two records for the same physical machine if the user re-enrolls.
     pub device_fingerprint: String,
+
+    /// Server policy-signing key (hex Ed25519) pinned at enrollment.
+    /// Every pulled shieldset must carry a signature from it.
+    #[serde(default)]
+    pub bundle_pubkey: Option<String>,
+}
+
+/// `~/.aperion-shield` (or `APERION_SHIELD_HOME`), created if missing.
+pub fn shield_dir() -> anyhow::Result<PathBuf> {
+    let dir = if let Ok(custom) = std::env::var("APERION_SHIELD_HOME") {
+        PathBuf::from(custom)
+    } else {
+        let mut home = dirs::home_dir().ok_or_else(|| anyhow!("could not resolve home directory"))?;
+        home.push(".aperion-shield");
+        home
+    };
+    std::fs::create_dir_all(&dir).context("create ~/.aperion-shield/")?;
+    Ok(dir)
 }
 
 impl OrgState {
+    /// The vkey: from the keystore, or the file for records written before
+    /// v1.22.
+    pub fn vkey(&self) -> String {
+        if !self.vkey.is_empty() {
+            return self.vkey.clone();
+        }
+        super::device_identity::vkey().unwrap_or_default()
+    }
+
     /// Resolve `~/.aperion-shield/orgmode.json`. Honour the
     /// `APERION_SHIELD_HOME` env override so tests don't write into
     /// the real user home.
     pub fn default_path() -> anyhow::Result<PathBuf> {
-        let dir = if let Ok(custom) = std::env::var("APERION_SHIELD_HOME") {
-            PathBuf::from(custom)
-        } else {
-            let mut home =
-                dirs::home_dir().ok_or_else(|| anyhow!("could not resolve home directory"))?;
-            home.push(".aperion-shield");
-            home
-        };
-        std::fs::create_dir_all(&dir).context("create ~/.aperion-shield/")?;
-        Ok(dir.join(ORG_STATE_FILE))
+        Ok(shield_dir()?.join(ORG_STATE_FILE))
     }
 
     /// Load if present; `Ok(None)` means "not enrolled" (the normal
