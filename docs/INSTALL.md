@@ -10,7 +10,7 @@ Downloads the matching GitHub Release tarball, verifies SHA-256, and drops
 `aperion-shield` onto PATH. Pin a version or relocate:
 
 ```bash
-SHIELD_VERSION=shield-v1.20.0 SHIELD_INSTALL_DIR=~/.local/bin \
+SHIELD_VERSION=shield-v1.23.1 SHIELD_INSTALL_DIR=~/.local/bin \
   curl -fsSL https://shield-get.aperion.ai | sh
 ```
 
@@ -26,6 +26,14 @@ do not go through `$PATH` shims):
 ```bash
 aperion-shield --install-agent-hooks
 aperion-shield --scan-ide
+```
+
+Org laptops, after enroll, as root:
+
+```bash
+sudo aperion-shield --claude-managed-settings --managed-settings-out default
+sudo aperion-shield --cursor-managed-hooks --managed-settings-out default
+sudo aperion-shield --codex-managed-requirements --managed-settings-out default
 ```
 
 Other channels: `brew install AperionAI/tap/aperion-shield`, Docker
