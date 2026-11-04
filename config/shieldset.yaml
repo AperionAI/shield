@@ -79,6 +79,19 @@ shieldset:
     # Tainted or injected sessions still escalate, allowlist or not.
     egress:
       allow_hosts: []
+    # v1.21: hard-block list. At the agent hooks (Claude Code, Cursor,
+    # Codex, Gemini, Copilot) every other Block is turned into an
+    # approve / deny prompt, because agents run in sandboxes and scratch
+    # VMs where a "dangerous" command is often the job. Rules listed here
+    # (exact id or `prefix.*`) stay a hard deny. The Smartflow gateway
+    # uses the same list to decide which streamed tool calls it cuts.
+    # Add ids from the Smartflow policy group to tighten an org.
+    # APERION_SHIELD_HARD_BLOCK (comma-separated) is merged in.
+    hard_block:
+      - tamper.*
+      - shield.self_tamper
+      - shell.reverse_shell
+      - secret.env_to_network
     # v0.9: MCP supply-chain protection. On first contact with an
     # upstream, every tool's (name, description, input schema) is hashed
     # and pinned to ~/.aperion-shield/pins/ (trust-on-first-use). A
@@ -196,7 +209,9 @@ shieldset:
       match:
         tool: [run_terminal, bash, shell, execute_command, exec, git, github.run_command]
         any_param_matches:
-          - '\bgit\s+push\s+.*(--force\b|--force-with-lease\b|\s-f\b)\s+(origin\s+)?(main|master|prod|release/.*)\b'
+          - '\bgit\s+push\b[^;&|\n]*\s(--force(-with-lease)?\S*|-f)\s[^;&|\n]*(\s|:|\+)(main|master|prod|release/\S+)(\s|$)'
+          - '\bgit\s+push\b[^;&|\n]*(\s|:|\+)(main|master|prod|release/\S+)\s[^;&|\n]*(--force(-with-lease)?\S*|-f)(\s|$)'
+          - '\bgit\s+push\b[^;&|\n]*\s\+(\S+:)?(main|master|prod|release/\S+)(\s|$)'
       reason: "Force-push to a protected branch is forbidden."
       safer_alternative: "Open a PR with the corrected history; ask a human to fast-forward main."
 
@@ -515,7 +530,13 @@ shieldset:
         any_param_matches:
           - '(?i)\.aperion-shield(/|\\|\b)'
           - '(?i)\.cursor[/\\]hooks\.json'
-          - '(?i)\.claude[/\\]settings\.json'
+          - '(?i)\.claude[/\\]settings(\.local)?\.json'
+          - '(?i)managed-settings\.json'
+          - '(?i)ClaudeCode[/\\]'
+          - '(?i)claude-code[/\\]managed'
+          - '(?i)disableAllHooks'
+          - '(?i)\.claude[/\\]hooks[/\\]'
+          - '(?i)\.cursor[/\\]hooks[/\\]'
           - '(?i)\.codex[/\\]hooks\.json'
           - '(?i)\.gemini[/\\]settings\.json'
           - '(?i)\.copilot[/\\]hooks\.json'
@@ -982,6 +1003,804 @@ shieldset:
           - '\btwine\s+upload\b'
       reason: "Publishing a package to a public registry -- verify before release."
       safer_alternative: "Publish from a reviewed CI pipeline with provenance, not ad hoc from an agent session."
+
+    # ═════════════════════════════════════════════════════════════════
+    # v1.21 -- extended defaults. At the agent hooks these ask (approve /
+    # deny) unless the id is on policy.hard_block.
+    # ═════════════════════════════════════════════════════════════════
+
+    # ── Disk and filesystem ──────────────────────────────────────────
+    - id: fs.disk_format_or_wipe
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\b(mkfs(\.\w+)?|wipefs|mkswap)\b[^\n]*/dev/'
+          - '\bshred\b[^\n]*\s/dev/'
+          - '\bdiskutil\s+(eraseDisk|eraseVolume|zeroDisk|secureErase|partitionDisk|reformat)\b'
+          - '(^|[\s;&|])>\s*/dev/(sd[a-z]|nvme\d|disk\d|hd[a-z]|xvd[a-z]|vd[a-z])'
+          - '\bsgdisk\s+(-Z|--zap-all)\b'
+          - '\bparted\b[^\n]*\b(mklabel|rm)\b'
+          - '\bblkdiscard\b'
+      reason: "Formats, partitions, or wipes a disk."
+      safer_alternative: "Work on an image file or a throwaway volume. Partition real disks by hand."
+
+    - id: fs.recursive_delete_system_dir
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z-]+\s+)*/(home|Users|etc|usr|var|opt|bin|sbin|lib|lib64|boot|srv|root|System|Library|Applications|private)/?\*?(\s|$|;|&|\|)'
+          - '\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z-]+\s+)*(~|\$HOME)/(\*|Documents|Desktop|Downloads|Library|Pictures|Music|Movies|\.ssh|\.aws|\.gnupg|\.config|\.kube)/?(\s|$|;|&|\|)'
+          - '\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z-]+\s+)*\.\./?(\s|$|;|&|\|)'
+      reason: "Recursive delete of a system directory, a whole home folder, or the parent directory."
+      safer_alternative: "Delete the specific subfolder you mean, e.g. `rm -rf ./build`."
+
+    - id: fs.recursive_delete_wildcard
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z-]+\s+)*(\./)?\*(\s|$|;|&|\|)'
+          - '\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z-]+\s+)*\.(\s|$|;|&|\|)'
+      reason: "Recursive delete of everything in the current directory. Fine if the directory is right."
+      safer_alternative: "Name the directory: `rm -rf ./dist/*`."
+
+    - id: fs.fork_bomb
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - ':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:'
+          - '(?i)%0\|%0'
+      reason: "Fork bomb. It hangs the machine."
+
+    - id: fs.chmod_root_recursive
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bchmod\s+-R\s+\S+\s+/(\s|$|;|&|\|)'
+          - '\bchmod\s+(-R\s+)?0?00\s+/'
+          - '\bchown\s+-R\s+\S+\s+/(\s|$|;|&|\|)'
+      reason: "Recursive permission change on the filesystem root."
+      safer_alternative: "Change permissions on the one path that needs it."
+
+    - id: fs.secure_delete_files
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bshred\s+[^\n]*(-[a-zA-Z]*u|--remove)\b'
+          - '\bsrm\s+-[a-zA-Z]*r'
+          - '\bmv\s+\S+\s+/dev/null\b'
+      reason: "Unrecoverable file delete."
+      safer_alternative: "Move files to a trash folder first. Secure-erase only after review."
+
+    # ── Git and source hosting ───────────────────────────────────────
+    - id: git.delete_remote_protected_branch
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, git]
+        any_param_matches:
+          - '\bgit\s+push\s+\S+\s+(--delete|-d)\s+(main|master|prod|production|develop|release/\S+)\b'
+          - '\bgit\s+push\s+\S+\s+:(main|master|prod|production|develop)\b'
+      reason: "Deletes a protected branch on the remote."
+      safer_alternative: "Protected branches are retired through the hosting UI by a maintainer."
+
+    - id: git.repo_or_release_delete
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, gh.run]
+        any_param_matches:
+          - '(?i)\bgh\s+repo\s+delete\b'
+          - '(?i)\bgh\s+release\s+delete\b'
+          - '(?i)\bglab\s+(repo|project)\s+delete\b'
+          - '(?i)\bgh\s+api\s+[^\n]*-X\s*DELETE[^\n]*/repos/[^\s/]+/[^\s/]+(\s|$|"|'')'
+      reason: "Deletes a repository or release."
+      safer_alternative: "Archive the repository instead. Deleting is a maintainer decision."
+
+    - id: git.branch_protection_removed
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, gh.run]
+        any_param_matches:
+          - '(?i)\bgh\s+api\s+[^\n]*-X\s*DELETE[^\n]*/branches/[^\s/]+/protection'
+          - '(?i)\bgh\s+api\s+[^\n]*/rulesets/\d+[^\n]*-X\s*DELETE'
+      reason: "Removes branch protection or a repository ruleset."
+
+    - id: git.repo_made_public
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, gh.run]
+        any_param_matches:
+          - '(?i)\bgh\s+repo\s+edit\b[^\n]*--visibility[=\s]+public'
+          - '(?i)\bgh\s+repo\s+create\b[^\n]*--public\b'
+          - '(?i)\bgh\s+gist\s+create\b[^\n]*(--public|-p)\b'
+      reason: "Makes code public."
+      safer_alternative: "Keep it private. Publishing code goes through the owner."
+
+    - id: git.hooks_bypass_config
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, git]
+        any_param_matches:
+          - '\bgit\s+config\s+[^\n]*core\.hooksPath\b'
+          - '\bgit\s+(-c\s+\S+\s+)*-c\s+core\.hooksPath='
+      reason: "Points git at a different hooks folder, which turns off pre-commit and pre-push checks."
+
+    - id: git.plaintext_credentials
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, git]
+        any_param_matches:
+          - '\bgit\s+config\s+[^\n]*credential\.helper\s+store\b'
+          - 'https://[^\s/:@]+:[^\s/@]+@(github\.com|gitlab\.com|bitbucket\.org|dev\.azure\.com)'
+      reason: "Stores a git credential in plain text."
+      safer_alternative: "Use the OS credential helper (osxkeychain, manager, libsecret)."
+
+    # ── AWS ───────────────────────────────────────────────────────────
+    - id: cloud.aws_destructive
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli]
+        any_param_matches:
+          - '\baws\s+ec2\s+(terminate-instances|delete-vpc|delete-snapshot|delete-volume|deregister-image)\b'
+          - '\baws\s+dynamodb\s+delete-table\b'
+          - '\baws\s+cloudformation\s+delete-stack\b'
+          - '\baws\s+eks\s+delete-(cluster|nodegroup)\b'
+          - '\baws\s+ecr\s+(delete-repository|batch-delete-image)\b'
+          - '\baws\s+lambda\s+delete-function\b'
+          - '\baws\s+route53\s+delete-hosted-zone\b'
+          - '\baws\s+efs\s+delete-file-system\b'
+          - '\baws\s+elasticache\s+delete-(cache-cluster|replication-group)\b'
+          - '\baws\s+backup\s+delete-(backup-vault|recovery-point)\b'
+          - '\baws\s+organizations\s+(remove-account-from-organization|leave-organization|delete-organization)\b'
+          - '\baws\s+rds\s+delete-db-(instance|cluster|snapshot|cluster-snapshot)\b'
+          - '\baws\s+s3api\s+delete-bucket\b'
+      reason: "Deletes AWS infrastructure or data."
+      safer_alternative: "Snapshot or back up first, and run deletes from a reviewed change, not an agent."
+
+    - id: cloud.aws_key_or_secret_destroy
+      severity: Critical
+      points: 7
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli]
+        any_param_matches:
+          - '\baws\s+kms\s+(schedule-key-deletion|disable-key)\b'
+          - '\baws\s+secretsmanager\s+delete-secret\b[^\n]*--force-delete-without-recovery'
+      reason: "Destroys an encryption key or a secret with no recovery window. Data encrypted with it is lost."
+
+    - id: cloud.aws_public_exposure
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli]
+        any_param_matches:
+          - '(?i)\baws\s+s3api\s+put-bucket-acl\b[^\n]*public-read'
+          - '(?i)\baws\s+s3api\s+delete-public-access-block\b'
+          - '(?i)\baws\s+s3api\s+put-public-access-block\b[^\n]*=false'
+          - '(?i)\baws\s+s3api\s+put-bucket-policy\b[^\n]*"Principal"\s*:\s*"\*"'
+          - '\baws\s+ec2\s+authorize-security-group-ingress\b[^\n]*0\.0\.0\.0/0'
+          - '(?i)\baws\s+s3\s+(cp|sync)\b[^\n]*--acl\s+public-read'
+      reason: "Opens an S3 bucket or a security group to the internet."
+      safer_alternative: "Share through a presigned URL or a scoped CIDR."
+
+    # ── GCP ───────────────────────────────────────────────────────────
+    - id: cloud.gcp_destructive
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, gcloud.run]
+        any_param_matches:
+          - '\bgcloud\s+projects\s+delete\b'
+          - '\bgcloud\s+compute\s+(instances|disks|snapshots|images|networks)\s+delete\b'
+          - '\bgcloud\s+container\s+clusters\s+delete\b'
+          - '\bgcloud\s+(alpha\s+)?storage\s+rm\b[^\n]*(-r|--recursive)\b'
+          - '\bgcloud\s+storage\s+buckets\s+delete\b'
+          - '\bgsutil\s+(-m\s+)?rm\s+(-[a-zA-Z]*r|-[a-zA-Z]*R)'
+          - '\bgsutil\s+rb\b'
+          - '\bgcloud\s+kms\s+keys\s+versions\s+destroy\b'
+          - '\bgcloud\s+secrets\s+delete\b'
+          - '\bgcloud\s+(functions|run\s+services)\s+delete\b'
+          - '\bgcloud\s+spanner\s+(instances|databases)\s+delete\b'
+          - '\bbq\s+rm\b[^\n]*-r'
+      reason: "Deletes GCP projects, infrastructure, keys, or data."
+      safer_alternative: "Export or snapshot first, and delete from the console with a second person."
+
+    # ── Azure ─────────────────────────────────────────────────────────
+    - id: cloud.azure_destructive
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, az.run]
+        any_param_matches:
+          - '\baz\s+(vm|vmss|aks|webapp|functionapp|cosmosdb|redis|acr|disk|snapshot)\s+delete\b'
+          - '\baz\s+storage\s+account\s+delete\b'
+          - '\baz\s+sql\s+(db|server|mi)\s+delete\b'
+          - '\baz\s+(postgres|mysql)\s+(flexible-server|server)\s+delete\b'
+          - '\baz\s+network\s+(vnet|nsg)\s+delete\b'
+          - '\baz\s+keyvault\s+(delete|purge)\b'
+          - '\baz\s+keyvault\s+(key|secret|certificate)\s+purge\b'
+          - '\baz\s+storage\s+(blob|container|fs)\s+delete-batch\b'
+          - '\baz\s+storage\s+container\s+delete\b'
+          - '\baz\s+ad\s+(app|sp|user|group)\s+delete\b'
+          - '\baz\s+deployment\s+group\s+create\b[^\n]*--mode\s+Complete'
+          - '\baz\s+backup\s+(vault|protection)\s+delete\b'
+      reason: "Deletes Azure resources, Entra objects, or Key Vault material."
+      safer_alternative: "Lock production resource groups (`az lock create`) and delete through a reviewed change."
+
+    - id: iam.azure_privileged_role
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, az.run]
+        any_param_matches:
+          - '(?i)\baz\s+role\s+assignment\s+create\b[^\n]*(Owner|Contributor|User\s+Access\s+Administrator|Key\s+Vault\s+Administrator)'
+          - '(?i)\baz\s+ad\s+(sp|app)\s+credential\s+reset\b'
+          - '(?i)\baz\s+ad\s+app\s+permission\s+(admin-consent|grant)\b'
+          - '(?i)\baz\s+rest\b[^\n]*roleManagement/directory/roleAssignments'
+      reason: "Grants an Azure or Entra privileged role, or mints a new app credential."
+      safer_alternative: "Use PIM for time-boxed elevation and least-privilege roles."
+
+    - id: secret.cloud_token_print
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, aws.cli, gcloud.run, az.run]
+        any_param_matches:
+          - '\baz\s+account\s+get-access-token\b'
+          - '\bgcloud\s+auth\s+(print-access-token|print-identity-token)\b'
+          - '\bgcloud\s+auth\s+application-default\s+print-access-token\b'
+          - '\baws\s+configure\s+(export-credentials|get\s+aws_secret_access_key)\b'
+          - '\bkubectl\s+config\s+view\b[^\n]*--raw'
+          - '\bdoctl\s+auth\s+token\b'
+          - '\bvault\s+(token\s+create|print\s+token)\b'
+      reason: "Prints a live cloud access token."
+      safer_alternative: "Let the SDK pick up credentials itself. Do not put tokens in the transcript."
+
+    # ── Infrastructure as code and PaaS ──────────────────────────────
+    - id: cloud.iac_destroy
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, terraform.run]
+        any_param_matches:
+          - '\bpulumi\s+(destroy|down)\b[^\n]*(--yes|-y)\b'
+          - '\bterraform\s+state\s+(rm|push)\b'
+          - '\bterraform\s+apply\b[^\n]*-destroy\b[^\n]*-auto-approve'
+          - '\bterragrunt\s+(run-all\s+)?destroy\b'
+          - '\bcdk\s+destroy\b[^\n]*(--force|-f)\b'
+          - '\b(serverless|sls)\s+remove\b'
+          - '\bcdktf\s+destroy\b[^\n]*--auto-approve'
+      reason: "Tears down infrastructure or rewrites its state file."
+      safer_alternative: "Run a plan, review it, and apply interactively."
+
+    - id: cloud.paas_destroy
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bheroku\s+(apps:destroy|pg:reset|addons:destroy)\b'
+          - '\b(fly|flyctl)\s+(apps\s+destroy|destroy|volumes\s+destroy)\b'
+          - '\bvercel\s+(rm|remove)\b[^\n]*(--yes|-y)\b'
+          - '\bfirebase\s+(projects:delete|database:remove|hosting:disable)\b'
+          - '\bfirebase\s+firestore:delete\b[^\n]*--all-collections'
+          - '\bdoctl\s+[^\n]*\bdelete\b[^\n]*(--force|-f)\b'
+          - '\bnetlify\s+sites:delete\b'
+          - '\bsupabase\s+(db\s+reset|projects\s+delete)\b'
+          - '\brailway\s+(delete|down)\b'
+      reason: "Deletes a hosted app, database, or project."
+
+    # ── Kubernetes and containers ────────────────────────────────────
+    - id: k8s.delete_cluster_scoped
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, kubectl.run]
+        any_param_matches:
+          - '\bkubectl\s+delete\s+(pv|pvc|persistentvolume|persistentvolumeclaim|crd|customresourcedefinition|clusterrole|clusterrolebinding|node|storageclass|validatingwebhookconfiguration|mutatingwebhookconfiguration)s?\b'
+          - '\bkubectl\s+delete\b[^\n]*\s(-A|--all-namespaces)\b'
+          - '\bhelm\s+uninstall\b[^\n]*\s(-A|--all-namespaces)\b'
+      reason: "Deletes cluster-wide objects or storage."
+      safer_alternative: "Delete by name and namespace after checking what depends on it."
+
+    - id: k8s.scale_to_zero
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, kubectl.run]
+        any_param_matches:
+          - '\bkubectl\s+scale\b[^\n]*--replicas[=\s]+0\b'
+      reason: "Scales a workload to zero."
+
+    - id: k8s.privileged_workload
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, kubectl.run]
+        any_param_matches:
+          - '\bkubectl\s+run\b[^\n]*--privileged'
+          - '\bkubectl\s+debug\s+node/'
+          - '\bkubectl\s+(create|apply)\b[^\n]*clusterrolebinding\b[^\n]*cluster-admin'
+          - '\bkubectl\s+create\s+clusterrolebinding\b[^\n]*--clusterrole[=\s]+cluster-admin'
+      reason: "Starts a privileged pod, debugs a node, or grants cluster-admin."
+
+    - id: container.escape_or_privileged
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, docker.run]
+        any_param_matches:
+          - '\b(docker|podman|nerdctl)\s+run\b[^\n]*--privileged\b'
+          - '\b(docker|podman|nerdctl)\s+run\b[^\n]*(-v|--volume)[=\s]+/:/'
+          - '\b(docker|podman|nerdctl)\s+run\b[^\n]*(-v|--volume|--mount)[=\s]+[^\s]*docker\.sock'
+          - '\b(docker|podman|nerdctl)\s+run\b[^\n]*--pid[=\s]+host\b'
+          - '\b(docker|podman|nerdctl)\s+run\b[^\n]*--cap-add[=\s]+(ALL|SYS_ADMIN|SYS_PTRACE)\b'
+          - '\bnsenter\s+[^\n]*(-t\s+1|--target\s+1)\b'
+      reason: "Container that can reach the host (privileged, host root mount, Docker socket, host PID)."
+      safer_alternative: "Mount only the project folder and drop extra capabilities."
+
+    # ── Databases from the shell ─────────────────────────────────────
+    - id: db.shell_destructive_sql
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bdropdb\b'
+          - '(?i)\bmysqladmin\b[^\n]*\bdrop\b'
+          - '(?i)\b(psql|mysql|mariadb|sqlcmd|sqlite3|clickhouse-client|snowsql|cqlsh|duckdb|bq\s+query)\b[^\n]*\b(DROP\s+(DATABASE|SCHEMA|TABLE|KEYSPACE)|TRUNCATE\s+(TABLE\s+)?\w)'
+          - '(?i)\b(psql|mysql|mariadb|sqlcmd|sqlite3)\b[^\n]*\bDELETE\s+FROM\s+[\w."`]+\s*(;|"|''|$)'
+      reason: "Destructive SQL run through a database CLI."
+      safer_alternative: "Back up the table first and add a WHERE clause."
+
+    # ── Persistence ──────────────────────────────────────────────────
+    - id: persistence.scheduled_task
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '\bcrontab\s+-[a-zA-Z]*\s*\S+\.cron'
+          - '\(\s*crontab\s+-l[^\n]*\)\s*\|\s*crontab\s+-'
+          - '\|\s*crontab\s+-(\s|$)'
+          - '(>>?|tee\s+(-a\s+)?)\s*/etc/cron'
+          - '\blaunchctl\s+(load|bootstrap|enable)\b'
+          - '(>>?\s*|tee\s+(-a\s+)?|cp\s+\S+\s+|mv\s+\S+\s+)\S*Library/Launch(Agents|Daemons)/'
+          - '(>>?|tee\s+(-a\s+)?)\s*\S*/etc/systemd/'
+          - '(?i)\bschtasks\s+/create\b'
+          - '(?i)\breg\s+add\b[^\n]*\\(Run|RunOnce|Winlogon)\b'
+          - '(?i)\b(New|Register)-ScheduledTask'
+          - '(?i)\bNew-Service\b'
+      reason: "Installs something that runs on its own later (cron, launchd, systemd, scheduled task, Run key)."
+      safer_alternative: "Add scheduled jobs through config management that someone reviews."
+
+    - id: persistence.crontab_wipe
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bcrontab\s+-r\b'
+      reason: "Removes every cron job for this user."
+
+    - id: persistence.shell_profile_write
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(>>?|tee\s+(-a\s+)?)\s*\S*\.(bashrc|zshrc|bash_profile|zprofile|profile|zshenv|zlogin)\b'
+          - '(?i)(>>?|Add-Content|Set-Content|Out-File)[^\n]*\$PROFILE\b'
+      reason: "Edits a shell startup file. Usually a PATH change, sometimes persistence."
+
+    # ── Host security controls ───────────────────────────────────────
+    - id: security.disable_firewall_extended
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '(?i)\bnetsh\s+advfirewall\s+set\s+\S+\s+state\s+off\b'
+          - '(?i)Set-NetFirewallProfile\b[^\n]*-Enabled\s+(False|\$false|0)'
+          - '\bpfctl\s+-d\b'
+          - '\bsocketfilterfw\s+--setglobalstate\s+off\b'
+          - '\bnft\s+flush\s+ruleset\b'
+          - '\biptables\s+-P\s+INPUT\s+ACCEPT\b'
+      reason: "Turns off the host firewall."
+
+    - id: security.disable_edr_or_mdm
+      severity: High
+      points: 6
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '(?i)\bAdd-MpPreference\b[^\n]*-Exclusion(Path|Process|Extension)'
+          - '(?i)Set-MpPreference\b[^\n]*-(DisableIOAVProtection|DisableBehaviorMonitoring|DisableScriptScanning|MAPSReporting\s+0)'
+          - '(?i)\bsystemctl\s+(stop|disable|mask)\s+(falcon-sensor|sentinelone|sentinel-agent|osqueryd|wazuh-agent|clamav-daemon|mdatp|cbagentd|elastic-agent|zscaler)\b'
+          - '(?i)\b(launchctl\s+(unload|bootout|remove)|killall|pkill)\b[^\n]*(falcon|crowdstrike|sentinel|jamf|intune|mdatp|wdav|carbonblack|cbagent|zscaler|netskope|kandji|elastic-agent)'
+          - '(?i)\bsc(\.exe)?\s+(stop|delete|config)\s+(WinDefend|Sense|MsMpSvc|CSFalconService|SentinelAgent|CbDefense|IntuneManagementExtension)\b'
+          - '(?i)\bprofiles\s+(remove|-R)\b'
+          - '(?i)\bjamf\s+removeFramework\b'
+          - '(?i)\bmdatp\s+config\s+real-time-protection\s+--value\s+disabled'
+      reason: "Disables endpoint protection or removes device management."
+      safer_alternative: "Ask security for a scoped exclusion. Never turn the agent off."
+
+    - id: security.gatekeeper_quarantine_strip
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bxattr\s+[^\n]*-d\s+com\.apple\.quarantine'
+          - '\bxattr\s+-c[r]?\b'
+          - '(?i)\bUnblock-File\b'
+      reason: "Strips the download quarantine flag so an unsigned binary runs without a prompt."
+
+    - id: audit.disable_extended
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run, aws.cli, gcloud.run, az.run]
+        any_param_matches:
+          - '\bauditctl\s+-e\s*0\b'
+          - '\bsystemctl\s+(stop|disable|mask)\s+(rsyslog|syslog-ng|systemd-journald)\b'
+          - '(?i)\bwevtutil\s+(sl|set-log)\b[^\n]*/e:false'
+          - '(?i)\bauditpol\s+/(clear|remove)\b'
+          - '\baz\s+monitor\s+diagnostic-settings\s+delete\b'
+          - '\bgcloud\s+logging\s+(logs|buckets)\s+delete\b'
+          - '\baws\s+logs\s+delete-log-group\b'
+          - '\baws\s+guardduty\s+delete-detector\b'
+          - '\baws\s+securityhub\s+disable-security-hub\b'
+          - '\baws\s+s3api\s+put-bucket-logging\b[^\n]*"\{\s*\}"'
+      reason: "Turns off audit logging or a cloud detection service."
+
+    # ── Ransomware-style backup destruction ─────────────────────────
+    - id: win.backup_destroy
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '(?i)\bvssadmin\s+(delete\s+shadows|resize\s+shadowstorage)\b'
+          - '(?i)\bwmic\s+shadowcopy\s+delete\b'
+          - '(?i)Win32_ShadowCopy[^\n]*\.?Delete'
+          - '(?i)\bwbadmin\s+delete\s+(catalog|systemstatebackup|backup)\b'
+          - '(?i)\bbcdedit\b[^\n]*(recoveryenabled\s+no|bootstatuspolicy\s+ignoreallfailures)'
+          - '\btmutil\s+(delete|deletelocalsnapshots|disable)\b'
+      reason: "Deletes OS backups or recovery points. This is what ransomware does first."
+
+    - id: win.format_drive
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '(?i)(^|[\s;&|])format(\.com)?\s+[a-z]:'
+          - '(?i)\bdiskpart\b'
+          - '(?i)\b(Clear-Disk|Initialize-Disk)\b'
+          - '(?i)\bRemove-Item\b[^\n]*\s[A-Za-z]:\\\*?(\s|$|"|'')'
+          - '(?i)\b(rd|rmdir)\s+/s\s+/q\s+[A-Za-z]:\\(\s|$|Windows|Users)'
+      reason: "Formats a drive or wipes a drive root on Windows."
+
+    # ── Obfuscated execution ─────────────────────────────────────────
+    - id: exec.decode_and_run
+      severity: Critical
+      points: 7
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '\bbase64\s+(-d|--decode|-D)\b[^\n]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b'
+          - '\|\s*base64\s+(-d|--decode|-D)\s*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b'
+          - '(?i)\bpowershell(\.exe)?\b[^\n]*\s-(e|ec|enc|encodedcommand)\s+[A-Za-z0-9+/=]{20,}'
+          - '(?i)\bpwsh\b[^\n]*\s-(e|ec|enc|encodedcommand)\s+[A-Za-z0-9+/=]{20,}'
+          - '(?i)\bpython[0-9.]*\s+-c\s+[^\n]*(exec|eval)\s*\(\s*(base64|codecs|zlib|__import__)'
+          - '\beval\s+"?\$\(\s*(echo|printf)\s+[^\n]*\|\s*(base64|xxd|rev)\b'
+          - '\bxxd\s+-r\s+-p\b[^\n]*\|\s*(ba|z)?sh\b'
+          - '(?i)\bperl\s+-e\s+[^\n]*(decode_base64|pack\s*\(\s*.H)'
+      reason: "Decodes a hidden payload and runs it."
+      safer_alternative: "Write the script out in plain text so it can be read before it runs."
+
+    # ── Exposure and exfiltration ────────────────────────────────────
+    - id: egress.public_tunnel
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(?i)\bngrok\s+(http|tcp|tls|start)\b'
+          - '(?i)\bcloudflared\s+tunnel\b'
+          - '(?i)\b(lt|localtunnel)\s+--port\b'
+          - '(?i)\bbore\s+local\b'
+          - '(?i)\btailscale\s+funnel\b'
+          - '(?i)\b(frpc|chisel\s+(client|server))\b'
+          - '(?i)\bssh\s+[^\n]*-R\s+\S*\d+:'
+          - '(?i)\b(serveo\.net|localhost\.run|pinggy\.io)\b'
+      reason: "Exposes a local port to the internet through a tunnel."
+      safer_alternative: "Use the company VPN or a reviewed staging host."
+
+    - id: egress.drop_site
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, http_request, web_fetch, fetch]
+        any_param_matches:
+          - '(?i)\b(transfer\.sh|0x0\.st|file\.io|tmpfiles\.org|bashupload\.com|pastebin\.com|paste\.ee|hastebin\.com|ghostbin|termbin\.com|dpaste\.(com|org)|catbox\.moe|gofile\.io|anonfiles)\b'
+          - '(?i)\b(webhook\.site|requestbin|pipedream\.net|beeceptor\.com|interact\.sh|oast\.(fun|pro|live|site|online|me)|burpcollaborator\.net|canarytokens)\b'
+          - '(?i)\b(ngrok-free\.app|ngrok\.io|trycloudflare\.com|loca\.lt)\b'
+          - '(?i)discord(app)?\.com/api/webhooks/'
+          - '(?i)hooks\.slack\.com/services/'
+          - '(?i)api\.telegram\.org/bot'
+      reason: "Talks to a paste site, request catcher, tunnel host, or chat webhook. Common exfiltration targets."
+
+    - id: egress.bulk_upload
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\b(rsync|scp)\s+[^\n]*\s(~|\$HOME)/?(\s|\.ssh|\.aws|\.gnupg|\.config|\.kube|Documents|Desktop)\S*\s+\S+:'
+          - '\brclone\s+(copy|sync|move)\b[^\n]*\s\S+:'
+          - '\bcurl\s+[^\n]*\s(-T|--upload-file)\s'
+          - '\b(tar|zip)\s+[^\n]*\|\s*(curl|nc|ncat|ssh)\b'
+      reason: "Uploads local files off the machine."
+
+    - id: egress.listener_or_relay
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\b(nc|ncat|netcat)\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*l[a-zA-Z]*\b'
+          - '(?i)\bsocat\s+[^\n]*(TCP4?-LISTEN|EXEC:|SYSTEM:)'
+      reason: "Opens a raw network listener or relay."
+
+    - id: egress.local_http_server
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bpython[0-9.]*\s+-m\s+(http\.server|SimpleHTTPServer)\b'
+          - '\bphp\s+-S\s+0\.0\.0\.0'
+      reason: "Serves the current folder over HTTP to the network."
+
+    # ── Credentials ──────────────────────────────────────────────────
+    - id: secret.os_credential_store
+      severity: High
+      points: 6
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run, filesystem.read_file, fs.read, read_file]
+        any_param_matches:
+          - '(?i)\b(mimikatz|lazagne|sekurlsa|rubeus|secretsdump)\b'
+          - '(?i)\bprocdump\b[^\n]*lsass'
+          - '(?i)comsvcs(\.dll)?[^\n]*MiniDump'
+          - '(?i)\breg\s+save\s+HKLM\\(SAM|SYSTEM|SECURITY)\b'
+          - '(^|[\s/])/etc/(shadow|gshadow|master\.passwd)\b'
+          - '\bdscl\s+\.\s+-read\s+/Users/\S+\s+ShadowHashData'
+          - '(?i)\bcmdkey\s+/list\b'
+          - '(?i)\bvaultcmd\s+/list'
+      reason: "Dumps OS password hashes or the credential store."
+
+    - id: secret.shell_history_read
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, filesystem.read_file, fs.read, read_file]
+        any_param_matches:
+          - '\.(bash_history|zsh_history|psql_history|mysql_history|python_history|node_repl_history|sqlite_history|rediscli_history)\b'
+          - '(?i)ConsoleHost_history\.txt'
+      reason: "Reads shell or database history, which often holds pasted passwords and tokens."
+
+    - id: secret.literal_in_args
+      severity: High
+      points: 4
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run, fs.write, write_file, filesystem.write_file]
+        any_param_matches:
+          - '-----BEGIN\s+(RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|ENCRYPTED\s+|PGP\s+)?PRIVATE\s+KEY'
+          - '\bAKIA[0-9A-Z]{16}\b'
+          - '\bASIA[0-9A-Z]{16}\b'
+          - '\bgh[pousr]_[A-Za-z0-9]{36,}\b'
+          - '\bgithub_pat_[A-Za-z0-9_]{60,}\b'
+          - '\bglpat-[0-9A-Za-z_-]{20,}\b'
+          - '\bxox[baprs]-[A-Za-z0-9-]{10,}'
+          - '\bsk-(proj-|ant-api\d\d-)[A-Za-z0-9_-]{32,}'
+          - '\bAIza[0-9A-Za-z_-]{35}\b'
+          - '\b(sk|rk)_live_[0-9a-zA-Z]{24,}\b'
+          - '\bnpm_[A-Za-z0-9]{36}\b'
+          - '(?i)\bDefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{40,}'
+          - '(?i)\b(mongodb(\+srv)?|postgres(ql)?|mysql|redis|rediss|amqps?)://[^\s:/@]+:[^\s@/]{6,}@'
+      reason: "A live credential is in the tool arguments."
+      safer_alternative: "Reference the secret by environment variable or vault path."
+
+    # ── Privilege ────────────────────────────────────────────────────
+    - id: privilege.sudoers_nopasswd
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - 'NOPASSWD:\s*ALL'
+          - '\bvisudo\b'
+      reason: "Grants passwordless sudo."
+
+    - id: privilege.account_change
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '\buseradd\b[^\n]*(-o\s+)?-u\s*0\b'
+          - '(^|[\s;&|])(sudo\s+)?(passwd|chpasswd)(\s+root)?(\s|$)'
+          - '\bdscl\s+\.\s+-(create|append)\s+/Groups/admin\b'
+          - '\bdseditgroup\s+[^\n]*-a\s+\S+\s+[^\n]*admin\b'
+          - '(?i)\bnet\s+localgroup\s+administrators\s+\S+\s+/add\b'
+          - '(?i)\bnet\s+user\s+\S+\s+\S+\s+/add\b'
+          - '(?i)\bAdd-LocalGroupMember\b[^\n]*Administrators'
+      reason: "Creates an account, changes a password, or adds an admin."
+
+    # ── Supply chain ─────────────────────────────────────────────────
+    - id: supply.install_from_url
+      severity: High
+      points: 3
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\b(pip3?|uv\s+pip|pipx)\s+install\b[^\n]*\s(https?://\S+\.(whl|tar\.gz|zip)|git\+\S+)'
+          - '\b(npm|pnpm|yarn|bun)\s+(i|install|add)\b[^\n]*\s(https?://\S+\.(tgz|tar\.gz|zip)|git\+\S+|github:\S+)'
+          - '\b(curl|wget)\s+[^\n]*\s-(o|O)\s*/usr/(local/)?s?bin/'
+          - '\b(curl|wget)\s+[^\n]*>\s*/usr/(local/)?s?bin/'
+          - '\bgo\s+install\s+[^\n]*@[0-9a-f]{12,}'
+      reason: "Installs a package or binary straight from a URL, skipping the registry."
+
+    - id: supply.tls_verification_off
+      severity: Medium
+      points: 2
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\b(curl)\b[^\n]*\s(-k|--insecure)\b'
+          - '\bwget\b[^\n]*--no-check-certificate\b'
+          - '(?i)\bnpm\s+config\s+set\s+strict-ssl\s+false\b'
+          - '(?i)\bgit\s+config\s+[^\n]*http\.sslVerify\s+false\b'
+          - '(?i)\bpip3?\s+[^\n]*--trusted-host\b'
+          - 'NODE_TLS_REJECT_UNAUTHORIZED=0'
+          - 'PYTHONHTTPSVERIFY=0'
+          - 'GIT_SSL_NO_VERIFY=(1|true)'
+      reason: "Turns off TLS certificate checks."
+
+    - id: abuse.crypto_miner
+      severity: High
+      points: 6
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '(?i)\b(xmrig|minerd|cpuminer|ethminer|nbminer|t-rex|lolminer|phoenixminer|cgminer|bfgminer|nicehash)\b'
+          - '(?i)stratum\+(tcp|ssl)://'
+      reason: "Starts a cryptocurrency miner."
+
+    # ── Agents and governance ────────────────────────────────────────
+    - id: agent.nested_unrestricted
+      severity: High
+      points: 5
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec]
+        any_param_matches:
+          - '\bclaude\b[^\n]*--dangerously-skip-permissions\b'
+          - '\bclaude\b[^\n]*--permission-mode[=\s]+bypassPermissions\b'
+          - '\bcursor-agent\b[^\n]*(--force|--yolo)\b'
+          - '\bcodex\b[^\n]*(--dangerously-bypass-approvals-and-sandbox|--yolo)\b'
+          - '\bgemini\b[^\n]*(--yolo|\s-y)\b'
+          - '\baider\b[^\n]*--yes-always\b'
+      reason: "Starts another coding agent with its approval prompts turned off."
+      safer_alternative: "Run the sub-agent with normal permissions so Shield still sees its actions."
+
+    - id: tamper.gateway_bypass
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run]
+        any_param_matches:
+          - '(?i)\bunset\s+(ANTHROPIC_BASE_URL|OPENAI_BASE_URL|AZURE_OPENAI_ENDPOINT)\b'
+          - '(?i)\bANTHROPIC_BASE_URL=["'']?https?://api\.anthropic\.com'
+          - '(?i)\bOPENAI_BASE_URL=["'']?https?://api\.openai\.com'
+          - '(?i)\bRemove-Item\s+Env:\\?(ANTHROPIC_BASE_URL|OPENAI_BASE_URL)'
+          - '(?i)"(ANTHROPIC_BASE_URL|apiKeyHelper)"\s*:\s*"https?://api\.anthropic\.com'
+      reason: "Points the agent straight at the model provider, skipping the Smartflow gateway."
+      safer_alternative: "Agents go through the company gateway. Ask an admin if a provider is missing."
+
+    - id: tamper.browser_extension_policy
+      severity: Critical
+      points: 8
+      where: tool_call
+      match:
+        tool: [run_terminal, bash, shell, execute_command, exec, powershell.run, write_file, fs.write, filesystem.write_file]
+        any_param_matches:
+          - '(?i)Policies[\\/]+Microsoft[\\/]+Edge'
+          - '(?i)Policies[\\/]+Google[\\/]+Chrome'
+          - '(?i)com\.microsoft\.Edge(\.plist)?'
+          - '(?i)com\.google\.Chrome(\.plist)?'
+          - '(?i)/etc/opt/(chrome|edge)/policies'
+          - '(?i)ExtensionInstallForcelist'
+      reason: "Changes browser policy or the Smartflow browser extension."
+      safer_alternative: "Browser policy is managed by IT through MDM."
+
+    - id: llm.suggests_disable_security
+      severity: Medium
+      points: 2
+      where: llm_response
+      match:
+        text_matches:
+          - '(?i)\b(disable|turn\s+off|uninstall|kill)\s+(the\s+)?(firewall|antivirus|defender|selinux|gatekeeper|sip|edr|crowdstrike|falcon|sentinelone|aperion\s+shield|smartflow)\b'
+          - '(?i)--dangerously-skip-permissions'
+      reason: "Assistant suggests turning off a security control."
 
     # ═════════════════════════════════════════════════════════════════
     # Anomaly -- burst

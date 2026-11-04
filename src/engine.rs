@@ -248,6 +248,12 @@ pub struct Policy {
     /// `APERION_SHIELD_EGRESS_ALLOW` (comma-separated), merged in.
     #[serde(default)]
     pub egress: EgressCfg,
+    /// Rule ids (or `prefix.*`) that stay a hard deny at the agent hooks.
+    /// Anything else that resolves to Block is turned into an approve /
+    /// deny prompt. `APERION_SHIELD_HARD_BLOCK` (comma-separated) is
+    /// merged in; the killswitch is always hard.
+    #[serde(default)]
+    pub hard_block: Vec<String>,
 }
 
 /// v1.8. Empty `allow_hosts` means every send destination is unlisted
@@ -453,6 +459,9 @@ pub struct YamlRule {
     /// lookup, callback server, hold-then-surface).
     #[serde(default)]
     pub identity: Option<IdentityRequirement>,
+    /// Same as listing this id under `policy.hard_block`.
+    #[serde(default)]
+    pub hard_block: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -524,6 +533,7 @@ pub struct CompiledRule {
     /// majority of rules; Some for the small set the customer explicitly
     /// wires to biometric verification.
     pub identity: Option<IdentityRequirement>,
+    pub hard_block: bool,
     matcher: Option<Match>,
 }
 
@@ -771,10 +781,32 @@ impl Engine {
                 reason: y.reason,
                 safer_alternative: y.safer_alternative,
                 identity: y.identity,
+                hard_block: y.hard_block,
                 matcher,
             });
         }
         Ok(rules)
+    }
+
+    /// True when a decision on this rule must stay a hard deny at the agent
+    /// hooks instead of becoming an approve / deny prompt.
+    pub fn is_hard_block(&self, rule_id: &str) -> bool {
+        if rule_id == "killswitch" {
+            return true;
+        }
+        if self.rules.iter().any(|r| r.id == rule_id && r.hard_block) {
+            return true;
+        }
+        let env = std::env::var("APERION_SHIELD_HARD_BLOCK").unwrap_or_default();
+        self.policy
+            .hard_block
+            .iter()
+            .map(|s| s.as_str())
+            .chain(env.split(',').map(str::trim).filter(|s| !s.is_empty()))
+            .any(|pat| match pat.strip_suffix('*') {
+                Some(prefix) => rule_id.starts_with(prefix),
+                None => pat == rule_id,
+            })
     }
 
     /// Bundled defaults -- the same YAML used by the enterprise build,

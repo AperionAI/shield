@@ -65,6 +65,7 @@ pub fn start_policy_pull(
 
             // Killswitch publishes independently so we can react fast
             // without re-pulling policy.
+            crate::orgmode::set_killswitch(probe.killswitch.on);
             let _ = ks_tx.send(probe.killswitch.on);
             if probe.killswitch.on {
                 log::warn!(

@@ -32,6 +32,16 @@
 
 #![allow(clippy::module_inception)]
 
+static KILL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_killswitch(on: bool) {
+    KILL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn killswitch_latched() -> bool {
+    KILL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub mod audit_sink;
 pub mod client;
 pub mod enroll;

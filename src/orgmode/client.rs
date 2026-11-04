@@ -45,6 +45,10 @@ pub struct OrgApi {
 
 impl OrgApi {
     pub fn new(smartflow_url: impl Into<String>, vkey: impl Into<String>) -> Self {
+        let smartflow_url = smartflow_url.into();
+        if !smartflow_url.starts_with("https://") {
+            panic!("Shield refuses a non-HTTPS Smartflow URL ({smartflow_url})");
+        }
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .user_agent(format!("aperion-shield/{}", env!("CARGO_PKG_VERSION")))
@@ -52,7 +56,7 @@ impl OrgApi {
             .expect("reqwest client build");
         Self {
             http,
-            smartflow_url: smartflow_url.into(),
+            smartflow_url,
             vkey: vkey.into(),
         }
     }
