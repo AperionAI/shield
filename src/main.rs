@@ -596,6 +596,20 @@ struct Cli {
     #[arg(long, conflicts_with = "guard", conflicts_with = "check_hook")]
     install_guard: bool,
 
+    /// Root watchdog: restores protected managed settings and restarts
+    /// enrolled users' guards. Run by the system service.
+    #[arg(long, conflicts_with = "check_hook")]
+    watchdog: bool,
+
+    /// One watchdog pass, then exit.
+    #[arg(long, conflicts_with = "check_hook")]
+    watchdog_once: bool,
+
+    /// Install and load the watchdog as a LaunchDaemon / systemd system
+    /// unit. Run as root.
+    #[arg(long, conflicts_with = "check_hook")]
+    install_watchdog: bool,
+
     /// Unload and delete the user watcher unit.
     #[arg(long, conflicts_with = "install_guard", conflicts_with = "guard")]
     uninstall_guard: bool,
@@ -751,8 +765,8 @@ struct Cli {
     status: bool,
 
     /// Remove the local org-mode enrollment record (turns this Shield
-    /// back into a standalone). Use `--revoke` to also revoke the vkey
-    /// server-side.
+    /// back into a standalone). Only works after an admin has revoked
+    /// this device in Smartflow; Shield checks before removing anything.
     #[arg(
         long,
         conflicts_with = "upstream",
@@ -761,9 +775,7 @@ struct Cli {
     )]
     disenroll: bool,
 
-    /// When used with `--disenroll`, also calls
-    /// `DELETE /api/enterprise/devices/{id}` to revoke the vkey on
-    /// Smartflow before removing the local record.
+    /// Removed. Devices are revoked by an admin in Smartflow.
     #[arg(long, requires = "disenroll")]
     revoke: bool,
 
@@ -779,9 +791,15 @@ struct Cli {
     #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
     claude_managed_settings: bool,
 
-    /// Write the managed settings to this path instead of stdout. Pass
-    /// `default` for the OS location (needs admin rights).
-    #[arg(long, value_name = "PATH", requires = "claude_managed_settings")]
+    /// Print Cursor's system (MDM) hooks.json running Shield. User and
+    /// project hooks can't override a deny from it.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "claude_managed_settings")]
+    cursor_managed_hooks: bool,
+
+    /// Write `--claude-managed-settings` / `--cursor-managed-hooks` output
+    /// to this path instead of stdout. `default` writes the OS location
+    /// and registers it with the watchdog (needs admin rights).
+    #[arg(long, value_name = "PATH")]
     managed_settings_out: Option<String>,
 
     /// Corporate CA bundle for the gateway's server certificate, set as
@@ -1206,6 +1224,16 @@ async fn main() -> anyhow::Result<()> {
         let exit_code = run_install_guard(&cli)?;
         std::process::exit(exit_code);
     }
+    if cli.watchdog || cli.watchdog_once {
+        let exit_code = aperion_shield::watchdog::run(Duration::from_secs(10), cli.watchdog_once && !cli.watchdog)?;
+        std::process::exit(exit_code);
+    }
+    if cli.install_watchdog {
+        let bin = std::env::current_exe()?;
+        let path = aperion_shield::watchdog::install(&bin.canonicalize().unwrap_or(bin))?;
+        eprintln!("[shield] watchdog installed: {}", path.display());
+        std::process::exit(0);
+    }
     if cli.uninstall_guard {
         let exit_code = run_uninstall_guard(&cli)?;
         std::process::exit(exit_code);
@@ -1269,25 +1297,38 @@ async fn main() -> anyhow::Result<()> {
         println!("{key}");
         return Ok(());
     }
-    if cli.claude_managed_settings {
+    if cli.claude_managed_settings || cli.cursor_managed_hooks {
         let state = OrgState::load()?.ok_or_else(|| anyhow!("not enrolled"))?;
-        let settings = orgmode::claude_managed::for_enrolled(&state, cli.gateway_ca.as_deref())?;
+        let (settings, default_path, label) = if cli.cursor_managed_hooks {
+            (orgmode::claude_managed::cursor_for_enrolled()?, orgmode::claude_managed::cursor_default_path(), "Cursor system hooks")
+        } else {
+            (
+                orgmode::claude_managed::for_enrolled(&state, cli.gateway_ca.as_deref())?,
+                orgmode::claude_managed::default_path(),
+                "Claude Code managed settings",
+            )
+        };
         let body = serde_json::to_string_pretty(&settings)? + "\n";
         match cli.managed_settings_out.as_deref() {
             None => print!("{body}"),
             Some(out) => {
                 let path = if out == "default" {
-                    orgmode::claude_managed::default_path()
+                    default_path
                 } else {
                     PathBuf::from(out)
                 };
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir)
-                        .with_context(|| format!("create {} (needs admin rights?)", dir.display()))?;
+                if out == "default" {
+                    aperion_shield::watchdog::protect(&aperion_shield::watchdog::system_dir(), &path, body.as_bytes())
+                        .context("needs admin rights")?;
+                } else {
+                    if let Some(dir) = path.parent() {
+                        std::fs::create_dir_all(dir)
+                            .with_context(|| format!("create {} (needs admin rights?)", dir.display()))?;
+                    }
+                    std::fs::write(&path, body)
+                        .with_context(|| format!("write {} (needs admin rights?)", path.display()))?;
                 }
-                std::fs::write(&path, body)
-                    .with_context(|| format!("write {} (needs admin rights?)", path.display()))?;
-                eprintln!("[shield] wrote Claude Code managed settings to {}", path.display());
+                eprintln!("[shield] wrote {label} to {}", path.display());
             }
         }
         return Ok(());
@@ -2604,6 +2645,9 @@ fn hook_engine(cli: &Cli) -> anyhow::Result<(Engine, Option<String>, bool)> {
             eprintln!("[shield] org mode: --rules / --rules-extra ignored; the org policy applies");
         }
         let p = policy_cache::for_hook(&state, policy_cache::load_raw(), chrono::Utc::now().timestamp());
+        if p.killswitch {
+            aperion_shield::orgmode::set_killswitch(true);
+        }
         return Ok((p.engine, p.ask_reason, true));
     }
     Ok((load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?, None, false))

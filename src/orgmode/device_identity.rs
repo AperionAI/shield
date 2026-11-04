@@ -22,6 +22,7 @@ const VKEY: &str = "vkey";
 /// Must match the server's `EVENTS_SIG_DOMAIN` / `SHIELDSET_SIG_DOMAIN`.
 const EVENTS_SIG_DOMAIN: &[u8] = b"aperion-shield-events-v1\n";
 const SHIELDSET_SIG_DOMAIN: &[u8] = b"aperion-shieldset-v2\n";
+const KILLSWITCH_SIG_DOMAIN: &[u8] = b"aperion-shield-killswitch-v1\n";
 
 pub struct Pending {
     pub tls_key_pem: String,
@@ -120,6 +121,17 @@ fn shieldset_message(issued_at: i64, group: &str, body: &[u8]) -> Vec<u8> {
 /// server key pinned at enrollment. The signature covers the issue time
 /// and the group as well as the YAML.
 pub fn verify_shieldset(pubkey_hex: &str, issued_at: i64, group: &str, body: &[u8], header: &str) -> bool {
+    verify_ed25519(pubkey_hex, &shieldset_message(issued_at, group, body), header)
+}
+
+/// Check `X-Shield-Killswitch-Signature` for the state served with a shieldset.
+pub fn verify_killswitch(pubkey_hex: &str, issued_at: i64, group: &str, on: bool, header: &str) -> bool {
+    let mut msg = KILLSWITCH_SIG_DOMAIN.to_vec();
+    msg.extend_from_slice(format!("{issued_at}\n{group}\n{}", if on { "on" } else { "off" }).as_bytes());
+    verify_ed25519(pubkey_hex, &msg, header)
+}
+
+fn verify_ed25519(pubkey_hex: &str, msg: &[u8], header: &str) -> bool {
     use base64::Engine;
     let Some(b64) = header.trim().strip_prefix("ed25519:") else { return false };
     let Ok(sig) = base64::engine::general_purpose::STANDARD.decode(b64) else { return false };
@@ -127,7 +139,7 @@ pub fn verify_shieldset(pubkey_hex: &str, issued_at: i64, group: &str, body: &[u
     let Ok(pk) = hex::decode(pubkey_hex) else { return false };
     let Ok(pk) = <[u8; 32]>::try_from(pk.as_slice()) else { return false };
     let Ok(vk) = VerifyingKey::from_bytes(&pk) else { return false };
-    vk.verify(&shieldset_message(issued_at, group, body), &sig).is_ok()
+    vk.verify(msg, &sig).is_ok()
 }
 
 #[cfg(test)]

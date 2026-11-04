@@ -19,6 +19,8 @@ pub struct HookPolicy {
     pub engine: Engine,
     /// Set when every tool call should ask, with the reason to show.
     pub ask_reason: Option<String>,
+    /// The signed policy carried killswitch = on.
+    pub killswitch: bool,
 }
 
 fn path() -> anyhow::Result<PathBuf> {
@@ -29,6 +31,14 @@ pub fn save(s: &SignedShieldset) -> anyhow::Result<()> {
     super::write_private(&path()?, &serde_json::to_vec(s)?)
 }
 
+pub fn remove() -> anyhow::Result<()> {
+    let p = path()?;
+    if p.exists() {
+        std::fs::remove_file(p)?;
+    }
+    Ok(())
+}
+
 pub fn load_raw() -> Option<SignedShieldset> {
     serde_json::from_slice(&std::fs::read(path().ok()?).ok()?).ok()
 }
@@ -37,6 +47,7 @@ pub fn load_raw() -> Option<SignedShieldset> {
 pub fn for_hook(state: &OrgState, cached: Option<SignedShieldset>, now: i64) -> HookPolicy {
     let fallback = |why: &str| HookPolicy {
         engine: Engine::builtin_default(),
+        killswitch: false,
         ask_reason: Some(format!(
             "{why} Shield is asking on every tool call until the guard pulls a fresh policy from Smartflow."
         )),
@@ -47,9 +58,16 @@ pub fn for_hook(state: &OrgState, cached: Option<SignedShieldset>, now: i64) -> 
     if s.group != state.policy_group {
         return fallback("The cached org policy is for a different group.");
     }
+    let mut killswitch = false;
     if let Some(pk) = &state.bundle_pubkey {
         if !super::device_identity::verify_shieldset(pk, s.issued_at, &s.group, s.yaml.as_bytes(), &s.signature) {
             return fallback("The cached org policy failed its signature check.");
+        }
+        if let Some(on) = s.killswitch {
+            if !super::device_identity::verify_killswitch(pk, s.issued_at, &s.group, on, &s.killswitch_signature) {
+                return fallback("The cached killswitch state failed its signature check.");
+            }
+            killswitch = on;
         }
     }
     let engine = match Engine::from_yaml(&s.yaml) {
@@ -66,7 +84,7 @@ pub fn for_hook(state: &OrgState, cached: Option<SignedShieldset>, now: i64) -> 
             org.max_policy_age_hours
         )
     });
-    HookPolicy { engine, ask_reason }
+    HookPolicy { engine, ask_reason, killswitch }
 }
 
 #[cfg(test)]
@@ -103,7 +121,38 @@ mod tests {
                 "ed25519:{}",
                 base64::engine::general_purpose::STANDARD.encode(sk.sign(&msg).to_bytes())
             ),
+            killswitch: None,
+            killswitch_signature: String::new(),
         }
+    }
+
+    fn with_killswitch(sk: &ed25519_dalek::SigningKey, mut s: SignedShieldset, on: bool) -> SignedShieldset {
+        use base64::Engine as _;
+        use ed25519_dalek::Signer;
+        let mut msg = b"aperion-shield-killswitch-v1\n".to_vec();
+        msg.extend_from_slice(format!("{}\n{}\n{}", s.issued_at, s.group, if on { "on" } else { "off" }).as_bytes());
+        s.killswitch = Some(on);
+        s.killswitch_signature = format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(sk.sign(&msg).to_bytes())
+        );
+        s
+    }
+
+    #[test]
+    fn signed_killswitch_latches_and_forged_one_asks() {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let st = state(Some(hex::encode(sk.verifying_key().as_bytes())));
+        let now = 1_700_000_000;
+        let on = with_killswitch(&sk, signed(&sk, OPEN, now, "eng"), true);
+        let p = for_hook(&st, Some(on.clone()), now);
+        assert!(p.killswitch && p.ask_reason.is_none());
+        let off = with_killswitch(&sk, signed(&sk, OPEN, now, "eng"), false);
+        assert!(!for_hook(&st, Some(off), now).killswitch);
+        let mut forged = on;
+        forged.killswitch = Some(false);
+        let p = for_hook(&st, Some(forged), now);
+        assert!(!p.killswitch && p.ask_reason.is_some());
     }
 
     const REGULATED: &str =

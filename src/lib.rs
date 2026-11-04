@@ -40,6 +40,7 @@ pub mod summarize;
 pub mod supply;
 pub mod taint;
 pub mod transport;
+pub mod watchdog;
 
 pub use burst::BurstDetector;
 pub use cloak::CloakVault;

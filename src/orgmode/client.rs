@@ -46,6 +46,11 @@ pub struct SignedShieldset {
     pub issued_at: i64,
     pub group: String,
     pub signature: String,
+    /// Killswitch state served with this policy, `None` from older servers.
+    #[serde(default)]
+    pub killswitch: Option<bool>,
+    #[serde(default)]
+    pub killswitch_signature: String,
 }
 
 pub struct OrgApi {
@@ -230,6 +235,12 @@ impl OrgApi {
         };
         let signature = header("X-Shield-Policy-Signature");
         let issued_at: i64 = header("X-Shield-Policy-Issued-At").parse().unwrap_or(0);
+        let killswitch = match header("X-Shield-Killswitch").as_str() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        };
+        let killswitch_signature = header("X-Shield-Killswitch-Signature");
         let yaml = resp.text().await?;
         if let Some(pk) = &self.bundle_pubkey {
             if !super::device_identity::verify_shieldset(pk, issued_at, group, yaml.as_bytes(), &signature) {
@@ -244,11 +255,37 @@ impl OrgApi {
             issued_at,
             group: group.to_string(),
             signature,
+            killswitch,
+            killswitch_signature,
         })
     }
 
     /// Cheap version probe -- no payload. Used by the policy pull loop
     /// to decide whether to fetch a full shieldset.
+    /// True once an admin has revoked this device. A 401 for any other
+    /// reason (missing or wrong client cert) is returned as an error.
+    pub async fn device_revoked(&self, group: &str) -> Result<bool, OrgApiError> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/api/enterprise/shield/shieldset/{}/version", group)))
+            .bearer_auth(&self.vkey)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(false);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        let code = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        if status == StatusCode::UNAUTHORIZED && matches!(code.as_str(), "vkey_inactive" | "vkey_unknown") {
+            return Ok(true);
+        }
+        Err(OrgApiError::Http { status: status.as_u16(), body })
+    }
+
     pub async fn get_shieldset_version(&self, group: &str) -> Result<VersionInfo, OrgApiError> {
         let resp = self
             .http

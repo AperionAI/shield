@@ -87,6 +87,44 @@ pub fn for_enrolled(state: &OrgState, extra_ca: Option<&Path>) -> anyhow::Result
     Ok(render(state, &bin, &cert, &key, extra_ca))
 }
 
+/// Cursor's MDM hooks file. User and project hooks can't cancel a deny
+/// from it.
+pub fn cursor_default_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Library/Application Support/Cursor/hooks.json")
+    }
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\ProgramData\Cursor\hooks.json")
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        PathBuf::from("/etc/cursor/hooks.json")
+    }
+}
+
+/// Cursor system hooks running Shield. Permission events fail closed;
+/// post events can't deny, so a missing binary doesn't wedge the IDE.
+pub fn render_cursor(bin: &Path) -> Value {
+    let pre = format!("{} --check-hook --hook-dialect cursor", quoted(bin));
+    let post = format!("{} --check-hook-post --hook-dialect cursor", quoted(bin));
+    let mut hooks = serde_json::Map::new();
+    for ev in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
+        hooks.insert(ev.into(), json!([{"command": pre, "failClosed": true}]));
+    }
+    for ev in ["afterShellExecution", "afterMCPExecution", "postToolUse"] {
+        hooks.insert(ev.into(), json!([{"command": post, "failClosed": false}]));
+    }
+    json!({"version": 1, "hooks": hooks})
+}
+
+pub fn cursor_for_enrolled() -> anyhow::Result<Value> {
+    let bin = std::env::current_exe()?;
+    let bin = bin.canonicalize().unwrap_or(bin);
+    Ok(render_cursor(&bin))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +160,17 @@ mod tests {
         assert_eq!(v["allowManagedHooksOnly"], true);
         assert_eq!(v["permissions"]["disableBypassPermissionsMode"], "disable");
         assert!(!v.to_string().contains("sk-sf-"));
+    }
+
+    #[test]
+    fn cursor_hooks_fail_closed_on_permission_events() {
+        let v = render_cursor(Path::new("/usr/local/bin/aperion-shield"));
+        assert_eq!(v["version"], 1);
+        for ev in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
+            assert_eq!(v["hooks"][ev][0]["failClosed"], true, "{ev}");
+            assert!(v["hooks"][ev][0]["command"].as_str().unwrap().contains("--check-hook --hook-dialect cursor"));
+        }
+        assert_eq!(v["hooks"]["postToolUse"][0]["failClosed"], false);
     }
 
     #[test]

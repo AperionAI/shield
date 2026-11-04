@@ -189,37 +189,27 @@ pub async fn run_disenroll(revoke: bool) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-
     if revoke {
-        let api = OrgApi::from_state(&state);
-        // Use reqwest directly here since there's no DELETE wrapper
-        // for the convenience method.
-        let client = reqwest::Client::new();
-        let url = format!(
-            "{}/api/enterprise/devices/{}",
-            state.smartflow_url.trim_end_matches('/'),
-            state.device_id
+        anyhow::bail!(
+            "--revoke is no longer supported. An admin revokes the device in the Smartflow dashboard, then run --disenroll."
         );
-        let resp = client
-            .delete(&url)
-            .bearer_auth(state.vkey())
-            .send()
-            .await
-            .context("revoke request failed")?;
-        if !resp.status().is_success() {
-            eprintln!(
-                "[shield] revoke returned HTTP {}; the local record will still be removed",
-                resp.status()
-            );
-        } else {
-            eprintln!("[shield] device revoked server-side");
-        }
-        // Keep `api` alive across the await -- silence unused warning.
-        let _ = api;
+    }
+    match OrgApi::from_state(&state).device_revoked(&state.policy_group).await {
+        Ok(true) => {}
+        Ok(false) => anyhow::bail!(
+            "this device is still active on {}. Ask your Smartflow admin to revoke device {} first.",
+            state.smartflow_url,
+            state.device_id
+        ),
+        Err(e) => anyhow::bail!(
+            "couldn't confirm with {} that this device was revoked ({e}). Disenroll needs that confirmation.",
+            state.smartflow_url
+        ),
     }
     OrgState::remove()?;
     device_identity::clear()?;
-    println!("aperion-shield disenrolled (local record removed).");
+    super::policy_cache::remove()?;
+    println!("aperion-shield disenrolled (device was revoked; local record removed).");
     Ok(())
 }
 

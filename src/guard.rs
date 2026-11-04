@@ -165,12 +165,15 @@ struct Forwarder {
     stopped: bool,
     last_tally: Option<Instant>,
     last_pull: Option<Instant>,
+    last_probe: Option<Instant>,
 }
 
 const TALLY_EVERY: Duration = Duration::from_secs(60);
 /// Re-pull the signed org policy so hooks see a fresh `issued_at` even
 /// when the version hasn't changed.
 const PULL_EVERY: Duration = Duration::from_secs(600);
+/// Killswitch changes force an early pull.
+const PROBE_EVERY: Duration = Duration::from_secs(30);
 
 impl Forwarder {
     fn for_enrolled() -> Option<Self> {
@@ -182,6 +185,7 @@ impl Forwarder {
             stopped: false,
             last_tally: None,
             last_pull: None,
+            last_probe: None,
         })
     }
 
@@ -193,8 +197,22 @@ impl Forwarder {
         }
     }
 
+    /// True when the server's killswitch differs from the cached signed copy.
+    fn killswitch_changed(&mut self, rt: &tokio::runtime::Handle) -> bool {
+        if self.last_probe.is_some_and(|t| t.elapsed() < PROBE_EVERY) {
+            return false;
+        }
+        self.last_probe = Some(Instant::now());
+        let Ok(probe) = tokio::task::block_in_place(|| rt.block_on(self.api.get_shieldset_version(&self.group))) else {
+            return false;
+        };
+        let cached = policy_cache::load_raw().and_then(|s| s.killswitch).unwrap_or(false);
+        probe.killswitch.on != cached
+    }
+
     fn pull_policy(&mut self, rt: &tokio::runtime::Handle, notify: bool) {
-        if self.last_pull.is_some_and(|t| t.elapsed() < PULL_EVERY) {
+        let due = self.last_pull.is_none_or(|t| t.elapsed() >= PULL_EVERY);
+        if !due && !self.killswitch_changed(rt) {
             return;
         }
         match tokio::task::block_in_place(|| rt.block_on(self.api.get_shieldset(&self.group))) {
