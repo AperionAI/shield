@@ -110,13 +110,59 @@ pub fn render_cursor(bin: &Path) -> Value {
     let pre = format!("{} --check-hook --hook-dialect cursor", quoted(bin));
     let post = format!("{} --check-hook-post --hook-dialect cursor", quoted(bin));
     let mut hooks = serde_json::Map::new();
-    for ev in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
+    for ev in [
+        "preToolUse",
+        "beforeShellExecution",
+        "beforeMCPExecution",
+        "beforeReadFile",
+        "beforeTabFileRead",
+        "subagentStart",
+    ] {
         hooks.insert(ev.into(), json!([{"command": pre, "failClosed": true}]));
     }
     for ev in ["afterShellExecution", "afterMCPExecution", "postToolUse"] {
         hooks.insert(ev.into(), json!([{"command": post, "failClosed": false}]));
     }
     json!({"version": 1, "hooks": hooks})
+}
+
+/// Codex managed requirements. User and project hooks are not loaded.
+/// The hook command speaks Claude's permissionDecision JSON, which is
+/// the shape Codex PreToolUse and PermissionRequest accept.
+pub fn codex_default_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\ProgramData\OpenAI\Codex\requirements.toml")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/etc/codex/requirements.toml")
+    }
+}
+
+pub fn render_codex_requirements(bin: &Path) -> String {
+    let pre = format!("{} --check-hook --hook-dialect claude", quoted(bin));
+    let post = format!("{} --check-hook-post --hook-dialect claude", quoted(bin));
+    let mut out = String::from(
+        "allow_managed_hooks_only = true\n\n[features]\nhooks = true\n\n[hooks]\n",
+    );
+    for (event, cmd) in [
+        ("PreToolUse", pre.as_str()),
+        ("PermissionRequest", pre.as_str()),
+        ("SubagentStart", pre.as_str()),
+        ("PostToolUse", post.as_str()),
+    ] {
+        out.push_str(&format!(
+            "\n[[hooks.{event}]]\n\n[[hooks.{event}.hooks]]\ntype = \"command\"\ncommand = '{cmd}'\ntimeout = 15\n"
+        ));
+    }
+    out
+}
+
+pub fn codex_for_enrolled() -> anyhow::Result<String> {
+    let bin = std::env::current_exe()?;
+    let bin = bin.canonicalize().unwrap_or(bin);
+    Ok(render_codex_requirements(&bin))
 }
 
 pub fn cursor_for_enrolled() -> anyhow::Result<Value> {
@@ -166,11 +212,31 @@ mod tests {
     fn cursor_hooks_fail_closed_on_permission_events() {
         let v = render_cursor(Path::new("/usr/local/bin/aperion-shield"));
         assert_eq!(v["version"], 1);
-        for ev in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
+        for ev in [
+            "preToolUse",
+            "beforeShellExecution",
+            "beforeMCPExecution",
+            "beforeReadFile",
+            "beforeTabFileRead",
+            "subagentStart",
+        ] {
             assert_eq!(v["hooks"][ev][0]["failClosed"], true, "{ev}");
             assert!(v["hooks"][ev][0]["command"].as_str().unwrap().contains("--check-hook --hook-dialect cursor"));
         }
         assert_eq!(v["hooks"]["postToolUse"][0]["failClosed"], false);
+    }
+
+    #[test]
+    fn codex_requirements_are_managed_and_use_claude_decisions() {
+        let t = render_codex_requirements(Path::new("/usr/local/bin/aperion-shield"));
+        assert!(t.contains("allow_managed_hooks_only = true"));
+        assert!(t.contains("[features]\nhooks = true"));
+        for ev in ["PreToolUse", "PermissionRequest", "SubagentStart", "PostToolUse"] {
+            assert!(t.contains(&format!("[[hooks.{ev}]]")), "{ev}");
+        }
+        assert!(t.contains("--check-hook --hook-dialect claude"));
+        assert!(t.contains("--check-hook-post --hook-dialect claude"));
+        assert!(!t.contains("beforeShellExecution"));
     }
 
     #[test]

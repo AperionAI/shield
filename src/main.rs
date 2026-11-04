@@ -796,6 +796,11 @@ struct Cli {
     #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "claude_managed_settings")]
     cursor_managed_hooks: bool,
 
+    /// Print Codex managed requirements.toml. User and project hooks are
+    /// not loaded. Run as root to write the system path.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "claude_managed_settings", conflicts_with = "cursor_managed_hooks")]
+    codex_managed_requirements: bool,
+
     /// Write `--claude-managed-settings` / `--cursor-managed-hooks` output
     /// to this path instead of stdout. `default` writes the OS location
     /// and registers it with the watchdog (needs admin rights).
@@ -1295,6 +1300,30 @@ async fn main() -> anyhow::Result<()> {
             return Err(anyhow!("enrolled, but no virtual key in the keystore. Re-enroll."));
         }
         println!("{key}");
+        return Ok(());
+    }
+    if cli.codex_managed_requirements {
+        let body = orgmode::claude_managed::codex_for_enrolled()?;
+        let label = "Codex managed requirements";
+        let default_path = orgmode::claude_managed::codex_default_path();
+        match cli.managed_settings_out.as_deref() {
+            None => print!("{body}"),
+            Some(out) => {
+                let path = if out == "default" { default_path } else { PathBuf::from(out) };
+                if out == "default" {
+                    aperion_shield::watchdog::protect(&aperion_shield::watchdog::system_dir(), &path, body.as_bytes())
+                        .context("needs admin rights")?;
+                } else {
+                    if let Some(dir) = path.parent() {
+                        std::fs::create_dir_all(dir)
+                            .with_context(|| format!("create {} (needs admin rights?)", dir.display()))?;
+                    }
+                    std::fs::write(&path, &body)
+                        .with_context(|| format!("write {} (needs admin rights?)", path.display()))?;
+                }
+                eprintln!("[shield] wrote {label} to {}", path.display());
+            }
+        }
         return Ok(());
     }
     if cli.claude_managed_settings || cli.cursor_managed_hooks {

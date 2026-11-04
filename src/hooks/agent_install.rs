@@ -6,9 +6,12 @@
 //!     `hooks.PostToolUse`
 //!   * Cursor `~/.cursor/hooks.json` `hooks.preToolUse`,
 //!     `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`,
+//!     `beforeTabFileRead`, `subagentStart`,
 //!     plus post events `afterShellExecution`, `afterMCPExecution`,
 //!     `postToolUse` (these cannot deny; they record session flags)
-//!   * Codex `~/.codex/hooks.json` `hooks.preToolUse` and `postToolUse`
+//!   * Codex `~/.codex/hooks.json` `PreToolUse`, `PermissionRequest`,
+//!     `SubagentStart`, and `PostToolUse` (Claude's decision JSON).
+//!     Org mode writes `/etc/codex/requirements.toml` instead.
 //!   * Gemini CLI `~/.gemini/settings.json` `hooks.PreToolUse` and
 //!     `hooks.PostToolUse`
 //!   * Copilot CLI `~/.copilot/hooks.json` `hooks.preToolUse` and
@@ -84,15 +87,15 @@ impl AgentHookKind {
 
     pub fn dialect_flag(self) -> &'static str {
         match self {
-            Self::Claude | Self::Gemini => "claude",
-            Self::Cursor | Self::Codex | Self::Copilot => "cursor",
+            Self::Claude | Self::Gemini | Self::Codex => "claude",
+            Self::Cursor | Self::Copilot => "cursor",
         }
     }
 
     pub fn merge_style(self) -> MergeStyle {
         match self {
-            Self::Claude | Self::Gemini => MergeStyle::ClaudePreToolUse,
-            Self::Cursor | Self::Codex | Self::Copilot => MergeStyle::CursorPreToolUse,
+            Self::Claude | Self::Gemini | Self::Codex => MergeStyle::ClaudePreToolUse,
+            Self::Cursor | Self::Copilot => MergeStyle::CursorPreToolUse,
         }
     }
 
@@ -486,20 +489,21 @@ fn merge_cursor_hooks(
     // preToolUse still covers Write/Read; ask is a no-op there, deny still works.
     // beforeReadFile can deny and already includes the file body.
     // Post events cannot deny; failClosed stays false so a missing
-    // binary does not wedge the IDE. Codex and Copilot use the same
-    // Cursor event names so a High-severity shell or MCP call is an
-    // ask there too, not only on Cursor.
+    // binary does not wedge the IDE. Codex uses its own event names
+    // and is installed on the Claude-shaped path above.
     let events: &[(&str, bool, bool)] = match kind {
-        AgentHookKind::Cursor | AgentHookKind::Codex | AgentHookKind::Copilot => &[
+        AgentHookKind::Cursor | AgentHookKind::Copilot => &[
             ("preToolUse", true, false),
             ("beforeShellExecution", true, false),
             ("beforeMCPExecution", true, false),
             ("beforeReadFile", true, false),
+            ("beforeTabFileRead", true, false),
+            ("subagentStart", true, false),
             ("afterShellExecution", false, true),
             ("afterMCPExecution", false, true),
             ("postToolUse", false, true),
         ],
-        AgentHookKind::Claude | AgentHookKind::Gemini => &[],
+        AgentHookKind::Claude | AgentHookKind::Gemini | AgentHookKind::Codex => &[],
     };
 
     let mut overall = AgentInstallOutcome::Installed;
@@ -602,19 +606,23 @@ pub fn install_at(
         let post_path = hooks.join(kind.post_wrapper_filename());
         let settings = match kind.merge_style() {
             MergeStyle::ClaudePreToolUse => {
-                let pre = merge_claude_event(
-                    &kind.settings_path(&home),
-                    "PreToolUse",
-                    &wrapper_path,
-                    chain_existing,
-                )?;
-                let post = merge_claude_event(
-                    &kind.settings_path(&home),
-                    "PostToolUse",
-                    &post_path,
-                    chain_existing,
-                )?;
-                Ok::<_, anyhow::Error>(combine_outcome(pre, post))
+                let events: &[(&str, bool)] = if kind == AgentHookKind::Codex {
+                    &[
+                        ("PreToolUse", false),
+                        ("PermissionRequest", false),
+                        ("SubagentStart", false),
+                        ("PostToolUse", true),
+                    ]
+                } else {
+                    &[("PreToolUse", false), ("PostToolUse", true)]
+                };
+                let mut overall = AgentInstallOutcome::Installed;
+                for (event, post) in events {
+                    let path = if *post { &post_path } else { &wrapper_path };
+                    let outcome = merge_claude_event(&kind.settings_path(&home), event, path, chain_existing)?;
+                    overall = combine_outcome(overall, outcome);
+                }
+                Ok::<_, anyhow::Error>(overall)
             }
             MergeStyle::CursorPreToolUse => merge_cursor_hooks(
                 &kind.settings_path(&home),
@@ -800,7 +808,7 @@ fn clear_claude_settings(path: &Path, wrapper: &Path) -> Result<bool> {
     let mut root: Value =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     let mut changed = false;
-    for event in ["PreToolUse", "PostToolUse"] {
+    for event in ["PreToolUse", "PermissionRequest", "SubagentStart", "PostToolUse"] {
         let Some(arr) = root
             .pointer_mut(&format!("/hooks/{event}"))
             .and_then(|v| v.as_array_mut())
@@ -833,6 +841,8 @@ fn clear_cursor_hooks(path: &Path, wrapper: &Path) -> Result<bool> {
         "beforeShellExecution",
         "beforeMCPExecution",
         "beforeReadFile",
+        "beforeTabFileRead",
+        "subagentStart",
         "afterShellExecution",
         "afterMCPExecution",
         "postToolUse",
@@ -914,6 +924,13 @@ mod tests {
             cursor_json["hooks"]["beforeReadFile"][0]["failClosed"],
             json!(true)
         );
+        for ev in ["beforeTabFileRead", "subagentStart"] {
+            assert!(cursor_json["hooks"][ev][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("cursor-pretooluse"), "{ev}");
+            assert_eq!(cursor_json["hooks"][ev][0]["failClosed"], json!(true), "{ev}");
+        }
         assert!(cursor_json["hooks"]["afterShellExecution"][0]["command"]
             .as_str()
             .unwrap()
@@ -935,18 +952,19 @@ mod tests {
             &fs::read_to_string(AgentHookKind::Codex.settings_path(home)).unwrap(),
         )
         .unwrap();
-        assert!(codex_json["hooks"]["preToolUse"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("codex-pretooluse"));
-        assert!(codex_json["hooks"]["postToolUse"][0]["command"]
+        for ev in ["PreToolUse", "PermissionRequest", "SubagentStart"] {
+            assert_eq!(codex_json["hooks"][ev][0]["matcher"], json!("*"), "{ev}");
+            assert!(codex_json["hooks"][ev][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("codex-pretooluse"), "{ev}");
+        }
+        assert!(codex_json["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
             .contains("codex-posttooluse"));
-        assert!(codex_json["hooks"]["beforeShellExecution"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("codex-pretooluse"));
+        let codex_wrapper = fs::read_to_string(hooks_dir(home).join("codex-pretooluse.sh")).unwrap();
+        assert!(codex_wrapper.contains("--hook-dialect claude"));
 
         let gemini_json: Value = serde_json::from_str(
             &fs::read_to_string(AgentHookKind::Gemini.settings_path(home)).unwrap(),

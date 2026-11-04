@@ -129,6 +129,9 @@ pub fn event_output(event: &HookEvent) -> String {
     if let Some(s) = event.content.as_deref().filter(|s| !s.is_empty()) {
         return cap(s);
     }
+    if let Some(s) = event.task.as_deref().filter(|s| !s.is_empty()) {
+        return cap(s);
+    }
     let mut parts = Vec::new();
     for v in [&event.tool_output, &event.output, &event.result_json] {
         if let Some(v) = v {
