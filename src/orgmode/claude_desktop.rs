@@ -13,7 +13,14 @@ use serde_json::{json, Value};
 use super::state::OrgState;
 use super::write_private;
 
-const ENTRY_ID: &str = "smartflow";
+/// Claude Desktop only reads an applied id that is 36 lowercase hex
+/// characters and dashes. A short name is ignored and the app stays on
+/// Anthropic.
+const ENTRY_ID: &str = "c4e8a1f0-7b2d-4e6a-9c31-5d8f0a2b6e14";
+
+fn valid_id(id: &str) -> bool {
+    id.len() == 36 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'-'))
+}
 
 pub fn default_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
@@ -48,15 +55,22 @@ pub fn write_config(dir: &Path, base_url: &str, bin: &Path) -> anyhow::Result<Pa
     if !meta.is_object() {
         meta = json!({});
     }
-    let applied = meta
-        .get("appliedId")
-        .and_then(|v| v.as_str())
-        .filter(|id| !id.is_empty() && dir.join(format!("{id}.json")).is_file())
-        .map(str::to_string)
-        .unwrap_or_else(|| ENTRY_ID.to_string());
+    let previous = meta.get("appliedId").and_then(|v| v.as_str()).unwrap_or("");
+    let applied = if valid_id(previous) && dir.join(format!("{previous}.json")).is_file() {
+        previous.to_string()
+    } else {
+        ENTRY_ID.to_string()
+    };
 
     let entry_path = dir.join(format!("{applied}.json"));
-    let mut cfg = read_json(&entry_path).unwrap_or_else(|_| json!({}));
+    let source_path = if entry_path.is_file() {
+        entry_path.clone()
+    } else if !previous.is_empty() && dir.join(format!("{previous}.json")).is_file() {
+        dir.join(format!("{previous}.json"))
+    } else {
+        entry_path.clone()
+    };
+    let mut cfg = read_json(&source_path).unwrap_or_else(|_| json!({}));
     if !cfg.is_object() {
         cfg = json!({});
     }
@@ -125,7 +139,7 @@ mod tests {
         )
         .unwrap();
         let path = write_config(dir, "https://sf.example/", Path::new("/usr/local/bin/aperion-shield")).unwrap();
-        assert_eq!(path, dir.join("existing.json"));
+        assert_eq!(path, dir.join("c4e8a1f0-7b2d-4e6a-9c31-5d8f0a2b6e14.json"));
         let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(cfg["inferenceProvider"], "gateway");
         assert_eq!(cfg["inferenceGatewayBaseUrl"], "https://sf.example");
@@ -136,7 +150,8 @@ mod tests {
         assert!(cfg.get("inferenceGatewayApiKey").is_none());
         assert!(!cfg.to_string().contains("sk-sf-"));
         let meta: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("_meta.json")).unwrap()).unwrap();
-        assert_eq!(meta["appliedId"], "existing");
+        assert_eq!(meta["appliedId"], "c4e8a1f0-7b2d-4e6a-9c31-5d8f0a2b6e14");
         assert_eq!(meta["entries"][0]["name"], "Old");
+        assert!(meta["entries"].as_array().unwrap().iter().any(|e| e["id"] == meta["appliedId"]));
     }
 }
