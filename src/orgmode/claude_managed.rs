@@ -63,11 +63,15 @@ pub fn render(state: &OrgState, bin: &Path, cert: &Path, key: &Path, extra_ca: O
         "apiKeyHelper": format!("{} --api-key", quoted(bin)),
         "env": env,
         "hooks": {
+            "UserPromptSubmit": [{"matcher": "*", "hooks": [hook(bin, "--check-hook")]}],
             "PreToolUse": [{"matcher": "*", "hooks": [hook(bin, "--check-hook")]}],
             "PostToolUse": [{"matcher": "*", "hooks": [hook(bin, "--check-hook-post")]}],
         },
         "allowManagedHooksOnly": true,
-        "permissions": {"disableBypassPermissionsMode": "disable"},
+        "permissions": {
+            "disableBypassPermissionsMode": "disable",
+            "disableAutoMode": "disable"
+        },
     })
 }
 
@@ -205,6 +209,9 @@ mod tests {
         assert!(post.contains("--check-hook-post"));
         assert_eq!(v["allowManagedHooksOnly"], true);
         assert_eq!(v["permissions"]["disableBypassPermissionsMode"], "disable");
+        assert_eq!(v["permissions"]["disableAutoMode"], "disable");
+        let prompt = v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(prompt.contains("--check-hook"));
         assert!(!v.to_string().contains("sk-sf-"));
     }
 

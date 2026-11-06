@@ -19,6 +19,32 @@ use super::state::OrgState;
 /// device API expects.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Trust one extra CA when `SHIELD_TLS_CA` points at a PEM file.
+/// The stock client only trusts public web CAs, so a private or
+/// first-run certificate (this box's localhost cert) is refused.
+fn apply_extra_ca(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    let Ok(path) = std::env::var("SHIELD_TLS_CA") else {
+        return builder;
+    };
+    if path.is_empty() {
+        return builder;
+    }
+    let pem = match std::fs::read(&path) {
+        Ok(pem) => pem,
+        Err(e) => {
+            eprintln!("[shield] SHIELD_TLS_CA unreadable ({path}): {e}");
+            return builder;
+        }
+    };
+    match reqwest::Certificate::from_pem(&pem) {
+        Ok(cert) => builder.add_root_certificate(cert),
+        Err(e) => {
+            eprintln!("[shield] SHIELD_TLS_CA is not a certificate ({path}): {e}");
+            builder
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum OrgApiError {
     #[error("network: {0}")]
@@ -75,9 +101,9 @@ impl OrgApi {
         if !smartflow_url.starts_with("https://") {
             panic!("Shield refuses a non-HTTPS Smartflow URL ({smartflow_url})");
         }
-        let mut builder = Client::builder()
+        let mut builder = apply_extra_ca(Client::builder()
             .timeout(REQUEST_TIMEOUT)
-            .user_agent(format!("aperion-shield/{}", env!("CARGO_PKG_VERSION")));
+            .user_agent(format!("aperion-shield/{}", env!("CARGO_PKG_VERSION"))));
         if let Some(pem) = identity_pem {
             match reqwest::Identity::from_pem(&pem) {
                 Ok(id) => builder = builder.identity(id),
@@ -143,9 +169,9 @@ impl OrgApi {
         csr_pem: &str,
         signing_pubkey: &str,
     ) -> Result<TokenEnrollResponse, OrgApiError> {
-        let http = Client::builder()
+        let http = apply_extra_ca(Client::builder()
             .timeout(REQUEST_TIMEOUT)
-            .user_agent(format!("aperion-shield/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("aperion-shield/{}", env!("CARGO_PKG_VERSION"))))
             .build()?;
         let body = serde_json::json!({
             "enrollment_token": enrollment_token,

@@ -116,15 +116,63 @@ pub struct HookEvent {
         alias = "sessionId"
     )]
     pub conversation_id: Option<String>,
+    /// Claude Code permission mode. Auto, dontAsk, and bypassPermissions
+    /// do not stop for an `ask`, so a policy that needs a yes has to deny.
+    #[serde(default, alias = "permissionMode")]
+    pub permission_mode: Option<String>,
+}
+
+fn first_str(v: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(s) = v.get(*key).and_then(|x| x.as_str()) {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn first_val(v: &Value, keys: &[&str]) -> Option<Value> {
+    for key in keys {
+        if let Some(value) = v.get(*key) {
+            if !value.is_null() {
+                return Some(value.clone());
+            }
+        }
+    }
+    None
 }
 
 impl HookEvent {
+    /// Cursor Plan mode sends the same id as `conversation_id` and
+    /// `conversationId`. Struct aliases treat that as one field and reject
+    /// the payload. Read the keys by name so a hook bug cannot wedge the IDE.
     pub fn from_json(raw: &str) -> Result<Self> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             anyhow::bail!("--check-hook requires a JSON event on stdin");
         }
-        serde_json::from_str(trimmed).map_err(|e| anyhow!("--check-hook stdin is not JSON: {e}"))
+        let value: Value = serde_json::from_str(trimmed)
+            .map_err(|e| anyhow!("--check-hook stdin is not JSON: {e}"))?;
+        if !value.is_object() {
+            anyhow::bail!("--check-hook stdin is not a JSON object");
+        }
+        Ok(Self {
+            hook_event_name: first_str(&value, &["hook_event_name", "hookEventName"]),
+            tool_name: first_str(&value, &["tool_name", "toolName", "tool"]),
+            tool_input: first_val(&value, &["tool_input", "toolInput", "arguments", "args"]),
+            cwd: first_str(&value, &["cwd"]),
+            command: first_str(&value, &["command"]),
+            file_path: first_str(&value, &["file_path", "filePath"]),
+            content: first_str(&value, &["content"]),
+            task: first_str(&value, &["task", "prompt"]),
+            tool_output: first_val(&value, &["tool_output", "toolOutput", "tool_response", "toolResponse"]),
+            output: first_val(&value, &["output"]),
+            result_json: first_val(&value, &["result_json", "resultJson"]),
+            conversation_id: first_str(&value, &["conversation_id", "conversationId", "session_id", "sessionId"]),
+            permission_mode: first_str(&value, &["permission_mode", "permissionMode"]),
+        })
     }
 
     pub fn tool_name(&self) -> &str {
@@ -519,6 +567,14 @@ pub fn run_with_offload(
                 tool_name = "Bash".to_string();
                 input = json!({ "command": task });
             }
+        } else if event
+            .hook_event_name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case("UserPromptSubmit"))
+        {
+            let prompt = event.task.clone().or(event.content.clone()).unwrap_or_default();
+            tool_name = "UserPrompt".to_string();
+            input = json!({ "prompt": prompt });
         } else if let Some(path) = event.file_path.as_deref().filter(|s| !s.is_empty()) {
             // beforeReadFile and beforeTabFileRead: file_path + content, no tool_name.
             let event_name = event.hook_event_name.as_deref().unwrap_or("");
@@ -640,8 +696,10 @@ pub fn run_with_offload(
 
     // IDE hooks: only hard-block rules deny. Cursor's beforeShellExecution /
     // beforeMCPExecution and Claude's PreToolUse both prompt on `ask`, and
-    // skip the prompt if we exit 2 with `deny`.
+    // skip the prompt if we exit 2 with `deny`. Auto mode drops `ask` on
+    // the floor, so that decision becomes a deny there.
     best = soften_non_attack(engine, best);
+    best = hold_ask(event.permission_mode.as_deref(), best);
 
     let reason = decision_reason(&best);
     let primary_rule_id = decision_rule_id(&best);
@@ -751,6 +809,43 @@ fn egress_approval() -> Decision {
     }
 }
 
+/// Auto, dontAsk, and bypassPermissions do not pause for `ask`. A policy
+/// that needed a person to say yes is a deny in those modes.
+fn hold_ask(mode: Option<&str>, decision: Decision) -> Decision {
+    let dropped = matches!(
+        mode.unwrap_or("").to_ascii_lowercase().as_str(),
+        "auto" | "dontask" | "bypasspermissions"
+    );
+    if !dropped {
+        return decision;
+    }
+    let note = "This session does not stop for approval, so the call was blocked.";
+    match decision {
+        Decision::Approval {
+            rule_id,
+            severity,
+            reason,
+            safer_alternative,
+            contributing_rules,
+        }
+        | Decision::IdentityVerification {
+            rule_id,
+            severity,
+            reason,
+            safer_alternative,
+            contributing_rules,
+            ..
+        } => Decision::Block {
+            rule_id,
+            severity,
+            reason: format!("{reason} {note}"),
+            safer_alternative,
+            contributing_rules,
+        },
+        other => other,
+    }
+}
+
 fn rank_decision(d: &Decision) -> u8 {
     match d {
         Decision::Allow => 0,
@@ -777,6 +872,33 @@ mod tests {
             ..Default::default()
         };
         run(&engine(), &event, dialect, None).expect("run")
+    }
+
+    #[test]
+    fn auto_mode_blocks_a_call_that_would_have_asked() {
+        let event = HookEvent {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(json!({"command": "rm -rf /"})),
+            permission_mode: Some("auto".into()),
+            ..Default::default()
+        };
+        let report = run(&engine(), &event, HookDialect::Claude, None).expect("run");
+        assert!(matches!(report.decision, Decision::Block { .. }), "{:?}", report.decision);
+        assert_eq!(report.exit_code(), 2);
+        assert!(report.stdout.contains("\"permissionDecision\":\"deny\""));
+    }
+
+    #[test]
+    fn user_prompt_is_logged_as_an_allow() {
+        let event = HookEvent {
+            hook_event_name: Some("UserPromptSubmit".into()),
+            task: Some("Build me a simple python date picker sample".into()),
+            ..Default::default()
+        };
+        let report = run(&engine(), &event, HookDialect::Claude, None).expect("run");
+        assert!(matches!(report.decision, Decision::Allow), "{:?}", report.decision);
+        assert_eq!(report.tool_name, "UserPrompt");
+        assert_eq!(report.exit_code(), 0);
     }
 
     #[test]
@@ -1107,5 +1229,13 @@ mod tests {
         let event = HookEvent::from_json(raw).unwrap();
         assert_eq!(event.tool_name(), "Bash");
         assert_eq!(event.input()["command"], "pwd");
+    }
+
+    #[test]
+    fn parse_event_accepts_duplicate_conversation_id_names() {
+        let raw = r#"{"hook_event_name":"beforeShellExecution","command":"echo hi","conversation_id":"conv-1","conversationId":"conv-1","session_id":"conv-1"}"#;
+        let event = HookEvent::from_json(raw).unwrap();
+        assert_eq!(event.command.as_deref(), Some("echo hi"));
+        assert_eq!(event.conversation_id.as_deref(), Some("conv-1"));
     }
 }

@@ -614,7 +614,11 @@ pub fn install_at(
                         ("PostToolUse", true),
                     ]
                 } else {
-                    &[("PreToolUse", false), ("PostToolUse", true)]
+                    &[
+                        ("UserPromptSubmit", false),
+                        ("PreToolUse", false),
+                        ("PostToolUse", true),
+                    ]
                 };
                 let mut overall = AgentInstallOutcome::Installed;
                 for (event, post) in events {

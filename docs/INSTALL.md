@@ -10,7 +10,7 @@ Downloads the matching GitHub Release tarball, verifies SHA-256, and drops
 `aperion-shield` onto PATH. Pin a version or relocate:
 
 ```bash
-SHIELD_VERSION=shield-v1.23.1 SHIELD_INSTALL_DIR=~/.local/bin \
+SHIELD_VERSION=shield-v1.24.0 SHIELD_INSTALL_DIR=~/.local/bin \
   curl -fsSL https://shield-get.aperion.ai | sh
 ```
 
@@ -27,6 +27,8 @@ do not go through `$PATH` shims):
 aperion-shield --install-agent-hooks
 aperion-shield --scan-ide
 ```
+
+Enroll writes the Claude Desktop gateway file for that user. Quit Claude Desktop and open it again after enroll. The terminal `claude` command still uses the managed settings below.
 
 Org laptops, after enroll, as root:
 

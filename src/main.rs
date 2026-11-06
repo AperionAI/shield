@@ -764,6 +764,17 @@ struct Cli {
     )]
     status: bool,
 
+    /// Stay running and ship the local audit spool to Smartflow.
+    /// Cursor and Claude hooks only write the spool. This process forwards
+    /// the tool call and the tool result.
+    #[arg(
+        long,
+        conflicts_with = "upstream",
+        conflicts_with = "check",
+        conflicts_with = "enroll"
+    )]
+    forward_audit: bool,
+
     /// Remove the local org-mode enrollment record (turns this Shield
     /// back into a standalone). Only works after an admin has revoked
     /// this device in Smartflow; Shield checks before removing anything.
@@ -784,6 +795,12 @@ struct Cli {
     /// settings file or environment variable.
     #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
     api_key: bool,
+
+    /// Write Claude Desktop's gateway config for this enrollment. The
+    /// desktop app ignores ~/.claude/settings.json, so without this file
+    /// its chats never reach Smartflow. The key stays in the keystore.
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
+    claude_desktop: bool,
 
     /// Print Claude Code managed settings for this enrollment: gateway
     /// URL, device client cert, `apiKeyHelper`, and Shield hooks that
@@ -1290,6 +1307,9 @@ async fn main() -> anyhow::Result<()> {
     if cli.status {
         return orgmode::run_status().await;
     }
+    if cli.forward_audit {
+        return run_forward_audit().await;
+    }
     if cli.disenroll {
         return orgmode::run_disenroll(cli.revoke).await;
     }
@@ -1300,6 +1320,13 @@ async fn main() -> anyhow::Result<()> {
             return Err(anyhow!("enrolled, but no virtual key in the keystore. Re-enroll."));
         }
         println!("{key}");
+        return Ok(());
+    }
+    if cli.claude_desktop {
+        let state = OrgState::load()?.ok_or_else(|| anyhow!("not enrolled"))?;
+        let path = orgmode::claude_desktop::apply(&state)?;
+        eprintln!("[shield] Claude Desktop gateway config written to {}", path.display());
+        eprintln!("[shield] Quit Claude Desktop completely and open it again. The chat you already have open is still talking to Anthropic.");
         return Ok(());
     }
     if cli.codex_managed_requirements {
@@ -2617,7 +2644,10 @@ fn run_check_hook(cli: &Cli) -> anyhow::Result<i32> {
 
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
-    let event = HookEvent::from_json(&raw)?;
+    let event = match HookEvent::from_json(&raw) {
+        Ok(event) => event,
+        Err(e) => return allow_unreadable_hook(&e),
+    };
     let dialect = match cli.hook_dialect.as_str() {
         "auto" => detect_dialect(&event),
         other => HookDialect::parse(other)?,
@@ -2660,6 +2690,7 @@ fn run_check_hook(cli: &Cli) -> anyhow::Result<i32> {
         &raw,
         audit_record,
     );
+    ship_hook_spool();
     print!("{}", report.stdout);
     Ok(report.exit_code())
 }
@@ -2682,6 +2713,23 @@ fn hook_engine(cli: &Cli) -> anyhow::Result<(Engine, Option<String>, bool)> {
     Ok((load_engine_with_packs(cli.rules.as_deref(), &cli.rules_extra)?, None, false))
 }
 
+/// A payload we cannot read must not wedge the editor. Policy denials
+/// still exit non-zero. This path is only for a broken hook payload.
+fn allow_unreadable_hook(err: &anyhow::Error) -> anyhow::Result<i32> {
+    eprintln!("[shield] hook payload ignored ({err}); allowing so the editor is not stuck");
+    println!(
+        "{}",
+        json!({
+            "permission": "allow",
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow"
+            }
+        })
+    );
+    Ok(0)
+}
+
 /// `SHIELD_HOOKS_DISABLE=1` only works on a standalone install.
 fn hooks_disabled_by_env(enrolled: bool) -> bool {
     let set = std::env::var("SHIELD_HOOKS_DISABLE").map(|v| v == "1").unwrap_or(false);
@@ -2691,12 +2739,14 @@ fn hooks_disabled_by_env(enrolled: bool) -> bool {
     set && !enrolled
 }
 
-/// Enrolled devices spool every hook decision for the guard to forward.
-/// A spool failure is logged, never turned into a hook error.
-fn spool_hook_decision(decision: &Decision, rule_id: Option<&str>, tool: &str, raw: &str, context: serde_json::Value) {
+/// Enrolled devices spool every hook decision, including allows, so the
+/// tool call and the tool result both reach Smartflow. A spool failure
+/// is logged, never turned into a hook error.
+fn spool_hook_decision(decision: &Decision, rule_id: Option<&str>, tool: &str, raw: &str, mut context: serde_json::Value) {
     if !matches!(OrgState::load(), Ok(Some(_))) {
         return;
     }
+    attach_tool_sides(&mut context, raw);
     let ev = AuditEvent {
         id: uuid::Uuid::new_v4().to_string(),
         ts: chrono::Utc::now(),
@@ -2707,10 +2757,96 @@ fn spool_hook_decision(decision: &Decision, rule_id: Option<&str>, tool: &str, r
         fingerprint: hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(raw.as_bytes())[..8]),
         context,
     };
-    let res = orgmode::spool::Spool::open()
-        .and_then(|s| orgmode::audit_sink::spool_decision(&s, &ev));
+    let res = orgmode::spool::Spool::open().and_then(|s| s.append(&ev).map(|_| ()));
     if let Err(e) = res {
         eprintln!("[shield] audit spool write failed: {e}");
+    }
+}
+
+/// The hook ships its own record. No side process has to be running.
+fn ship_hook_spool() {
+    let Ok(Some(state)) = OrgState::load() else { return };
+    let Ok(spool) = orgmode::spool::Spool::open() else { return };
+    let api = OrgApi::from_state(&state);
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return;
+    };
+    let shipped = rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(4), spool.forward(&api)).await
+    });
+    match shipped {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => eprintln!("[shield] audit ship failed: {e}"),
+        Err(_) => eprintln!("[shield] audit ship timed out"),
+    }
+}
+
+const TOOL_RECORD_CAP: usize = 8_000;
+
+fn clip_text(s: &str) -> String {
+    if s.len() <= TOOL_RECORD_CAP {
+        s.to_string()
+    } else {
+        format!(
+            "{}…[truncated {} bytes]",
+            &s[..TOOL_RECORD_CAP],
+            s.len() - TOOL_RECORD_CAP
+        )
+    }
+}
+
+fn clip_json(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::String(s) => serde_json::Value::String(clip_text(s)),
+        other => {
+            let rendered = other.to_string();
+            if rendered.len() <= TOOL_RECORD_CAP {
+                other.clone()
+            } else {
+                serde_json::Value::String(clip_text(&rendered))
+            }
+        }
+    }
+}
+
+/// Put the call text on a pre-hook and the tool result on a post-hook.
+fn attach_tool_sides(context: &mut serde_json::Value, raw: &str) {
+    let Ok(ev) = aperion_shield::hooks::agent::HookEvent::from_json(raw) else {
+        return;
+    };
+    let Some(obj) = context.as_object_mut() else {
+        return;
+    };
+    if let Some(id) = ev.conversation_id.as_deref() {
+        obj.insert("conversation_id".into(), serde_json::json!(id));
+    }
+    let result = ev.tool_output.as_ref().or(ev.output.as_ref()).or(ev.result_json.as_ref());
+    if let Some(out) = result {
+        obj.insert("side".into(), serde_json::json!("result"));
+        obj.insert("output".into(), clip_json(out));
+    } else {
+        obj.insert("side".into(), serde_json::json!("call"));
+    }
+    if let Some(cmd) = ev.command.as_deref() {
+        obj.insert("command".into(), serde_json::json!(clip_text(cmd)));
+    } else if let Some(input) = ev.tool_input.as_ref() {
+        obj.insert("input".into(), clip_json(input));
+    } else if let Some(prompt) = ev.task.clone().or(ev.content.clone()).filter(|s| !s.is_empty()) {
+        obj.insert("input".into(), serde_json::json!({ "prompt": clip_text(&prompt) }));
+    }
+    if let Some(path) = ev.file_path.as_deref() {
+        obj.insert("file_path".into(), serde_json::json!(path));
+    }
+}
+
+async fn run_forward_audit() -> anyhow::Result<()> {
+    let state = OrgState::load()?.ok_or_else(|| anyhow!("not enrolled"))?;
+    let api = std::sync::Arc::new(OrgApi::from_state(&state));
+    let audit = AuditSink::new(api);
+    eprintln!("[shield] forwarding the audit spool to {}", state.smartflow_url);
+    loop {
+        audit.drain().await;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
 
@@ -2724,7 +2860,10 @@ fn run_check_hook_post(cli: &Cli) -> anyhow::Result<i32> {
 
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
-    let event = HookEvent::from_json(&raw)?;
+    let event = match HookEvent::from_json(&raw) {
+        Ok(event) => event,
+        Err(e) => return allow_unreadable_hook(&e),
+    };
     let dialect = dialect_for(&event, &cli.hook_dialect)?;
     let (engine, _, enrolled) = hook_engine(cli)?;
     if hooks_disabled_by_env(enrolled) {
@@ -2757,6 +2896,7 @@ fn run_check_hook_post(cli: &Cli) -> anyhow::Result<i32> {
         | Decision::Block { rule_id, .. } => Some(rule_id.as_str()),
     };
     spool_hook_decision(&report.decision, rule_id, &report.tool_name, &raw, audit_record);
+    ship_hook_spool();
     if report.exit_code() != 0 && !report.reason.is_empty() {
         eprintln!("{}", report.reason);
     }
@@ -2821,6 +2961,8 @@ fn run_uninstall_agent_hooks(cli: &Cli) -> anyhow::Result<i32> {
             settings
         );
     }
+    eprintln!("[shield] Cursor, Claude Code, Codex, Gemini, and Copilot user hooks are off.");
+    eprintln!("[shield] turn them back on with: aperion-shield --install-agent-hooks");
     Ok(0)
 }
 

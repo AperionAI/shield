@@ -106,6 +106,10 @@ pub async fn run_enroll(
             "[shield]   org policy   = not pulled yet ({e}); hooks ask on every call until the guard pulls it"
         ),
     }
+    match super::claude_desktop::apply(&state) {
+        Ok(path) => eprintln!("[shield]   claude desktop = {}", path.display()),
+        Err(e) => eprintln!("[shield]   claude desktop = not written ({e})"),
+    }
     eprintln!("[shield]");
     eprintln!(
         "[shield] next run of `aperion-shield -- <mcp-server>` will pull policy from {}",

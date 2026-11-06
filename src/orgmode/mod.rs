@@ -43,6 +43,7 @@ pub fn killswitch_latched() -> bool {
 }
 
 pub mod audit_sink;
+pub mod claude_desktop;
 pub mod claude_managed;
 pub mod client;
 pub mod device_identity;
