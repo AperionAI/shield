@@ -136,6 +136,11 @@ fn actual_attack_stays_a_hard_deny_in_cursor() {
 
 #[test]
 fn allowlisted_host_warns_only_when_unlisted() {
+    // A tainted <cwd>/.aperion-shield/session.json would turn the send into
+    // the tainted-exfil rule instead of a Warn.
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = Guard;
+    set_path_override(Some(tmp.path().join("session.json")));
     let mut engine = Engine::builtin_default();
     engine.policy.egress.allow_hosts = vec!["api.openai.com".into()];
     let listed = engine.evaluate(
