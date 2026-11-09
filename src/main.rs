@@ -2764,21 +2764,26 @@ fn spool_hook_decision(decision: &Decision, rule_id: Option<&str>, tool: &str, r
 }
 
 /// The hook ships its own record. No side process has to be running.
+/// Runs on its own thread: the hook paths are called from inside the
+/// `#[tokio::main]` runtime, where a nested `block_on` panics.
 fn ship_hook_spool() {
-    let Ok(Some(state)) = OrgState::load() else { return };
-    let Ok(spool) = orgmode::spool::Spool::open() else { return };
-    let api = OrgApi::from_state(&state);
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
-        return;
-    };
-    let shipped = rt.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(4), spool.forward(&api)).await
+    let worker = std::thread::spawn(|| {
+        let Ok(Some(state)) = OrgState::load() else { return };
+        let Ok(spool) = orgmode::spool::Spool::open() else { return };
+        let api = OrgApi::from_state(&state);
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            return;
+        };
+        let shipped = rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(4), spool.forward(&api)).await
+        });
+        match shipped {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => eprintln!("[shield] audit ship failed: {e}"),
+            Err(_) => eprintln!("[shield] audit ship timed out"),
+        }
     });
-    match shipped {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => eprintln!("[shield] audit ship failed: {e}"),
-        Err(_) => eprintln!("[shield] audit ship timed out"),
-    }
+    let _ = worker.join();
 }
 
 const TOOL_RECORD_CAP: usize = 8_000;

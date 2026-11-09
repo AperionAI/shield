@@ -27,6 +27,8 @@ const LOCK: &str = "lock";
 const SEND_LOCK: &str = "send.lock";
 pub const GENESIS: &str = "genesis";
 const BATCH: usize = 200;
+/// Smartflow reads the events body as raw bytes, which actix caps at 256 KiB.
+const BATCH_BYTES: u64 = 192 * 1024;
 /// Fully-sent spool files past this size are truncated.
 const COMPACT_BYTES: u64 = 1 << 20;
 
@@ -155,6 +157,9 @@ impl Spool {
             line.clear();
             let n = rd.read_line(&mut line)?;
             if n == 0 || !line.ends_with('\n') {
+                break;
+            }
+            if !out.is_empty() && end - start + n as u64 > BATCH_BYTES {
                 break;
             }
             end += n as u64;
@@ -292,5 +297,27 @@ mod tests {
         let next = s.pending(10).unwrap().0;
         assert_eq!(next.len(), 1);
         assert_eq!(next[0]["prev_hash"], batch[0]["hash"]);
+    }
+
+    #[test]
+    fn large_records_split_under_the_server_body_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Spool::at(tmp.path().to_path_buf()).unwrap();
+        for i in 0..60 {
+            let mut e = ev(&format!("r{i}"));
+            e.context = json!({"text": "x".repeat(8_000)});
+            s.append(&e).unwrap();
+        }
+        let mut total = 0;
+        loop {
+            let (batch, end) = s.pending(BATCH).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            assert!(serde_json::to_vec(&batch).unwrap().len() < 256 * 1024);
+            total += batch.len();
+            s.ack(end).unwrap();
+        }
+        assert_eq!(total, 60);
     }
 }
