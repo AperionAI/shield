@@ -28,6 +28,7 @@ pub mod explain;
 pub mod guard;
 pub mod hooks;
 pub mod identity;
+pub mod install_path;
 pub mod memory;
 pub mod orgmode;
 pub mod predicates;

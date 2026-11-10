@@ -814,6 +814,14 @@ aperion-shield --install-agent-hooks
 See [docs/INSTALL.md](docs/INSTALL.md) if `shield-get.aperion.ai` is not
 resolving yet — the same script is on `main` as `install.sh`.
 
+Hooks, managed settings, Claude Desktop config and the guard all point
+at the installed `aperion-shield`. If you run one of those commands from
+a cargo `target/debug` or `target/release` build, Shield writes the
+installed copy's path instead. A build path changes on every rebuild,
+and on macOS that means a keychain password prompt on every hook call.
+With nothing installed it refuses. To pin a build on purpose, set
+`APERION_SHIELD_BIN` to its path.
+
 ### Homebrew (macOS / Linux)
 
 ```bash

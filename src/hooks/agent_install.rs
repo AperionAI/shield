@@ -171,10 +171,13 @@ fn which_shield() -> Option<PathBuf> {
             .map(|n| n.starts_with("aperion-shield"))
             .unwrap_or(false)
         {
-            return Some(exe);
+            match crate::install_path::stable_bin() {
+                Ok(bin) => return Some(bin),
+                Err(e) => eprintln!("[shield] {e}"),
+            }
         }
     }
-    which_on_path("aperion-shield")
+    which_on_path("aperion-shield").filter(|p| !crate::install_path::is_build_output(p))
 }
 
 fn which_on_path(bin: &str) -> Option<PathBuf> {

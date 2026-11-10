@@ -86,8 +86,7 @@ pub fn for_enrolled(state: &OrgState, extra_ca: Option<&Path>) -> anyhow::Result
             cert.display()
         );
     }
-    let bin = std::env::current_exe()?;
-    let bin = bin.canonicalize().unwrap_or(bin);
+    let bin = crate::install_path::stable_bin()?;
     Ok(render(state, &bin, &cert, &key, extra_ca))
 }
 
@@ -164,14 +163,12 @@ pub fn render_codex_requirements(bin: &Path) -> String {
 }
 
 pub fn codex_for_enrolled() -> anyhow::Result<String> {
-    let bin = std::env::current_exe()?;
-    let bin = bin.canonicalize().unwrap_or(bin);
+    let bin = crate::install_path::stable_bin()?;
     Ok(render_codex_requirements(&bin))
 }
 
 pub fn cursor_for_enrolled() -> anyhow::Result<Value> {
-    let bin = std::env::current_exe()?;
-    let bin = bin.canonicalize().unwrap_or(bin);
+    let bin = crate::install_path::stable_bin()?;
     Ok(render_cursor(&bin))
 }
 

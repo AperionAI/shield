@@ -1251,8 +1251,8 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
     if cli.install_watchdog {
-        let bin = std::env::current_exe()?;
-        let path = aperion_shield::watchdog::install(&bin.canonicalize().unwrap_or(bin))?;
+        let bin = aperion_shield::install_path::stable_bin()?;
+        let path = aperion_shield::watchdog::install(&bin)?;
         eprintln!("[shield] watchdog installed: {}", path.display());
         std::process::exit(0);
     }
@@ -2992,7 +2992,7 @@ fn run_install_guard(cli: &Cli) -> anyhow::Result<i32> {
         .clone()
         .or_else(dirs::home_dir)
         .ok_or_else(|| anyhow::anyhow!("couldn't resolve home directory"))?;
-    let bin = std::env::current_exe()?;
+    let bin = aperion_shield::install_path::stable_bin()?;
     let path = install_unit(&home, &bin, cli.agent_home.is_none())?;
     eprintln!("[shield] watcher unit: {}", path.display());
     if cli.agent_home.is_some() {

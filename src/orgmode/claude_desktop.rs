@@ -43,8 +43,7 @@ pub fn default_dir() -> PathBuf {
 /// Point Claude Desktop at this enrollment. Re-running updates the same
 /// file and leaves any other saved configurations in place.
 pub fn apply(state: &OrgState) -> anyhow::Result<PathBuf> {
-    let bin = std::env::current_exe().context("locate aperion-shield")?;
-    let bin = bin.canonicalize().unwrap_or(bin);
+    let bin = crate::install_path::stable_bin().context("locate aperion-shield")?;
     write_config(&default_dir(), state.smartflow_url.trim_end_matches('/'), &bin)
 }
 
