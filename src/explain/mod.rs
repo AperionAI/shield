@@ -66,8 +66,8 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
 
-use crate::engine::Engine;
-use crate::{decide, Adjustments, BurstDetector, WorkspaceContext};
+use crate::engine::{Engine, Evaluation};
+use crate::{decide, Adjustments, BurstDetector, Decision, WorkspaceContext};
 
 /// Options that shape an explain run beyond just the input descriptor.
 /// Defaults mirror the engine's behaviour on a vanilla `tools/call`
@@ -143,20 +143,32 @@ pub fn explain(
     descriptor: &ToolCallDescriptor,
     opts: &ExplainOptions,
 ) -> Result<render::ExplainReport> {
-    // Build the canonical MCP-style call: `{"name":..., "arguments":...}`.
-    // The engine's matcher inspects the raw params, not the wrapped form.
-    let canonical = serde_json::json!({
-        "name": descriptor.tool,
-        "arguments": descriptor.arguments,
-    });
-
     let adj = build_adjustments(engine, opts)?;
 
-    let eval = engine.evaluate(&descriptor.tool, &canonical, adj.clone());
-    let decision = decide(&eval);
+    // Same name mapping as `--check-hook`, so `Bash`, `Write` or
+    // `mcp__db__query` explain the way the hook would decide them.
+    let calls = crate::hooks::agent::canonical_calls(&descriptor.tool, &descriptor.arguments);
+    let mut picked: Option<(String, Evaluation, Decision)> = None;
+    for (tool, params) in &calls {
+        let eval = engine.evaluate(tool, params, adj);
+        let decision = decide(&eval);
+        let better = match &picked {
+            None => true,
+            Some((_, _, best)) => {
+                crate::hooks::agent::rank_decision(&decision)
+                    > crate::hooks::agent::rank_decision(best)
+            }
+        };
+        if better {
+            picked = Some((tool.clone(), eval, decision));
+        }
+    }
+    let (evaluated_as, eval, decision) =
+        picked.ok_or_else(|| anyhow!("no tool call to evaluate"))?;
 
     Ok(render::ExplainReport {
         descriptor: descriptor.clone(),
+        evaluated_as,
         adjustments: adj,
         evaluation: eval,
         decision,
@@ -274,6 +286,24 @@ mod tests {
             report.decision,
             crate::Decision::Block { .. } | crate::Decision::Approval { .. }
         ));
+    }
+
+    #[test]
+    fn claude_tool_names_explain_like_the_hook() {
+        let engine = Engine::builtin_default();
+        for name in ["Bash", "bash", "shell"] {
+            let d = ToolCallDescriptor::from_json(
+                json!({"name": name, "arguments": {"command": "rm -rf /"}}),
+            )
+            .unwrap();
+            let report = explain(&engine, &d, &ExplainOptions::default()).unwrap();
+            assert_eq!(report.evaluated_as, "shell", "{name}");
+            assert!(
+                matches!(report.decision, crate::Decision::Block { .. }),
+                "{name}: {:?}",
+                report.decision
+            );
+        }
     }
 
     #[test]

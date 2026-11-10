@@ -46,6 +46,8 @@ impl ExplainFormat {
 #[derive(Debug, Clone)]
 pub struct ExplainReport {
     pub descriptor: ToolCallDescriptor,
+    /// Engine tool name the decision came from (`Bash` -> `shell`).
+    pub evaluated_as: String,
     pub adjustments: Adjustments,
     pub evaluation: Evaluation,
     pub decision: Decision,
@@ -82,7 +84,14 @@ fn render_text(r: &ExplainReport) -> String {
     let mut out = String::new();
     out.push_str("shield --explain\n");
     out.push_str("────────────────\n");
-    out.push_str(&format!("tool   : {}\n", r.descriptor.tool));
+    if r.evaluated_as == r.descriptor.tool {
+        out.push_str(&format!("tool   : {}\n", r.descriptor.tool));
+    } else {
+        out.push_str(&format!(
+            "tool   : {} (evaluated as {})\n",
+            r.descriptor.tool, r.evaluated_as
+        ));
+    }
     let args_one_line = r
         .descriptor
         .arguments
@@ -168,6 +177,9 @@ fn render_markdown(r: &ExplainReport) -> String {
         "| field | value |\n|---|---|\n| tool | `{}` |\n",
         r.descriptor.tool
     ));
+    if r.evaluated_as != r.descriptor.tool {
+        out.push_str(&format!("| evaluated as | `{}` |\n", r.evaluated_as));
+    }
     let args_one_line = r
         .descriptor
         .arguments
@@ -265,6 +277,7 @@ fn md_escape_table(s: &str) -> String {
 #[derive(Debug, Serialize)]
 pub struct ExplainJson<'a> {
     pub tool: &'a str,
+    pub evaluated_as: &'a str,
     pub arguments: &'a Value,
     pub rules_matched: Vec<RuleMatchJson>,
     pub adjustments_applied: Vec<&'static str>,
@@ -400,6 +413,7 @@ fn render_json(r: &ExplainReport) -> String {
         .collect();
     let report = ExplainJson {
         tool: &r.descriptor.tool,
+        evaluated_as: &r.evaluated_as,
         arguments: &r.descriptor.arguments,
         rules_matched,
         adjustments_applied: r.evaluation.adjustments_applied.clone(),
@@ -671,6 +685,7 @@ mod tests {
     fn exit_code_mirrors_check_cmd_policy() {
         let allow = ExplainReport {
             descriptor: ToolCallDescriptor::from_json(json!({"name": "x"})).unwrap(),
+            evaluated_as: "x".into(),
             adjustments: Adjustments::default(),
             evaluation: Evaluation {
                 matches: vec![],

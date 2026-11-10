@@ -1490,7 +1490,7 @@ async fn main() -> anyhow::Result<()> {
                             "{}:{}{}",
                             p.id,
                             match p.kind {
-                                ProviderKind::IdMe => "id_me",
+                                ProviderKind::IdMe => "oidc_biometric",
                                 ProviderKind::Mock => "mock",
                             },
                             if matches!(p.kind, ProviderKind::IdMe) && !is_idme_ready(p) {
@@ -4103,7 +4103,7 @@ async fn handle_identity_decision(
                 "rule_id": rule_id,
                 "provider": provider.id(),
                 "reason": format!(
-                    "Provider '{}' is not yet activated. For id_me, set the env vars referenced by client_id_env / client_secret_env in identity.yaml.",
+                    "Provider '{}' is not yet activated. For oidc_biometric, set the env vars referenced by client_id_env / client_secret_env in identity.yaml.",
                     provider.id()
                 ),
                 "fingerprint": fp,
@@ -4265,10 +4265,10 @@ async fn run_identity_list(cli: &Cli) -> anyhow::Result<()> {
             }
         };
         println!(
-            "  - id={:<10} kind={:<6} sandbox={:<5} -- {}",
+            "  - id={:<10} kind={:<14} sandbox={:<5} -- {}",
             p.id,
             match p.kind {
-                ProviderKind::IdMe => "id_me",
+                ProviderKind::IdMe => "oidc_biometric",
                 ProviderKind::Mock => "mock",
             },
             p.sandbox,

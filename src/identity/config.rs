@@ -19,9 +19,9 @@
 //!   hold_seconds: 120            # how long Shield blocks before
 //!                                #   returning "verify out-of-band"
 //!   providers:
-//!     - id: id_me                # required: matches rules[*].identity.provider
-//!       kind: id_me              # required: "id_me" | "mock"
-//!       sandbox: true            # talk to the ID.me sandbox host
+//!     - id: biometric            # required: matches rules[*].identity.provider
+//!       kind: oidc_biometric     # required: "oidc_biometric" | "mock"
+//!       sandbox: true            # talk to the provider's sandbox host
 //!       client_id_env: IDME_CLIENT_ID
 //!       client_secret_env: IDME_CLIENT_SECRET
 //!       scopes: ["openid", "ial2"]
@@ -136,6 +136,14 @@ impl ProviderConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     /// Build the URL, exchange the code, fetch userinfo from ID.me.
+    /// Written `oidc_biometric`; `id_me` and `idme` from older
+    /// identity.yaml files still parse.
+    #[serde(
+        rename = "oidc_biometric",
+        alias = "oidc-biometric",
+        alias = "id_me",
+        alias = "idme"
+    )]
     IdMe,
     /// Local "always verifies" provider used for tests and demos.
     Mock,
@@ -244,5 +252,19 @@ identity:
             vec!["openid".to_string(), "ial2".into()]
         );
         assert_eq!(c.providers[1].kind, ProviderKind::Mock);
+    }
+
+    #[test]
+    fn biometric_kind_and_old_names_parse() {
+        for kind in ["oidc_biometric", "oidc-biometric", "id_me", "idme"] {
+            let yaml =
+                format!("identity:\n  providers:\n    - id: biometric\n      kind: {kind}\n");
+            let c = IdentityConfig::from_yaml(&yaml).unwrap();
+            assert_eq!(c.providers[0].kind, ProviderKind::IdMe, "{kind}");
+        }
+        assert_eq!(
+            serde_yaml::to_string(&ProviderKind::IdMe).unwrap().trim(),
+            "oidc_biometric"
+        );
     }
 }

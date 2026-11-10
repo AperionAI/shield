@@ -1372,6 +1372,11 @@ Accepts either descriptor shape:
 | `{"name": ..., "arguments": ...}` | MCP-canonical (Cursor / Claude Code / etc.) |
 | `{"tool": ..., "params": ...}` | legacy / some custom tooling — still accepted |
 
+Agent tool names map the same way `--check-hook` maps them, so
+`{"name": "Bash", ...}` explains as `shell` and `Write` explains as a
+file write. The text output shows `tool   : Bash (evaluated as shell)`
+and the JSON output carries an `evaluated_as` field.
+
 ### Output formats
 
 ```bash
@@ -1534,7 +1539,7 @@ verification.
 | Provider           | Status        | Use it for                                    |
 |--------------------|---------------|-----------------------------------------------|
 | `mock`             | default       | Local dev / CI; instantly issues a proof      |
-| `idme`             | feature-gated | Biometric identity proofing over OIDC, IAL/AAL-graded |
+| `oidc_biometric`   | feature-gated | Biometric identity proofing over OIDC, IAL/AAL-graded (`id_me` still accepted) |
 | `smartflow`        | org mode only | Uses your Smartflow tenant's IdP (Okta / Auth0 / Azure AD / Google) as the relying party |
 | custom (trait impl)| any           | Implement `IdentityProvider` and link it in    |
 

@@ -846,7 +846,7 @@ fn hold_ask(mode: Option<&str>, decision: Decision) -> Decision {
     }
 }
 
-fn rank_decision(d: &Decision) -> u8 {
+pub(crate) fn rank_decision(d: &Decision) -> u8 {
     match d {
         Decision::Allow => 0,
         Decision::Warn { .. } => 1,

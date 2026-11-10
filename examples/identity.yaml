@@ -16,9 +16,9 @@
 #   - id: scm.commit_to_main
 #     ...
 #     identity:
-#       provider: id_me             # references one of the `providers[*].id` below
+#       provider: biometric         # references one of the `providers[*].id` below
 #       scope: scm.commit_to_main   # cache partition + audit scope
-#       allowed_subjects: ["[email protected]", "id_me|abc-123"]
+#       allowed_subjects: ["[email protected]", "biometric|abc-123"]
 #       max_proof_age_seconds: 900
 #       loa: 2
 #
@@ -46,12 +46,12 @@ identity:
   hold_seconds: 120
 
   providers:
-    # ── ID.me production / sandbox ────────────────────────────────
+    # ── Biometric OIDC (ID.me) production / sandbox ───────────────
     # Wires up the full OAuth 2.0 + PKCE flow. Stays in "unready"
     # state until both env vars below resolve to non-empty values
     # (Shield refuses to operate the gate with missing credentials).
-    - id: id_me
-      kind: id_me
+    - id: biometric
+      kind: oidc_biometric                # older files may say id_me; still accepted
       sandbox: true                       # use the idmelabs.com sandbox
       client_id_env: IDME_CLIENT_ID
       client_secret_env: IDME_CLIENT_SECRET
