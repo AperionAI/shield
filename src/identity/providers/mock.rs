@@ -4,7 +4,7 @@
 //!   * Integration tests (no external service, deterministic output).
 //!   * `aperion-shield --check` runs that need to exercise an
 //!     identity-gated rule without any browser interaction.
-//!   * Local demos before the ID.me sandbox is online.
+//!   * Local demos before a live provider is configured.
 //!
 //! Behaviour:
 //!   * [`begin`] returns a `verify_url` of the form

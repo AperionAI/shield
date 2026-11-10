@@ -2,7 +2,7 @@
 name = "aperion-shield"
 version = "1.24.2"
 edition = "2021"
-description = "Aperion Shield -- a local MCP guardrail for AI coding agents with optional biometric identity gates (ID.me). Standalone, free tier."
+description = "Aperion Shield -- a local MCP guardrail for AI coding agents, with optional biometric identity gates. Free, runs locally, source-available under the Elastic License 2.0."
 license = "Elastic-2.0"
 license-file = "LICENSE"
 authors = ["Aperion <support@aperion.ai>"]
@@ -65,7 +65,7 @@ similar = "2"
 # for normalising paths in the sensitive-path matcher.
 dirs = "5"
 
-# ── Identity-gated tool calls (ID.me partnership, v0.4+) ──────────────
+# ── Identity-gated tool calls (v0.4+) ─────────────────────────────────
 # All four crates are tiny pure-Rust dependencies; total binary growth
 # is < 200 KB. The HTTP client + server stay in-process so Shield never
 # has to talk to an external daemon.
@@ -84,7 +84,7 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful"] }
 http-body-util = "0.1"
 bytes = "1"
-# Outbound HTTPS for ID.me /oauth/token and /userinfo. rustls so we
+# Outbound HTTPS for the identity provider's /oauth/token and /userinfo. rustls so we
 # don't pick up a system OpenSSL dependency on Linux. v0.6.0 moved
 # reqwest 0.11 -> 0.12, which transitively pulls rustls 0.23 +
 # rustls-webpki >= 0.103.13 and closes RUSTSEC-2026-0098/-0099/-0104.

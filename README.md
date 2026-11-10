@@ -1,6 +1,6 @@
 # aperion-shield — local MCP guardrail for AI coding agents
 
-[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-blue.svg)](LICENSE)
+[![License: Elastic 2.0](https://img.shields.io/badge/License-Elastic%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-232%20lib%20passing-brightgreen.svg)](https://github.com/AperionAI/shield/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Faperionai%2Fshield-2496ed.svg)](https://github.com/AperionAI/shield/pkgs/container/shield)
@@ -51,7 +51,7 @@ project MCP + Skills, and `curl -fsSL https://shield-get.aperion.ai | sh`.
 
 Plus, when you need to prove **who** approved a destructive call —
 not just that *someone* did — Shield can gate selected rules behind
-**biometric identity verification** (ID.me, or a pluggable OIDC provider).
+**biometric identity verification** through a pluggable OIDC provider.
 And when you outgrow the single-machine model, the **same binary**
 enrolls into a Smartflow control plane with one command to pull
 org-wide policy, ship audit upstream, and use your existing IdP as
@@ -691,8 +691,8 @@ Two big additions and a breadth bump:
   [`SECURITY.md`](SECURITY.md) §4. `cargo audit` clean against an
   empty ignore list.
 - **OIDC callback server refactored** for the hyper 1.x API. The
-  `--identity-*` family (ID.me partnership, gated identity
-  verification rules) continues to work without any user-visible
+  `--identity-*` family (gated identity verification rules)
+  continues to work without any user-visible
   change. 7 end-to-end identity tests against a mock OIDC provider
   still pass post-refactor.
 - **Test count: 148** (was 133 in v0.5.0). The +15 is 4 new unit
@@ -707,8 +707,8 @@ Two big additions and a breadth bump:
 
 - **Identity gates** (new): selected high-blast-radius rules can now require a
   cryptographically-fresh proof of human identity *before* the call is forwarded.
-  Pluggable providers ship with a mock-friendly default; ID.me OIDC + an
-  optional local callback server lands behind a feature flag. Ed25519
+  Pluggable providers ship with a mock-friendly default; a biometric OIDC
+  provider and an optional local callback server land behind a feature flag. Ed25519
   signatures on every proof; cache lives under `~/.aperion-shield/proofs/`
   (mode 0600). See [Identity gates](#identity-gates-new-in-v05).
 - **Org mode** (new, opt-in): `aperion-shield --enroll --smartflow-url <URL>
@@ -783,8 +783,8 @@ result: fewer false-positive prompts on benign repeats, harder gates
 on the operations that matter, and a teach-as-you-go safer-alternative
 hint on every block.
 
-It is **free** (binary-only, no source distributed) and **standalone**. No
-cloud account required. The binary is the same size as `git` and runs
+It is **free**, **source-available** under the [Elastic License 2.0](LICENSE),
+and **standalone**. No cloud account required. The binary is the same size as `git` and runs
 on macOS, Linux, and Windows.
 
 The paid product, [Aperion Smartflow](https://aperion.ai), bundles
@@ -1083,7 +1083,7 @@ aperion-shield -- npx @modelcontextprotocol/server-postgres ... \
 ```
 
 (Org-mode users already have this server-side via the Smartflow
-control plane — `--suggest-rules` is for the OSS standalone tier.)
+control plane — `--suggest-rules` is for free standalone Shield.)
 
 ### Ask for suggestions
 
@@ -1534,7 +1534,7 @@ verification.
 | Provider           | Status        | Use it for                                    |
 |--------------------|---------------|-----------------------------------------------|
 | `mock`             | default       | Local dev / CI; instantly issues a proof      |
-| `idme`             | feature-gated | ID.me OIDC, IAL/AAL-graded biometric          |
+| `idme`             | feature-gated | Biometric identity proofing over OIDC, IAL/AAL-graded |
 | `smartflow`        | org mode only | Uses your Smartflow tenant's IdP (Okta / Auth0 / Azure AD / Google) as the relying party |
 | custom (trait impl)| any           | Implement `IdentityProvider` and link it in    |
 
@@ -1555,8 +1555,8 @@ aperion-shield --identity-list
 aperion-shield --identity-flush
 ```
 
-ID.me sandbox access is pending; until then the `mock` provider is the
-recommended default and the YAML schema is stable.
+The `mock` provider is the recommended default until a live provider is
+configured. The YAML schema is stable.
 
 ---
 
@@ -1604,9 +1604,9 @@ The control-plane code path **only activates once you enroll**. Without
 an enrollment token + Smartflow URL the org-mode subsystem stays
 inert -- Shield runs identically to the standalone configuration.
 
-Why ship the client code in the OSS binary? Because:
+Why ship the client code in free Shield? Because:
 
-1. It's the bridge to the paid product. Engineers exploring the OSS
+1. It's the bridge to the paid product. Engineers trying free Shield
    today should be able to read exactly how the upgrade works -- no
    binary swap, no re-install, no surprise dependencies. When their
    shop buys Smartflow, the laptops they already have keep running.
@@ -1620,7 +1620,7 @@ Why ship the client code in the OSS binary? Because:
 Smartflow itself (the control plane, the dashboards, the EU-AI-Act
 conformity console, the WORM audit chain) is a separate, commercial
 product at [aperion.ai](https://aperion.ai). The wire format the
-OSS client speaks is documented in
+free client speaks is documented in
 [`src/orgmode/mod.rs`](src/orgmode/mod.rs).
 
 ---
@@ -2126,7 +2126,7 @@ the answer.
 | `--check` mode (CI / corpus testing)                                   | ✅              | ✅               |
 | Native Claude/Cursor PreToolUse hooks (`--install-agent-hooks`)        | ✅              | ✅               |
 | `--scan-ide` (TrustFall project MCP + Skills)                          | ✅              | ✅               |
-| Identity gates -- mock provider + ID.me provider (feature-gated)       | ✅              | ✅               |
+| Identity gates -- mock provider + OIDC biometric provider (feature-gated) | ✅              | ✅               |
 | Org-mode **client** (`--enroll`, policy pull, audit stream, vkey)      | ✅              | ✅               |
 | Hosted approval queue + dashboard                                      | —               | ✅               |
 | Org-wide shieldset distribution + versioning                           | —               | ✅               |

@@ -26,8 +26,8 @@
 //! `identity:` block behaves exactly as it did pre-v0.4. The free
 //! standalone build ships both a fully-working `mock` provider (for
 //! integration tests and demos) and a stubbed `id_me` provider whose
-//! OAuth client is ready to activate the moment we receive sandbox
-//! credentials from the ID.me partner program.
+//! OAuth client is ready to activate once provider credentials
+//! are configured.
 //!
 //! Module layout:
 //!

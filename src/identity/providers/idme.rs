@@ -10,7 +10,7 @@
 //!   * `client_secret` resolves from the env var named in
 //!     `client_secret_env` (default `IDME_CLIENT_SECRET`).
 //!
-//! Once you have sandbox credentials from the ID.me partner program,
+//! Once you have sandbox credentials from the provider,
 //! drop them into the environment and Shield's `[shield]` startup
 //! banner will switch from `idme=stubbed` to `idme=ready`.
 //!

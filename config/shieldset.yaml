@@ -1950,7 +1950,7 @@ shieldset:
       reason: "Tool result instructs the agent to read credential files -- injection-driven exfiltration."
 
     # ═════════════════════════════════════════════════════════════════
-    # IDENTITY-GATED RULES (v0.4+) -- ID.me biometric verification
+    # IDENTITY-GATED RULES (v0.4+) -- biometric identity verification
     # ─────────────────────────────────────────────────────────────────
     # Rules with an `identity:` block emit a new `IdentityVerification`
     # decision when matched. The MCP middleman looks up the local
@@ -1964,8 +1964,8 @@ shieldset:
     # able to authorise the action. Use `"*"` to allow any verified user.
     #
     # Provider config lives in `~/.aperion-shield/identity.yaml` (see
-    # the bundled `examples/identity.yaml` for a starter). Until the
-    # ID.me sandbox is wired up, point `provider: mock` at the always-
+    # the bundled `examples/identity.yaml` for a starter). Until a live
+    # provider is configured, point `provider: mock` at the always-
     # verifies mock so you can exercise the full flow end-to-end.
     # ═════════════════════════════════════════════════════════════════
 
@@ -1986,7 +1986,7 @@ shieldset:
     #       - "[email protected]"
     #     max_proof_age_seconds: 900
     #     loa: 2
-    #   reason: "Commits / pushes to main require biometric ID.me verification."
+    #   reason: "Commits / pushes to main require biometric identity verification."
     #   safer_alternative: "Open a PR from a feature branch instead of committing directly."
 
     # - id: db.production_apply
@@ -2041,7 +2041,7 @@ shieldset:
     #     allowed_subjects: ["[email protected]"]
     #     max_proof_age_seconds: 300
     #     loa: 3
-    #   reason: "Changing IAM users, roles, policies, or bindings is privilege escalation and requires an LOA-3 biometric ID.me verification."
+    #   reason: "Changing IAM users, roles, policies, or bindings is privilege escalation and requires an LOA-3 biometric identity verification."
     #   safer_alternative: "Grant the minimum scoped role on a single resource and have a second human review the IAM change in a PR."
 
     # - id: deploy.production_requires_identity
@@ -2061,7 +2061,7 @@ shieldset:
     #     allowed_subjects: ["*"]              # any verified operator on the team
     #     max_proof_age_seconds: 600
     #     loa: 2
-    #   reason: "Deploying to a production environment requires biometric ID.me verification of the operator."
+    #   reason: "Deploying to a production environment requires biometric identity verification of the operator."
     #   safer_alternative: "Promote through a staging environment first, or deploy via a reviewed CI pipeline rather than an ad-hoc command."
 
     # - id: finance.transfer_requires_identity
@@ -2082,5 +2082,5 @@ shieldset:
     #     allowed_subjects: ["[email protected]"]
     #     max_proof_age_seconds: 120
     #     loa: 3
-    #   reason: "Initiating a money movement (wire, ACH, payout, or on-chain transfer) requires a fresh LOA-3 biometric ID.me verification."
+    #   reason: "Initiating a money movement (wire, ACH, payout, or on-chain transfer) requires a fresh LOA-3 biometric identity verification."
     #   safer_alternative: "Route the payment through an approval queue with dual control, or stage it as a draft for a second authoriser to release."
