@@ -1,6 +1,6 @@
 [package]
 name = "aperion-shield"
-version = "1.25.0"
+version = "1.25.1"
 edition = "2021"
 description = "Aperion Shield -- a local MCP guardrail for AI coding agents, with optional biometric identity gates. Free, runs locally, source-available under the Elastic License 2.0."
 license = "Elastic-2.0"

@@ -23,6 +23,7 @@ pub fn stable_bin() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let exe = exe.canonicalize().unwrap_or(exe);
     let (bin, swapped) = pick(explicit, exe.clone(), &installed_candidates())?;
+    let bin = unversioned(bin);
     if swapped {
         eprintln!(
             "[shield] {} is a build folder. Writing the installed copy instead: {}",
@@ -72,6 +73,28 @@ fn pick(
                 exe.display()
             )
         })
+}
+
+/// Homebrew keeps each version in `<prefix>/Cellar/<formula>/<version>/`
+/// and deletes it on the next upgrade, so use the `<prefix>/bin` link.
+fn unversioned(bin: PathBuf) -> PathBuf {
+    let parts: Vec<_> = bin.components().collect();
+    let Some(i) = parts.iter().position(|c| c.as_os_str() == "Cellar") else {
+        return bin;
+    };
+    let Some(name) = bin.file_name() else {
+        return bin;
+    };
+    let link: PathBuf = parts[..i]
+        .iter()
+        .collect::<PathBuf>()
+        .join("bin")
+        .join(name);
+    if link.exists() {
+        link
+    } else {
+        bin
+    }
 }
 
 fn installed_candidates() -> Vec<PathBuf> {
@@ -143,6 +166,26 @@ mod tests {
         let exe = touch(t.path(), "repo/target/debug/aperion-shield");
         let err = pick(None, exe, &[]).unwrap_err().to_string();
         assert!(err.contains("APERION_SHIELD_BIN"), "{err}");
+    }
+
+    #[test]
+    fn homebrew_cellar_path_becomes_the_bin_link() {
+        let t = tempfile::tempdir().unwrap();
+        let cellar = touch(
+            t.path(),
+            "brew/Cellar/aperion-shield/1.25.0/bin/aperion-shield",
+        );
+        let link = touch(t.path(), "brew/bin/aperion-shield");
+        assert_eq!(unversioned(cellar), link);
+
+        let lone = touch(
+            t.path(),
+            "other/Cellar/aperion-shield/1.25.0/bin/aperion-shield",
+        );
+        assert_eq!(unversioned(lone.clone()), lone);
+
+        let plain = touch(t.path(), "usr/local/bin/aperion-shield");
+        assert_eq!(unversioned(plain.clone()), plain);
     }
 
     #[test]
