@@ -808,6 +808,14 @@ struct Cli {
     #[arg(long, conflicts_with = "upstream", conflicts_with = "check")]
     claude_managed_settings: bool,
 
+    /// Send Claude Code through Smartflow on the person's own Claude
+    /// subscription. Same managed settings minus `apiKeyHelper`: the
+    /// gateway logs and checks the calls but doesn't charge a cap. Writes
+    /// the OS location unless `--managed-settings-out` says otherwise
+    /// (needs admin rights).
+    #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "cursor_managed_hooks", conflicts_with = "codex_managed_requirements")]
+    claude_own_subscription: bool,
+
     /// Print Cursor's system (MDM) hooks.json running Shield. User and
     /// project hooks can't override a deny from it.
     #[arg(long, conflicts_with = "upstream", conflicts_with = "check", conflicts_with = "claude_managed_settings")]
@@ -826,7 +834,7 @@ struct Cli {
 
     /// Corporate CA bundle for the gateway's server certificate, set as
     /// `NODE_EXTRA_CA_CERTS` in the managed settings.
-    #[arg(long, value_name = "PATH", requires = "claude_managed_settings")]
+    #[arg(long, value_name = "PATH")]
     gateway_ca: Option<PathBuf>,
 
     /// Smartflow control-plane base URL, e.g.
@@ -1353,19 +1361,23 @@ async fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    if cli.claude_managed_settings || cli.cursor_managed_hooks {
+    if cli.claude_managed_settings || cli.cursor_managed_hooks || cli.claude_own_subscription {
         let state = OrgState::load()?.ok_or_else(|| anyhow!("not enrolled"))?;
         let (settings, default_path, label) = if cli.cursor_managed_hooks {
             (orgmode::claude_managed::cursor_for_enrolled()?, orgmode::claude_managed::cursor_default_path(), "Cursor system hooks")
         } else {
             (
-                orgmode::claude_managed::for_enrolled(&state, cli.gateway_ca.as_deref())?,
+                orgmode::claude_managed::for_enrolled(&state, cli.gateway_ca.as_deref(), cli.claude_own_subscription)?,
                 orgmode::claude_managed::default_path(),
                 "Claude Code managed settings",
             )
         };
         let body = serde_json::to_string_pretty(&settings)? + "\n";
-        match cli.managed_settings_out.as_deref() {
+        let out = cli
+            .managed_settings_out
+            .as_deref()
+            .or(cli.claude_own_subscription.then_some("default"));
+        match out {
             None => print!("{body}"),
             Some(out) => {
                 let path = if out == "default" {
