@@ -223,6 +223,27 @@ pub fn detect_dialect(event: &HookEvent) -> HookDialect {
     HookDialect::Claude
 }
 
+/// Which program ran the hook, independent of the reply dialect. Cursor runs
+/// hooks from Claude Code's settings too, and those arrive as `PreToolUse`,
+/// so the dialect alone would count Cursor work as Claude Code.
+pub fn detect_host(raw: &str, dialect: HookDialect) -> &'static str {
+    let env_cursor = std::env::var("CURSOR_VERSION").map(|v| !v.is_empty()).unwrap_or(false);
+    host_from(raw, dialect, env_cursor)
+}
+
+fn host_from(raw: &str, dialect: HookDialect, env_cursor: bool) -> &'static str {
+    let payload_cursor = serde_json::from_str::<Value>(raw.trim())
+        .ok()
+        .and_then(|v| v.get("cursor_version").cloned())
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+    if env_cursor || payload_cursor || dialect == HookDialect::Cursor {
+        "cursor"
+    } else {
+        "claude"
+    }
+}
+
 /// Result the CLI uses to print JSON + pick an exit code.
 #[derive(Debug, Clone)]
 pub struct HookReport {
@@ -1220,6 +1241,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(detect_dialect(&event), HookDialect::Cursor);
+    }
+
+    #[test]
+    fn host_is_cursor_for_claude_format_hooks_run_by_cursor() {
+        let raw = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cursor_version":"3.1.0"}"#;
+        assert_eq!(host_from(raw, HookDialect::Claude, false), "cursor");
+        let bare = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
+        assert_eq!(host_from(bare, HookDialect::Claude, true), "cursor");
+    }
+
+    #[test]
+    fn host_is_claude_for_claude_code() {
+        let raw = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"s1"}"#;
+        assert_eq!(host_from(raw, HookDialect::Claude, false), "claude");
+        assert_eq!(host_from("not json", HookDialect::Claude, false), "claude");
+        assert_eq!(host_from(raw, HookDialect::Cursor, false), "cursor");
     }
 
     #[test]

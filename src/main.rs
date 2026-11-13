@@ -2714,6 +2714,7 @@ fn run_check_hook(cli: &Cli) -> anyhow::Result<i32> {
             HookDialect::Claude => "claude",
             HookDialect::Cursor => "cursor",
         },
+        "host": aperion_shield::hooks::agent::detect_host(&raw, report.dialect),
     });
     eprintln!("{}", audit_record);
     spool_hook_decision(
@@ -2924,6 +2925,7 @@ fn run_check_hook_post(cli: &Cli) -> anyhow::Result<i32> {
             aperion_shield::hooks::agent::HookDialect::Claude => "claude",
             aperion_shield::hooks::agent::HookDialect::Cursor => "cursor",
         },
+        "host": aperion_shield::hooks::agent::detect_host(&raw, report.dialect),
     });
     eprintln!("{}", audit_record);
     let rule_id = match &report.decision {
