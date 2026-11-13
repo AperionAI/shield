@@ -256,6 +256,7 @@ pub struct HookReport {
     pub stdout: String,
     /// False on host events that only accept allow or deny.
     pub can_ask: bool,
+    pub event_name: Option<String>,
 }
 
 impl HookReport {
@@ -531,7 +532,13 @@ pub fn ask_floor(mut report: HookReport, rule_id: &str, reason: &str) -> HookRep
     );
     report.primary_rule_id = Some(rule_id.to_string());
     report.reason = decision_reason(&report.decision);
-    report.stdout = render_stdout(report.dialect, &report.decision, &report.reason, Some(rule_id));
+    report.stdout = render_for_event(
+        report.event_name.as_deref(),
+        report.dialect,
+        &report.decision,
+        &report.reason,
+        Some(rule_id),
+    );
     report
 }
 
@@ -597,7 +604,7 @@ pub fn run_with_offload(
         } else if event
             .hook_event_name
             .as_deref()
-            .is_some_and(|n| n.eq_ignore_ascii_case("UserPromptSubmit"))
+            .is_some_and(is_prompt_event)
         {
             let prompt = event.task.clone().or(event.content.clone()).unwrap_or_default();
             tool_name = "UserPrompt".to_string();
@@ -731,7 +738,8 @@ pub fn run_with_offload(
 
     let reason = decision_reason(&best);
     let primary_rule_id = decision_rule_id(&best);
-    let stdout = render_stdout(dialect, &best, &reason, primary_rule_id.as_deref());
+    let event_name = event.hook_event_name.clone();
+    let stdout = render_for_event(event_name.as_deref(), dialect, &best, &reason, primary_rule_id.as_deref());
 
     Ok(HookReport {
         dialect,
@@ -742,6 +750,7 @@ pub fn run_with_offload(
         reason,
         stdout,
         can_ask,
+        event_name,
     })
 }
 
@@ -845,8 +854,37 @@ fn egress_approval() -> Decision {
 fn event_can_ask(event_name: Option<&str>) -> bool {
     !matches!(
         event_name.unwrap_or("").to_ascii_lowercase().as_str(),
-        "beforereadfile" | "beforetabfileread"
+        "beforereadfile" | "beforetabfileread" | "beforesubmitprompt"
     )
+}
+
+/// Claude Code calls it UserPromptSubmit; Cursor sends beforeSubmitPrompt,
+/// including when it runs hooks from Claude Code's settings.
+fn is_prompt_event(name: &str) -> bool {
+    name.eq_ignore_ascii_case("UserPromptSubmit") || name.eq_ignore_ascii_case("beforeSubmitPrompt")
+}
+
+/// Cursor's beforeSubmitPrompt answers with `continue`, not `permission`.
+fn render_prompt_stdout(decision: &Decision, reason: &str, rule_id: Option<&str>) -> String {
+    let out = match decision {
+        Decision::Block { .. } => json!({"continue": false, "user_message": reason_full(reason, rule_id)}),
+        _ => json!({"continue": true}),
+    };
+    out.to_string() + "\n"
+}
+
+fn render_for_event(
+    event_name: Option<&str>,
+    dialect: HookDialect,
+    decision: &Decision,
+    reason: &str,
+    rule_id: Option<&str>,
+) -> String {
+    if event_name.is_some_and(|n| n.eq_ignore_ascii_case("beforeSubmitPrompt")) {
+        render_prompt_stdout(decision, reason, rule_id)
+    } else {
+        render_stdout(dialect, decision, reason, rule_id)
+    }
 }
 
 fn hold_ask(mode: Option<&str>, can_ask: bool, decision: Decision) -> Decision {
@@ -941,6 +979,27 @@ mod tests {
         assert!(matches!(report.decision, Decision::Allow), "{:?}", report.decision);
         assert_eq!(report.tool_name, "UserPrompt");
         assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn cursor_prompt_event_is_read_as_a_prompt() {
+        let raw = r#"{"hook_event_name":"beforeSubmitPrompt","prompt":"Build me a date picker","attachments":[],"cursor_version":"3.29.15"}"#;
+        let event = HookEvent::from_json(raw).expect("parse");
+        let report = run(&engine(), &event, detect_dialect(&event), None).expect("run");
+        assert_eq!(report.tool_name, "UserPrompt");
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(report.stdout.trim(), r#"{"continue":true}"#);
+
+        let blocked = Decision::Block {
+            rule_id: "r".into(),
+            severity: Severity::High,
+            reason: "why".into(),
+            safer_alternative: None,
+            contributing_rules: Vec::new(),
+        };
+        let out = render_for_event(Some("beforeSubmitPrompt"), HookDialect::Claude, &blocked, "why", Some("r"));
+        assert!(out.contains("\"continue\":false"), "{out}");
+        assert!(out.contains("[r] why"), "{out}");
     }
 
     #[test]
