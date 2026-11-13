@@ -1,0 +1,10 @@
+{
+  "name": "aperion-shield",
+  "private": true,
+  "description": "Local guardrails for AI coding agents. Rust project; this file only carries license metadata for directories that read package.json.",
+  "license": "Elastic-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AperionAI/shield"
+  }
+}
