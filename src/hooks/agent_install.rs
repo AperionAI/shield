@@ -277,8 +277,10 @@ if errorlevel 1 (
   {missing_cmd}
 )
 :run
+set "{layer_env}=user"
 "%BIN%" {flag} --hook-dialect {dialect}
 "#,
+            layer_env = crate::hooks::agent::HOOK_LAYER_ENV,
             marker = APERION_AGENT_HOOK_MARKER,
             baked = baked_cmd,
             missing_cmd = missing_cmd,
@@ -304,8 +306,11 @@ fi
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
   {missing}
 fi
+export {layer_env}={layer}
 exec "$BIN" {flag} --hook-dialect {dialect}
 "#,
+        layer_env = crate::hooks::agent::HOOK_LAYER_ENV,
+        layer = "user",
         marker = APERION_AGENT_HOOK_MARKER,
         label = label,
         baked = shell_single_quote(&baked),
@@ -502,6 +507,7 @@ fn merge_cursor_hooks(
             ("beforeReadFile", true, false),
             ("beforeTabFileRead", true, false),
             ("subagentStart", true, false),
+            ("beforeSubmitPrompt", false, false),
             ("afterShellExecution", false, true),
             ("afterMCPExecution", false, true),
             ("postToolUse", false, true),

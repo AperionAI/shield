@@ -225,22 +225,67 @@ pub fn detect_dialect(event: &HookEvent) -> HookDialect {
 
 /// Which program ran the hook, independent of the reply dialect. Cursor runs
 /// hooks from Claude Code's settings too, and those arrive as `PreToolUse`,
-/// so the dialect alone would count Cursor work as Claude Code.
+/// so the dialect alone would count Cursor work as Claude Code. Only the
+/// payload counts: Claude Code started from Cursor's terminal can inherit
+/// Cursor's environment.
 pub fn detect_host(raw: &str, dialect: HookDialect) -> &'static str {
-    let env_cursor = std::env::var("CURSOR_VERSION").map(|v| !v.is_empty()).unwrap_or(false);
-    host_from(raw, dialect, env_cursor)
-}
-
-fn host_from(raw: &str, dialect: HookDialect, env_cursor: bool) -> &'static str {
     let payload_cursor = serde_json::from_str::<Value>(raw.trim())
         .ok()
         .and_then(|v| v.get("cursor_version").cloned())
         .map(|v| !v.is_null())
         .unwrap_or(false);
-    if env_cursor || payload_cursor || dialect == HookDialect::Cursor {
+    if payload_cursor || dialect == HookDialect::Cursor {
         "cursor"
     } else {
         "claude"
+    }
+}
+
+/// Set by the `--install-agent-hooks` wrappers so the binary knows it was
+/// started from the user-level hooks file, not the managed one.
+pub const HOOK_LAYER_ENV: &str = "APERION_SHIELD_HOOK_LAYER";
+
+fn file_runs_shield(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|s| s.contains("aperion-shield"))
+        .unwrap_or(false)
+}
+
+/// Cursor runs every hooks file it finds: managed, user, and Claude Code's.
+/// One Shield answer per event is enough, so the extra layers stand down.
+/// Order: managed Cursor hooks, then user Cursor hooks, then Claude Code's.
+pub fn is_duplicate_layer(raw: &str, dialect: HookDialect) -> bool {
+    if detect_host(raw, dialect) != "cursor" {
+        return false;
+    }
+    let managed = file_runs_shield(&crate::orgmode::claude_managed::cursor_default_path());
+    let user = dirs::home_dir()
+        .map(|h| file_runs_shield(&crate::hooks::agent_install::cursor_hooks_path(&h)))
+        .unwrap_or(false);
+    let from_user_layer = std::env::var(HOOK_LAYER_ENV).map(|v| v == "user").unwrap_or(false);
+    duplicate_for(dialect, from_user_layer, managed, user)
+}
+
+fn duplicate_for(dialect: HookDialect, from_user_layer: bool, managed: bool, user: bool) -> bool {
+    match dialect {
+        HookDialect::Claude => managed || user,
+        HookDialect::Cursor => from_user_layer && managed,
+    }
+}
+
+/// What a standing-down layer prints: a plain allow, so the layer that did
+/// the check decides.
+pub fn duplicate_stdout(raw: &str, dialect: HookDialect) -> String {
+    let event = serde_json::from_str::<Value>(raw.trim())
+        .ok()
+        .and_then(|v| v.get("hook_event_name").and_then(|n| n.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    if event.eq_ignore_ascii_case("beforeSubmitPrompt") {
+        return json!({"continue": true}).to_string() + "\n";
+    }
+    match dialect {
+        HookDialect::Claude => String::new(),
+        HookDialect::Cursor => json!({"permission": "allow"}).to_string() + "\n",
     }
 }
 
@@ -1326,9 +1371,32 @@ mod tests {
     #[test]
     fn host_is_cursor_for_claude_format_hooks_run_by_cursor() {
         let raw = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cursor_version":"3.1.0"}"#;
-        assert_eq!(host_from(raw, HookDialect::Claude, false), "cursor");
-        let bare = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
-        assert_eq!(host_from(bare, HookDialect::Claude, true), "cursor");
+        assert_eq!(detect_host(raw, HookDialect::Claude), "cursor");
+    }
+
+    #[test]
+    fn only_one_shield_layer_answers_in_cursor() {
+        // Claude Code's hooks stand down in Cursor once a Cursor layer runs Shield.
+        assert!(duplicate_for(HookDialect::Claude, false, true, false));
+        assert!(duplicate_for(HookDialect::Claude, false, false, true));
+        assert!(!duplicate_for(HookDialect::Claude, false, false, false));
+        // The user Cursor layer stands down only when the managed one runs Shield.
+        assert!(duplicate_for(HookDialect::Cursor, true, true, true));
+        assert!(!duplicate_for(HookDialect::Cursor, true, false, true));
+        // The managed layer never stands down.
+        assert!(!duplicate_for(HookDialect::Cursor, false, true, true));
+        // Claude Code itself is never treated as a duplicate.
+        let claude_code = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"s1"}"#;
+        assert!(!is_duplicate_layer(claude_code, HookDialect::Claude));
+    }
+
+    #[test]
+    fn standing_down_prints_an_allow_in_the_right_shape() {
+        let prompt = r#"{"hook_event_name":"beforeSubmitPrompt","prompt":"hi","cursor_version":"3"}"#;
+        assert_eq!(duplicate_stdout(prompt, HookDialect::Claude).trim(), r#"{"continue":true}"#);
+        let tool = r#"{"hook_event_name":"preToolUse","tool_name":"Shell","cursor_version":"3"}"#;
+        assert_eq!(duplicate_stdout(tool, HookDialect::Cursor).trim(), r#"{"permission":"allow"}"#);
+        assert_eq!(duplicate_stdout(tool, HookDialect::Claude), "");
     }
 
     #[test]
@@ -1357,9 +1425,9 @@ mod tests {
     #[test]
     fn host_is_claude_for_claude_code() {
         let raw = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"s1"}"#;
-        assert_eq!(host_from(raw, HookDialect::Claude, false), "claude");
-        assert_eq!(host_from("not json", HookDialect::Claude, false), "claude");
-        assert_eq!(host_from(raw, HookDialect::Cursor, false), "cursor");
+        assert_eq!(detect_host(raw, HookDialect::Claude), "claude");
+        assert_eq!(detect_host("not json", HookDialect::Claude), "claude");
+        assert_eq!(detect_host(raw, HookDialect::Cursor), "cursor");
     }
 
     #[test]

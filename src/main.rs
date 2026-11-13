@@ -2685,6 +2685,10 @@ fn run_check_hook(cli: &Cli) -> anyhow::Result<i32> {
         "auto" => detect_dialect(&event),
         other => HookDialect::parse(other)?,
     };
+    if aperion_shield::hooks::agent::is_duplicate_layer(&raw, dialect) {
+        print!("{}", aperion_shield::hooks::agent::duplicate_stdout(&raw, dialect));
+        return Ok(0);
+    }
     let (engine, ask_reason, enrolled) = hook_engine(cli)?;
     if hooks_disabled_by_env(enrolled) {
         if dialect == HookDialect::Cursor {
@@ -2904,6 +2908,9 @@ fn run_check_hook_post(cli: &Cli) -> anyhow::Result<i32> {
         Err(e) => return allow_unreadable_hook(&e),
     };
     let dialect = dialect_for(&event, &cli.hook_dialect)?;
+    if aperion_shield::hooks::agent::is_duplicate_layer(&raw, dialect) {
+        return Ok(0);
+    }
     let (engine, _, enrolled) = hook_engine(cli)?;
     if hooks_disabled_by_env(enrolled) {
         return Ok(0);

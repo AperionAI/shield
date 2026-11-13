@@ -141,6 +141,8 @@ pub fn render_cursor(bin: &Path) -> Value {
     ] {
         hooks.insert(ev.into(), json!([{"command": pre, "failClosed": true}]));
     }
+    // A prompt check that crashes must not lock the person out of chat.
+    hooks.insert("beforeSubmitPrompt".into(), json!([{"command": pre, "failClosed": false}]));
     for ev in ["afterShellExecution", "afterMCPExecution", "postToolUse"] {
         hooks.insert(ev.into(), json!([{"command": post, "failClosed": false}]));
     }
