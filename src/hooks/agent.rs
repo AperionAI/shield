@@ -254,6 +254,8 @@ pub struct HookReport {
     pub primary_rule_id: Option<String>,
     pub reason: String,
     pub stdout: String,
+    /// False on host events that only accept allow or deny.
+    pub can_ask: bool,
 }
 
 impl HookReport {
@@ -516,13 +518,17 @@ pub fn ask_floor(mut report: HookReport, rule_id: &str, reason: &str) -> HookRep
     if !matches!(report.decision, Decision::Allow | Decision::Warn { .. }) {
         return report;
     }
-    report.decision = Decision::Approval {
-        rule_id: rule_id.to_string(),
-        severity: Severity::High,
-        reason: reason.to_string(),
-        safer_alternative: None,
-        contributing_rules: Vec::new(),
-    };
+    report.decision = hold_ask(
+        None,
+        report.can_ask,
+        Decision::Approval {
+            rule_id: rule_id.to_string(),
+            severity: Severity::High,
+            reason: reason.to_string(),
+            safer_alternative: None,
+            contributing_rules: Vec::new(),
+        },
+    );
     report.primary_rule_id = Some(rule_id.to_string());
     report.reason = decision_reason(&report.decision);
     report.stdout = render_stdout(report.dialect, &report.decision, &report.reason, Some(rule_id));
@@ -720,7 +726,8 @@ pub fn run_with_offload(
     // skip the prompt if we exit 2 with `deny`. Auto mode drops `ask` on
     // the floor, so that decision becomes a deny there.
     best = soften_non_attack(engine, best);
-    best = hold_ask(event.permission_mode.as_deref(), best);
+    let can_ask = event_can_ask(event.hook_event_name.as_deref());
+    best = hold_ask(event.permission_mode.as_deref(), can_ask, best);
 
     let reason = decision_reason(&best);
     let primary_rule_id = decision_rule_id(&best);
@@ -734,6 +741,7 @@ pub fn run_with_offload(
         primary_rule_id,
         reason,
         stdout,
+        can_ask,
     })
 }
 
@@ -832,15 +840,28 @@ fn egress_approval() -> Decision {
 
 /// Auto, dontAsk, and bypassPermissions do not pause for `ask`. A policy
 /// that needed a person to say yes is a deny in those modes.
-fn hold_ask(mode: Option<&str>, decision: Decision) -> Decision {
+/// Cursor's file-read hooks accept only allow or deny. An `ask` there is an
+/// invalid response, and a fail-closed hook then blocks with no reason shown.
+fn event_can_ask(event_name: Option<&str>) -> bool {
+    !matches!(
+        event_name.unwrap_or("").to_ascii_lowercase().as_str(),
+        "beforereadfile" | "beforetabfileread"
+    )
+}
+
+fn hold_ask(mode: Option<&str>, can_ask: bool, decision: Decision) -> Decision {
     let dropped = matches!(
         mode.unwrap_or("").to_ascii_lowercase().as_str(),
         "auto" | "dontask" | "bypasspermissions"
     );
-    if !dropped {
+    if !dropped && can_ask {
         return decision;
     }
-    let note = "This session does not stop for approval, so the call was blocked.";
+    let note = if can_ask {
+        "This session does not stop for approval, so the call was blocked."
+    } else {
+        "Cursor cannot ask for approval on a file read, so the read was blocked."
+    };
     match decision {
         Decision::Approval {
             rule_id,
@@ -1249,6 +1270,29 @@ mod tests {
         assert_eq!(host_from(raw, HookDialect::Claude, false), "cursor");
         let bare = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
         assert_eq!(host_from(bare, HookDialect::Claude, true), "cursor");
+    }
+
+    #[test]
+    fn cursor_file_read_turns_ask_into_deny() {
+        let ask = Decision::Approval {
+            rule_id: "r".into(),
+            severity: Severity::High,
+            reason: "why".into(),
+            safer_alternative: None,
+            contributing_rules: Vec::new(),
+        };
+        assert!(!event_can_ask(Some("beforeReadFile")));
+        assert!(!event_can_ask(Some("beforeTabFileRead")));
+        assert!(event_can_ask(Some("preToolUse")));
+        assert!(event_can_ask(None));
+
+        let held = hold_ask(None, false, ask.clone());
+        assert!(matches!(held, Decision::Block { .. }));
+        let out = render_stdout(HookDialect::Cursor, &held, &decision_reason(&held), Some("r"));
+        assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        assert!(out.contains("file read"), "{out}");
+
+        assert!(matches!(hold_ask(None, true, ask), Decision::Approval { .. }));
     }
 
     #[test]

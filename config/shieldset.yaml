@@ -1944,8 +1944,8 @@ shieldset:
       where: tool_result
       match:
         text_matches:
-          - '(?i)\b(read|cat|open)\b.{0,40}(~|\$HOME)?/?\.ssh/id_[a-z0-9]+'
-          - '(?i)\b(read|cat|open)\b.{0,40}\.env\b'
+          - '(?i)\b(please|you (must|should|need to)|now|immediately|ignore (all|any|previous|prior) [^\n]{0,20}instructions)\b[^\n]{0,60}\b(read|cat|open|print|send|upload)\b[^\n]{0,40}[.]ssh/id_(rsa|ed25519|ecdsa|dsa)([^.a-z0-9]|$)'
+          - '(?i)\b(please|you (must|should|need to)|now|immediately|ignore (all|any|previous|prior) [^\n]{0,20}instructions)\b[^\n]{0,60}\b(read|cat|open|print|send|upload)\b[^\n]{0,40}[.]env\b'
           - '(?i)\bcurl\b.{0,60}--data\b.{0,40}\.(ssh|aws|env)\b'
       reason: "Tool result instructs the agent to read credential files -- injection-driven exfiltration."
 

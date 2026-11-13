@@ -659,11 +659,12 @@ impl CompiledRule {
                 if hit {
                     return;
                 }
-                if !crate::predicates::command_writes(s) {
+                let local = crate::predicates::local_command_view(s);
+                if !crate::predicates::command_writes(&local) {
                     return;
                 }
                 for sp in &m.sensitive_paths {
-                    if sp.touches(s) {
+                    if sp.touches(&local) {
                         hit = true;
                         return;
                     }

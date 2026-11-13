@@ -688,6 +688,195 @@ fn extract_paths(cmd: &str) -> Vec<String> {
 /// `head`, `tail`, `ls`, `find -print`, `wc`, `awk`, `sed -n`, ...) are
 /// NOT write verbs and return false here.
 ///
+/// The part of a shell command that acts on this machine. Drops the
+/// identity file given to ssh/scp/sftp/rsync (only read) and the remote
+/// command after `ssh host` (runs elsewhere). Local redirects after the
+/// ssh call, and remote text that the local shell expands (`$(...)`,
+/// backticks outside single quotes), are kept.
+pub fn local_command_view(cmd: &str) -> String {
+    if !["ssh", "scp", "sftp", "rsync"].iter().any(|p| cmd.contains(p)) {
+        return cmd.to_string();
+    }
+    let tokens = shell_tokens(cmd);
+    let mut out: Vec<&str> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let end = (i..tokens.len()).find(|&j| tokens[j].op).unwrap_or(tokens.len());
+        keep_local(&tokens[i..end], &mut out);
+        if end < tokens.len() {
+            out.push(tokens[end].text);
+        }
+        i = end + 1;
+    }
+    out.join(" ")
+}
+
+struct ShellToken<'a> {
+    text: &'a str,
+    op: bool,
+}
+
+fn shell_tokens(cmd: &str) -> Vec<ShellToken<'_>> {
+    let b = cmd.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b' ' || c == b'\t' {
+            i += 1;
+            continue;
+        }
+        let redirect_amp = c == b'&' && b.get(i + 1) == Some(&b'>');
+        if matches!(c, b';' | b'|' | b'&' | b'\n' | b'(' | b')') && !redirect_amp {
+            let len = if (c == b'|' || c == b'&') && b.get(i + 1) == Some(&c) { 2 } else { 1 };
+            tokens.push(ShellToken { text: &cmd[i..i + len], op: true });
+            i += len;
+            continue;
+        }
+        let start = i;
+        let mut quote: Option<u8> = None;
+        while i < b.len() {
+            let ch = b[i];
+            match quote {
+                Some(q) if ch == q => quote = None,
+                Some(b'"') if ch == b'\\' => i += 1,
+                Some(_) => {}
+                None if ch == b'\'' || ch == b'"' => quote = Some(ch),
+                None if ch == b'\\' => i += 1,
+                None if matches!(ch, b' ' | b'\t' | b';' | b'|' | b'\n' | b'(' | b')') => break,
+                None if ch == b'&' && b.get(i + 1) != Some(&b'>') && !(i > start && b[i - 1] == b'>') => break,
+                None => {}
+            }
+            i += 1;
+        }
+        let end = i.min(b.len());
+        tokens.push(ShellToken { text: &cmd[start..end], op: false });
+    }
+    tokens
+}
+
+fn is_redirect(word: &str) -> bool {
+    let w = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    w.starts_with('>') || w.starts_with("&>")
+}
+
+fn redirect_needs_target(word: &str) -> bool {
+    let w = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    matches!(w, ">" | ">>" | "&>" | "&>>" | ">|")
+}
+
+/// `$(...)` or backticks outside single quotes run on this machine.
+fn expands_locally(word: &str) -> bool {
+    let mut in_single = false;
+    let mut prev = 0u8;
+    for &ch in word.as_bytes() {
+        match ch {
+            b'\'' => in_single = !in_single,
+            b'`' if !in_single => return true,
+            b'(' if !in_single && prev == b'$' => return true,
+            _ => {}
+        }
+        prev = ch;
+    }
+    false
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=')
+        .map(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(false)
+}
+
+fn keep_local<'a>(seg: &[ShellToken<'a>], out: &mut Vec<&'a str>) {
+    let mut k = 0;
+    while let Some(t) = seg.get(k) {
+        if is_assignment(t.text) || matches!(t.text, "sudo" | "env" | "nohup" | "exec" | "command" | "time") {
+            out.push(t.text);
+            k += 1;
+        } else {
+            break;
+        }
+    }
+    let Some(first) = seg.get(k) else { return };
+    let prog = first.text.rsplit('/').next().unwrap_or(first.text);
+    // (options that take a value, options whose value is dropped)
+    let (arg_opts, dropped_opts) = match prog {
+        "ssh" => ("BbcDEeFIiJLlmOopQRSWw", "iFJo"),
+        "scp" | "sftp" => ("cDFiJlloPSX", "iFJo"),
+        "rsync" => ("", ""),
+        _ => {
+            out.extend(seg[k..].iter().map(|t| t.text));
+            return;
+        }
+    };
+    out.push(first.text);
+    let mut j = k + 1;
+    let mut remote = false;
+    while j < seg.len() {
+        let w = seg[j].text;
+        if remote {
+            if is_redirect(w) {
+                out.push(w);
+                if redirect_needs_target(w) {
+                    if let Some(t) = seg.get(j + 1) {
+                        out.push(t.text);
+                        j += 1;
+                    }
+                }
+            } else if expands_locally(w) {
+                out.push(w);
+            }
+            j += 1;
+            continue;
+        }
+        if prog == "rsync" {
+            if w == "-e" || w == "--rsh" {
+                j += 2;
+                continue;
+            }
+            if !w.starts_with("--rsh=") && !(w.starts_with("-e") && w.len() > 2) {
+                out.push(w);
+            }
+            j += 1;
+            continue;
+        }
+        if w == "--" {
+            if let Some(h) = seg.get(j + 1) {
+                out.push(h.text);
+            }
+            remote = prog == "ssh";
+            j += 2;
+            continue;
+        }
+        if w.len() > 1 && w.starts_with('-') && !w.starts_with("--") {
+            let mut takes_next = false;
+            let mut drop = false;
+            for (pos, ch) in w[1..].char_indices() {
+                if arg_opts.contains(ch) {
+                    drop = dropped_opts.contains(ch);
+                    takes_next = pos + ch.len_utf8() == w.len() - 1;
+                    break;
+                }
+            }
+            if !drop {
+                out.push(w);
+                if takes_next {
+                    if let Some(a) = seg.get(j + 1) {
+                        out.push(a.text);
+                    }
+                }
+            }
+            j += if takes_next { 2 } else { 1 };
+            continue;
+        }
+        out.push(w);
+        if !is_redirect(w) {
+            remote = prog == "ssh";
+        }
+        j += 1;
+    }
+}
+
 /// Used by `fs.sensitive_path_write_or_delete` and any future rule that
 /// pairs `sensitive_paths:` with the implied write-verb gate.
 pub fn command_writes(cmd: &str) -> bool {
