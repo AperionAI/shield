@@ -46,12 +46,12 @@ identity:
   hold_seconds: 120
 
   providers:
-    # ── Biometric OIDC (ID.me) production / sandbox ───────────────
+    # ── Biometric OIDC, production / sandbox ──────────────────────
     # Wires up the full OAuth 2.0 + PKCE flow. Stays in "unready"
     # state until both env vars below resolve to non-empty values
     # (Shield refuses to operate the gate with missing credentials).
     - id: biometric
-      kind: oidc_biometric                # older files may say id_me; still accepted
+      kind: oidc_biometric
       sandbox: true                       # use the idmelabs.com sandbox
       client_id_env: IDME_CLIENT_ID
       client_secret_env: IDME_CLIENT_SECRET

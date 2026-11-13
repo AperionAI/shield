@@ -1547,7 +1547,7 @@ verification.
 | Provider           | Status        | Use it for                                    |
 |--------------------|---------------|-----------------------------------------------|
 | `mock`             | default       | Local dev / CI; instantly issues a proof      |
-| `oidc_biometric`   | feature-gated | Biometric identity proofing over OIDC, IAL/AAL-graded (`id_me` still accepted) |
+| `oidc_biometric`   | feature-gated | Biometric identity proofing over OIDC, IAL/AAL-graded |
 | `smartflow`        | org mode only | Uses your Smartflow tenant's IdP (Okta / Auth0 / Azure AD / Google) as the relying party |
 | custom (trait impl)| any           | Implement `IdentityProvider` and link it in    |
 
