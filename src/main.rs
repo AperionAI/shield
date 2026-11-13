@@ -1646,7 +1646,10 @@ async fn main() -> anyhow::Result<()> {
     // complementary control for that threat model, not this one.
     if pinning_enabled && !cli.no_drift_check && cli.drift_check_interval_secs > 0 {
         let drift_shield = shield.clone();
-        let drift_to_upstream = to_upstream.clone();
+        // Weak: a strong clone here would keep the upstream channel open
+        // after the client disconnects, so the upstream never sees EOF and
+        // Shield never exits.
+        let drift_to_upstream = to_upstream.downgrade();
         let base_interval_secs = cli.drift_check_interval_secs;
         tokio::spawn(async move {
             tokio::time::sleep(jittered_drift_interval(base_interval_secs)).await;
@@ -1671,7 +1674,11 @@ async fn main() -> anyhow::Result<()> {
                     "jsonrpc": "2.0", "id": synthetic_id, "method": "tools/list"
                 })
                 .to_string();
-                if drift_to_upstream.send(req).await.is_err() {
+                let Some(drift_tx) = drift_to_upstream.upgrade() else {
+                    debug!("[shield] drift-check: upstream channel closed, stopping");
+                    break;
+                };
+                if drift_tx.send(req).await.is_err() {
                     debug!("[shield] drift-check: upstream channel closed, stopping");
                     break;
                 }
@@ -1773,7 +1780,7 @@ async fn main() -> anyhow::Result<()> {
         // tools/call result scan).
         let stdout_clone2 = stdout.clone();
         let shield_clone2 = shield.clone();
-        let from_upstream_handle = tokio::spawn(async move {
+        let mut from_upstream_handle = tokio::spawn(async move {
             while let Some(frame) = from_upstream.recv().await {
                 debug!("[shield] upstream -> {}", frame);
                 let Some(frame) = intercept_upstream_frame(frame, &shield_clone2).await else {
@@ -1792,7 +1799,21 @@ async fn main() -> anyhow::Result<()> {
         });
 
         let _ = to_upstream_handle.await;
-        let _ = from_upstream_handle.await;
+        // Client is gone. Let the upstream flush replies to anything already
+        // sent, but don't wait on it forever: some servers ignore stdin EOF.
+        let grace = std::time::Duration::from_secs(5);
+        if tokio::time::timeout(grace, &mut from_upstream_handle).await.is_err() {
+            debug!("[shield] upstream still open {:?} after client EOF, stopping it", grace);
+            if let Some(child) = child.as_mut() {
+                let _ = child.kill().await;
+            }
+            if tokio::time::timeout(std::time::Duration::from_secs(2), &mut from_upstream_handle)
+                .await
+                .is_err()
+            {
+                from_upstream_handle.abort();
+            }
+        }
     }
 
     if let Some(child) = child.as_mut() {
